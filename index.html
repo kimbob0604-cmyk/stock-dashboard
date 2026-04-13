@@ -2507,9 +2507,9 @@ function _fmtMarketCap(mn) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FLOW PAGE (Phase 9)
+// FLOW PAGE  —  종목별 최근 20 거래일 외국인/기관 순매수 (네이버 금융 크롤)
 // ─────────────────────────────────────────────────────────────────────────────
-const FLOW_STATE = { type: 'foreign_buy' };
+const FLOW_STATE = { code: null, name: null, reqToken: 0 };
 
 function renderFlowPage() {
   const root = document.getElementById('flow-view');
@@ -2517,66 +2517,262 @@ function renderFlowPage() {
     root.dataset.built = '1';
     root.innerHTML = `
       <div class="pg-wrap">
-        <div class="pg-title">투자자별 수급동향</div>
-        <div class="pg-sub">외국인·기관 매매 TOP (일 1회 갱신)</div>
-        <div class="pg-tabs" id="flow-tabs">
-          <button class="pg-tab active" data-t="foreign_buy">외국인 순매수</button>
-          <button class="pg-tab"        data-t="foreign_sell">외국인 순매도</button>
-          <button class="pg-tab"        data-t="inst_buy">기관 순매수</button>
-          <button class="pg-tab"        data-t="inst_sell">기관 순매도</button>
+        <div class="pg-title">종목별 수급동향</div>
+        <div class="pg-sub">최근 20 거래일 외국인·기관 순매수 · 네이버 금융 · 1시간 캐시</div>
+
+        <div class="cmp-input-group" style="max-width:460px; margin-bottom:16px;">
+          <label>종목 선택</label>
+          <div class="cmp-input-row">
+            <input class="cmp-search-input" type="text" id="flow-search"
+                   placeholder="종목명 또는 6자리 코드" autocomplete="off">
+            <button class="cmp-clear-btn" id="flow-clear">✕</button>
+          </div>
+          <div class="cmp-search-dropdown" id="flow-search-dd"></div>
         </div>
+
+        <div id="flow-summary"></div>
         <div id="flow-results"></div>
       </div>`;
-    document.getElementById('flow-tabs').addEventListener('click', (e) => {
-      const btn = e.target.closest('.pg-tab');
-      if (!btn) return;
-      document.querySelectorAll('#flow-tabs .pg-tab').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      FLOW_STATE.type = btn.dataset.t;
-      _flowFetch();
+
+    _bindFlowSearch();
+
+    document.getElementById('flow-clear').addEventListener('click', () => {
+      FLOW_STATE.code = FLOW_STATE.name = null;
+      document.getElementById('flow-search').value = '';
+      document.getElementById('flow-summary').innerHTML = '';
+      document.getElementById('flow-results').innerHTML =
+        '<div class="pg-empty">종목을 검색해 주세요.</div>';
     });
   }
+
+  if (!FLOW_STATE.code) {
+    // 테마맵에서 선택된 종목이 있으면 자동으로 띄움
+    if (APP.selectedTheme && APP.selectedTheme.stocks && APP.selectedTheme.stocks.length) {
+      const first = APP.selectedTheme.stocks[0];
+      FLOW_STATE.code = first.code;
+      FLOW_STATE.name = first.name;
+      document.getElementById('flow-search').value = `${first.name} (${first.code})`;
+      _flowFetch();
+    } else {
+      document.getElementById('flow-results').innerHTML =
+        '<div class="pg-empty">종목을 검색해 주세요.</div>';
+    }
+  } else {
+    _flowFetch();
+  }
+}
+
+function _bindFlowSearch() {
+  const inp = document.getElementById('flow-search');
+  const dd  = document.getElementById('flow-search-dd');
+  let timer;
+  inp.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = inp.value.trim();
+    if (q.length < 2) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
+    timer = setTimeout(async () => {
+      try {
+        const r   = await fetch(`/api/stock_search?q=${encodeURIComponent(q)}`);
+        const res = await r.json();
+        if (!res.length) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
+        dd.innerHTML = res.map(it =>
+          `<div class="cmp-search-result" data-code="${it.code}" data-name="${it.name}">
+            <span class="cmp-search-result-code">${it.code}</span>${it.name}
+          </div>`).join('');
+        dd.style.display = 'block';
+      } catch { dd.innerHTML = ''; dd.style.display = 'none'; }
+    }, 280);
+  });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const first = dd.querySelector('.cmp-search-result');
+      if (first) first.click();
+      else if (/^\d{6}$/.test(inp.value.trim())) {
+        _flowPick(inp.value.trim(), inp.value.trim());
+      }
+    }
+  });
+  dd.addEventListener('click', (e) => {
+    const row = e.target.closest('.cmp-search-result');
+    if (!row) return;
+    _flowPick(row.dataset.code, row.dataset.name);
+    inp.value = `${row.dataset.name} (${row.dataset.code})`;
+    dd.innerHTML = ''; dd.style.display = 'none';
+  });
+}
+
+function _flowPick(code, name) {
+  FLOW_STATE.code = code;
+  FLOW_STATE.name = name;
   _flowFetch();
 }
 
 async function _flowFetch() {
+  const { code, name } = FLOW_STATE;
+  if (!code) return;
+  const token = ++FLOW_STATE.reqToken;
+  const summary = document.getElementById('flow-summary');
   const results = document.getElementById('flow-results');
+  summary.innerHTML = '';
   results.innerHTML = '<div class="pg-empty">조회 중…</div>';
+
   try {
-    const r = await fetch(`/api/flow?type=${FLOW_STATE.type}`);
+    const r = await fetch(`/api/flow/${code}`);
     const d = await r.json();
+    if (token !== FLOW_STATE.reqToken) return;
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
 
-    const rows = (d.stocks || []).map((s, i) => `
-      <tr data-code="${s.code}" data-name="${s.name}">
+    // ── 요약 카드: 20일 누적 ──
+    const fmtEok = (v) => {
+      const eok = v / 1e8;
+      const sign = eok > 0 ? '+' : '';
+      return `${sign}${eok.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}억`;
+    };
+    const col = (v) => v > 0 ? '#FF3333' : v < 0 ? '#33AA33' : 'var(--text-muted)';
+    summary.innerHTML = `
+      <div class="cmp-cards" style="margin-bottom:14px;">
+        <div class="cmp-card">
+          <div class="cmp-card-code">${d.code}  ·  20거래일 외국인 순매수</div>
+          <div class="cmp-card-name">${d.name}</div>
+          <div class="cmp-card-price" style="color:${col(d.foreign_sum_20)}">
+            ${fmtEok(d.foreign_sum_20)}
+          </div>
+        </div>
+        <div class="cmp-card">
+          <div class="cmp-card-code">20거래일 기관 순매수</div>
+          <div class="cmp-card-name">${d.name}</div>
+          <div class="cmp-card-price" style="color:${col(d.inst_sum_20)}">
+            ${fmtEok(d.inst_sum_20)}
+          </div>
+        </div>
+      </div>
+      <div class="cmp-canvas-wrap">
+        <canvas id="flow-canvas" width="1152" height="260"></canvas>
+      </div>`;
+
+    _drawFlowChart(document.getElementById('flow-canvas'), d);
+
+    // ── 일별 테이블 ──
+    const rows = d.dates.map((date, i) => {
+      const f = d.foreign_value[i];
+      const g = d.inst_value[i];
+      const fc = f > 0 ? '#FF3333' : f < 0 ? '#33AA33' : 'var(--text-muted)';
+      const gc = g > 0 ? '#FF3333' : g < 0 ? '#33AA33' : 'var(--text-muted)';
+      return `<tr>
         <td><span class="rank">${i + 1}</span></td>
-        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
-        <td style="font-weight:600">${s.name}</td>
-        <td class="r" style="color:${s.net_value >= 0 ? '#FF3333' : '#33AA33'};font-weight:700">
-          ${s.net_value >= 0 ? '+' : ''}${(s.net_value / 1_000_000).toFixed(1)}억
-        </td>
-      </tr>`).join('');
+        <td>${date}</td>
+        <td class="r">${d.close[i].toLocaleString()}</td>
+        <td class="r" style="color:${fc};font-weight:600">${fmtEok(f)}</td>
+        <td class="r" style="color:${gc};font-weight:600">${fmtEok(g)}</td>
+        <td class="r" style="color:var(--text-muted);font-size:11px">${d.foreign_shares[i].toLocaleString()}</td>
+        <td class="r" style="color:var(--text-muted);font-size:11px">${d.inst_shares[i].toLocaleString()}</td>
+      </tr>`;
+    }).reverse().join('');   // 최신이 위로
 
     results.innerHTML = `
       <table class="pg-table">
         <thead><tr>
-          <th style="width:52px">#</th><th>코드</th><th>종목명</th>
-          <th class="r">순매수 (억원)</th>
+          <th style="width:42px">#</th>
+          <th>날짜</th>
+          <th class="r">종가</th>
+          <th class="r">외국인 순매수</th>
+          <th class="r">기관 순매수</th>
+          <th class="r">외국인 주식</th>
+          <th class="r">기관 주식</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
-    results.querySelector('tbody').addEventListener('click', (e) => {
-      const tr = e.target.closest('tr');
-      if (tr) openChartPanel(tr.dataset.code, tr.dataset.name);
-    });
   } catch (err) {
+    if (token !== FLOW_STATE.reqToken) return;
     results.innerHTML = `<div class="pg-empty">
-      <div class="pg-empty-title">데이터 미연동</div>
+      <div class="pg-empty-title">데이터 없음</div>
       ${err.message}<br><br>
-      <span style="color:var(--text-sub)">pykrx 투자자별 매매 API 가 현재 KRX 응답 포맷 변경으로 작동하지 않습니다.<br>
-      KRX_API_KEY 환경변수로 KRX Open API 연동 시 사용 가능합니다.</span>
+      <span style="color:var(--text-sub)">네이버 금융 크롤링이 실패했습니다. 잠시 후 다시 시도해 주세요.</span>
     </div>`;
   }
+}
+
+function _drawFlowChart(canvas, d) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const PAD = { top: 18, right: 20, bottom: 26, left: 72 };
+  const cw = W - PAD.left - PAD.right;
+  const ch = H - PAD.top  - PAD.bottom;
+  const len = d.dates.length;
+  if (!len) return;
+
+  const fVals = d.foreign_value;
+  const iVals = d.inst_value;
+  const all = fVals.concat(iVals).concat([0]);
+  const maxV = Math.max(...all);
+  const minV = Math.min(...all);
+  const pad = Math.max((maxV - minV) * 0.08, 1);
+  const top = maxV + pad, bot = minV - pad;
+  const rng = top - bot || 1;
+
+  const slot = cw / len;
+  const barW = Math.max(3, slot * 0.35);
+  const toY  = v => PAD.top + (1 - (v - bot) / rng) * ch;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1C1C1E';
+  ctx.fillRect(0, 0, W, H);
+
+  // Y축 그리드 + 라벨 (억원)
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#636366'; ctx.font = '11px Noto Sans KR, sans-serif';
+  ctx.textAlign = 'right';
+  for (let k = 0; k <= 4; k++) {
+    const v = bot + (rng * k / 4);
+    const y = toY(v);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    const eok = v / 1e8;
+    ctx.fillText(`${eok >= 0 ? '+' : ''}${eok.toFixed(0)}억`, PAD.left - 6, y + 4);
+  }
+
+  // 0 기준선 강조
+  const zero = toY(0);
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.left, zero); ctx.lineTo(W - PAD.right, zero); ctx.stroke();
+
+  // X축 날짜 라벨 (앞/중간/끝)
+  ctx.fillStyle = '#636366'; ctx.textAlign = 'center';
+  for (let k = 0; k < 6; k++) {
+    const idx = Math.floor((len - 1) * k / 5);
+    const x = PAD.left + slot * (idx + 0.5);
+    ctx.fillText(d.dates[idx].slice(5), x, H - 8);
+  }
+
+  // 막대 (외국인=빨강/초록, 기관=노랑 계열)
+  for (let i = 0; i < len; i++) {
+    const cx = PAD.left + slot * (i + 0.5);
+    // 외국인 (좌측)
+    const fv = fVals[i];
+    const fColor = fv >= 0 ? '#FF3333' : '#33AA33';
+    ctx.fillStyle = fColor;
+    const fY0 = toY(0), fY1 = toY(fv);
+    ctx.fillRect(cx - barW, Math.min(fY0, fY1), barW, Math.abs(fY1 - fY0) || 1);
+    // 기관 (우측)
+    const iv = iVals[i];
+    const iColor = iv >= 0 ? '#FF9F0A' : '#5AC8FA';
+    ctx.fillStyle = iColor;
+    const iY0 = toY(0), iY1 = toY(iv);
+    ctx.fillRect(cx, Math.min(iY0, iY1), barW, Math.abs(iY1 - iY0) || 1);
+  }
+
+  // 범례 (우상단)
+  ctx.font = 'bold 11px Noto Sans KR, sans-serif';
+  ctx.textAlign = 'left';
+  const lx = W - PAD.right - 180, ly = PAD.top + 4;
+  ctx.fillStyle = '#FF3333'; ctx.fillRect(lx,        ly, 10, 10);
+  ctx.fillStyle = '#33AA33'; ctx.fillRect(lx + 56,   ly, 10, 10);
+  ctx.fillStyle = '#FF9F0A'; ctx.fillRect(lx + 104,  ly, 10, 10);
+  ctx.fillStyle = '#5AC8FA'; ctx.fillRect(lx + 154,  ly, 10, 10);
+  ctx.fillStyle = '#AEAEB2';
+  ctx.fillText('외국인+', lx + 14,  ly + 9);
+  ctx.fillText('외국인−', lx + 70,  ly + 9);
+  ctx.fillText('기관+',   lx + 118, ly + 9);
+  ctx.fillText('기관−',   lx + 168, ly + 9);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

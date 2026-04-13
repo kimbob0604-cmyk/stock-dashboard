@@ -1086,63 +1086,127 @@ def api_screener():
     })
 
 
-@app.route("/api/flow")
-def api_flow():
+def _parse_naver_flow_number(s: str) -> int:
     """
-    투자자별 매매동향 — pykrx get_market_net_purchases_of_equities 시도.
-    실패 시 graceful error (프론트에서 "KRX API 미설정" 플래그 표시).
-    Cache: cache/flow_{type}_{date}.json
+    네이버 frgn.naver 의 순매매량 셀 파싱.
+    예: '+465,171' → 465171, '-13,418,579' → -13418579, '' → 0
     """
-    flow_type = (request.args.get("type") or "foreign_buy").strip()
-    valid = {"foreign_buy", "foreign_sell", "inst_buy", "inst_sell"}
-    if flow_type not in valid:
-        flow_type = "foreign_buy"
+    if not s:
+        return 0
+    s = s.replace(",", "").replace(" ", "").strip()
+    if not s or s in ("-", "—"):
+        return 0
+    try:
+        return int(s)
+    except ValueError:
+        # 붙어있는 부호 제거 후 재시도
+        s = s.lstrip("+")
+        try:
+            return int(s)
+        except ValueError:
+            return 0
 
-    today      = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"flow_{flow_type}_{today}.json"
+
+@app.route("/api/flow/<code>")
+def api_flow(code: str):
+    """
+    종목별 최근 20 거래일 외국인/기관 순매수 시계열.
+    데이터 소스: https://finance.naver.com/item/frgn.naver?code={code}
+    Cache: cache/flow_{code}.json, TTL 1시간.
+    실패 시 {"error":"데이터 없음"} 반환.
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    stock_name = _get_stock_name(code) or code
+    cache_file = BASE_DIR / "cache" / f"flow_{code}.json"
     if cache_file.exists():
-        return Response(
-            cache_file.read_text(encoding="utf-8"),
-            content_type="application/json; charset=utf-8",
-        )
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            if age_min < 60:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
 
     try:
-        from pykrx import stock as _stock
+        import requests as _rq
+        from bs4 import BeautifulSoup
     except ImportError:
-        return jsonify({"error": "pykrx 미설치"}), 500
+        return jsonify({"error": "bs4/requests 미설치"}), 500
 
-    investor = "외국인" if flow_type.startswith("foreign") else "기관합계"
-    ascending = flow_type.endswith("sell")   # 매도 TOP = 순매수 오름차순
-
+    url = "https://finance.naver.com/item/frgn.naver"
     try:
-        df = _stock.get_market_net_purchases_of_equities(today, today, "ALL", investor)
+        res = _rq.get(
+            url,
+            params={"code": code},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        res.encoding = "euc-kr"
+        soup = BeautifulSoup(res.text, "html.parser")
     except Exception as exc:
-        return jsonify({
-            "error": f"pykrx 호출 실패 ({exc})",
-            "hint":  "KRX_API_KEY 환경변수 설정 후 사용 가능합니다.",
-        }), 503
+        return jsonify({"error": "데이터 없음", "detail": f"네이버 금융 요청 실패: {exc}"}), 502
 
-    if df is None or df.empty:
-        return jsonify({"error": "데이터 없음",
-                        "hint": "pykrx 투자자 API 가 응답하지 않습니다."}), 503
+    table = soup.select_one('table.type2[summary*="외국인"]')
+    if table is None:
+        table = soup.select_one("table.type2")
+    if table is None:
+        return jsonify({"error": "데이터 없음", "detail": "테이블 파싱 실패"}), 502
 
-    # 순매수 컬럼 탐색 (응답 스키마가 가변적)
-    net_col = next((c for c in df.columns if "순매수" in c and "거래대금" in c), None)
-    if net_col is None:
-        net_col = next((c for c in df.columns if "순매수" in c), None)
-    if net_col is None:
-        return jsonify({"error": "순매수 컬럼 없음"}), 503
+    dates:        list[str] = []
+    closes:       list[int] = []
+    foreign_net:  list[int] = []   # 주식 수
+    inst_net:     list[int] = []   # 주식 수
 
-    df_sorted = df.sort_values(net_col, ascending=ascending).head(20)
-    stocks = []
-    for code, row in df_sorted.iterrows():
-        stocks.append({
-            "code":      str(code),
-            "name":      row.get("종목명", ""),
-            "net_value": int(row[net_col]) if row[net_col] is not None else 0,
-        })
+    for tr in table.select("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 7:
+            continue   # 헤더/구분선 스킵
+        # [0] 날짜  [1] 종가  [2] 전일비  [3] 등락률  [4] 거래량  [5] 기관  [6] 외국인
+        date_txt = tds[0].get_text(strip=True)
+        if not _re.match(r"\d{4}\.\d{2}\.\d{2}", date_txt):
+            continue
+        try:
+            close = int(tds[1].get_text(strip=True).replace(",", ""))
+        except ValueError:
+            continue
+        inst_shares = _parse_naver_flow_number(tds[5].get_text(strip=True))
+        for_shares  = _parse_naver_flow_number(tds[6].get_text(strip=True))
 
-    result = {"type": flow_type, "stocks": stocks}
+        dates.append(date_txt.replace(".", "-"))
+        closes.append(close)
+        inst_net.append(inst_shares)
+        foreign_net.append(for_shares)
+
+    if not dates:
+        return jsonify({"error": "데이터 없음", "detail": "행 추출 실패"}), 502
+
+    # 오래된 → 최신 순으로 정렬 (네이버는 최신이 위)
+    dates.reverse(); closes.reverse()
+    foreign_net.reverse(); inst_net.reverse()
+
+    # 대략적인 순매수 '원' 금액 = 주식수 × 종가 (추정치)
+    foreign_value = [f * c for f, c in zip(foreign_net, closes)]
+    inst_value    = [i * c for i, c in zip(inst_net,    closes)]
+
+    result = {
+        "code":           code,
+        "name":           stock_name,
+        "dates":          dates,
+        "close":          closes,
+        "foreign_shares": foreign_net,
+        "inst_shares":    inst_net,
+        "foreign_value":  foreign_value,    # 원 (추정)
+        "inst_value":     inst_value,       # 원 (추정)
+        "foreign_sum_20": sum(foreign_value),
+        "inst_sum_20":    sum(inst_value),
+        "source":         "naver_finance",
+        "fetched_at":     now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
     cache_file.parent.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify(result)
