@@ -2980,49 +2980,161 @@ async function _shortFetch() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTOR MAP PAGE (Phase 9) — 현재는 테마 데이터를 업종 대체로 표시
+// SECTOR MAP PAGE (Phase 10) — Naver KRX 업종 실시간 스크랩
 // ─────────────────────────────────────────────────────────────────────────────
-function renderSectorPage() {
+const SECTOR_STATE = { sectors: null, selected: null };
+
+async function renderSectorPage() {
   const root = document.getElementById('sector-view');
-  root.innerHTML = `
-    <div class="pg-wrap">
-      <div class="pg-title">업종별맵</div>
-      <div class="pg-sub">KRX 공식 업종지수 연동 준비 중 · 현재는 수집된 테마 데이터를 표시합니다</div>
-      <div id="sector-canvas"
-           style="background:var(--surface2);border-radius:10px;padding:8px;min-height:480px;">
-        <svg id="sector-svg"></svg>
-      </div>
-    </div>`;
+  if (!root.dataset.built) {
+    root.dataset.built = '1';
+    root.innerHTML = `
+      <div class="pg-wrap">
+        <div class="pg-title">업종별 히트맵</div>
+        <div class="pg-sub">KRX 79 업종 · 네이버 금융 실시간 · 박스 크기 = 소속 종목수 · 색 = 등락률</div>
+        <div id="sector-canvas"
+             style="background:var(--surface2);border-radius:10px;padding:6px;min-height:520px;">
+          <svg id="sector-svg"></svg>
+        </div>
+        <div id="sector-members" style="margin-top:14px;"></div>
+      </div>`;
+  }
 
-  if (!APP.data) return;
   const svg = document.getElementById('sector-svg');
-  const W = 1152, H = 520;
-  svg.setAttribute('width', W); svg.setAttribute('height', H);
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  d3.select(svg).selectAll('*').remove();
+  if (!SECTOR_STATE.sectors) {
+    svg.outerHTML = '<svg id="sector-svg"></svg>';
+    document.getElementById('sector-members').innerHTML =
+      '<div class="pg-empty">업종 데이터 로딩 중…</div>';
+    try {
+      const r = await fetch('/api/sectors');
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+      SECTOR_STATE.sectors = d.sectors || [];
+    } catch (err) {
+      document.getElementById('sector-members').innerHTML =
+        `<div class="pg-empty"><div class="pg-empty-title">업종 데이터 로딩 실패</div>${err.message}</div>`;
+      return;
+    }
+  }
+  _drawSectorTreemap(SECTOR_STATE.sectors);
+  if (!SECTOR_STATE.selected) {
+    document.getElementById('sector-members').innerHTML =
+      '<div class="pg-empty" style="padding:16px;">업종 박스를 클릭하면 소속 종목이 표시됩니다.</div>';
+  }
+}
 
-  const themes = APP.data.themes || [];
-  const root2 = d3.hierarchy({ children: themes })
-    .sum(d => Math.max(Math.abs(d.weighted_avg_pct || 0.1), 0.1));
-  d3.treemap().size([W, H]).padding(3).round(true)(root2);
+function _drawSectorTreemap(sectors) {
+  const svgEl = document.getElementById('sector-svg');
+  if (!svgEl || !sectors || !sectors.length) return;
+  const W = 1152, H = 560;
+  svgEl.setAttribute('width', W);
+  svgEl.setAttribute('height', H);
+  svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  d3.select(svgEl).selectAll('*').remove();
 
-  const cells = d3.select(svg).selectAll('g.t-cell')
-    .data(root2.leaves())
-    .enter().append('g').attr('class','t-cell')
-    .attr('transform', d => `translate(${d.x0},${d.y0})`);
+  const root = d3.hierarchy({ children: sectors })
+    .sum(d => Math.max(d.total || 1, 1));
+  d3.treemap().size([W, H]).paddingInner(3).round(true)(root);
+
+  const cells = d3.select(svgEl).selectAll('g.sc-cell')
+    .data(root.leaves())
+    .enter().append('g')
+    .attr('class', 'sc-cell')
+    .attr('transform', d => `translate(${d.x0},${d.y0})`)
+    .style('cursor', 'pointer')
+    .on('click', (e, d) => _selectSector(d.data));
+
   cells.append('rect')
     .attr('width',  d => Math.max(0, d.x1 - d.x0))
     .attr('height', d => Math.max(0, d.y1 - d.y0))
     .attr('rx', 6).attr('ry', 6)
-    .attr('fill', d => pctBgColor(d.data.weighted_avg_pct || 0));
-  cells.append('text')
-    .attr('x', 8).attr('y', 18).attr('fill', 'rgba(255,255,255,0.92)')
-    .attr('font-size', 12).attr('font-weight', 600)
-    .text(d => (d.x1 - d.x0 > 60 ? d.data.name : ''));
-  cells.append('text')
-    .attr('x', 8).attr('y', 34).attr('fill', 'rgba(255,255,255,0.75)')
-    .attr('font-size', 11)
-    .text(d => (d.x1 - d.x0 > 60 ? fmtPct(d.data.weighted_avg_pct || 0) : ''));
+    .attr('fill', d => pctBgColor(d.data.change_pct || 0))
+    .attr('stroke', 'var(--bg)').attr('stroke-width', 2);
+
+  cells.each(function(d) {
+    const w = d.x1 - d.x0, h = d.y1 - d.y0;
+    if (w < 40 || h < 24) return;
+    const g = d3.select(this);
+    const nameSize = w < 100 ? 11 : 13;
+    g.append('text')
+      .attr('x', w / 2).attr('y', h / 2 - 4)
+      .attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+      .attr('font-size', nameSize).attr('font-weight', 600)
+      .attr('fill', 'rgba(255,255,255,0.95)')
+      .text(truncText(d.data.name, w, nameSize));
+    if (h >= 40) {
+      g.append('text')
+        .attr('x', w / 2).attr('y', h / 2 + nameSize)
+        .attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+        .attr('font-size', 11).attr('fill', 'rgba(255,255,255,0.82)')
+        .text(fmtPct(d.data.change_pct || 0));
+    }
+  });
+}
+
+async function _selectSector(sector) {
+  SECTOR_STATE.selected = sector;
+  const box = document.getElementById('sector-members');
+  box.innerHTML = `<div class="pg-empty">${_escHtml(sector.name)} 소속 종목 로딩 중…</div>`;
+
+  try {
+    const r = await fetch(`/api/sector/${sector.no}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    if (SECTOR_STATE.selected !== sector) return;   // stale 클릭 버림
+    _renderSectorMembers(sector, d.stocks || []);
+  } catch (err) {
+    box.innerHTML = `<div class="pg-empty"><div class="pg-empty-title">로드 실패</div>${err.message}</div>`;
+  }
+}
+
+function _renderSectorMembers(sector, stocks) {
+  const box = document.getElementById('sector-members');
+  if (!stocks.length) {
+    box.innerHTML = '<div class="pg-empty">소속 종목이 없습니다.</div>';
+    return;
+  }
+  const rows = stocks.map((s, i) => {
+    const sc = _escHtml(s.code);
+    const sn = _escHtml(s.name);
+    const col = s.change_pct > 0 ? '#FF3333' : s.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
+    const sign = s.change_pct > 0 ? '+' : '';
+    return `<tr data-code="${sc}" data-name="${sn}">
+      <td><span class="rank">${i + 1}</span></td>
+      <td style="color:var(--text-muted);font-size:11px">${sc}</td>
+      <td style="font-weight:600">${sn}</td>
+      <td class="r">${(s.close || 0).toLocaleString()}</td>
+      <td class="r" style="color:${col};font-weight:700">${sign}${(s.change_pct || 0).toFixed(2)}%</td>
+      <td class="r" style="color:var(--text-sub)">${(s.volume_mn || 0).toLocaleString()}M</td>
+    </tr>`;
+  }).join('');
+
+  const headColor = sector.change_pct > 0 ? '#FF3333' : sector.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
+  box.innerHTML = `
+    <div class="pg-wrap" style="margin-top:0;">
+      <div class="pg-title" style="font-size:16px;">
+        ${_escHtml(sector.name)}
+        <span style="color:${headColor};font-size:14px;margin-left:12px">
+          ${sector.change_pct > 0 ? '+' : ''}${(sector.change_pct || 0).toFixed(2)}%
+        </span>
+        <span style="color:var(--text-muted);font-size:12px;margin-left:8px">
+          ${stocks.length}종목 · 상승 ${sector.up} / 보합 ${sector.flat} / 하락 ${sector.down}
+        </span>
+      </div>
+      <table class="pg-table">
+        <thead><tr>
+          <th style="width:42px">#</th><th>코드</th><th>종목명</th>
+          <th class="r">현재가</th><th class="r">등락률</th><th class="r">거래대금</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  box.querySelector('tbody').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    console.log('[sector member click]', { code: tr.dataset.code, name: tr.dataset.name });
+    openChartPanel(tr.dataset.code, tr.dataset.name);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1001,14 +1001,10 @@ def api_screener():
     max_pbr    = float(args.get("max_pbr",    "9999") or 9999)
     q          = (args.get("q") or "").strip()
 
-    if not DATA_JSON.exists():
-        return jsonify({"error": "data.json 미수집"}), 503
-    try:
-        data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        return jsonify({"error": "data.json 로드 실패"}), 500
-
     krx_stocks  = _get_krx_all_stocks_cached()   # code → KRX 레코드 (빈 dict면 미구독)
+    naver_uni   = _load_naver_universe()         # Phase 10: Naver 전 종목 유니버스
+    universe_src = bool(naver_uni.get("stocks"))
+
     today       = _get_trading_date()
     fund_file   = BASE_DIR / "cache" / f"fundamental_{today}.json"
     fundamentals: dict = {}
@@ -1017,6 +1013,58 @@ def api_screener():
             fundamentals = json.loads(fund_file.read_text(encoding="utf-8"))
         except Exception:
             fundamentals = {}
+
+    # ─── 1순위 소스: Naver universe (2,500+ 종목) ───
+    if universe_src:
+        stocks_map = naver_uni["stocks"]   # {code: {code,name,change_pct,volume_mn,close,sectors}}
+        results = []
+        for code, s in stocks_map.items():
+            name   = s.get("name") or code
+            chg    = float(s.get("change_pct", 0.0))
+            vol_mn = float(s.get("volume_mn",  0.0))    # Naver 는 이미 백만원 단위
+            # 시장 정보는 Naver universe 에 없음 — 필터 "ALL" 아니면 패스
+            if market != "ALL":
+                continue
+            if chg < min_change:                     continue
+            if vol_mn < min_volume:                  continue
+            # PER/PBR 은 Naver 에 없음 — fundamentals 캐시에 있으면 사용
+            f = fundamentals.get(code, {})
+            per = f.get("per")
+            pbr = f.get("pbr")
+            if per is not None and per > max_per:    continue
+            if pbr is not None and pbr > max_pbr:    continue
+            if q and q not in code and q not in (name or ''):
+                continue
+            results.append({
+                "code": code, "name": name,
+                "change_pct": round(chg, 2),
+                "volume_mn":  int(vol_mn),
+                "close":      s.get("close"),
+                "per": per, "pbr": pbr,
+                "market_cap": f.get("market_cap"),
+                "market":     "",
+                "sectors":    s.get("sectors", []),
+                "theme":      (s.get("sectors") or [None])[0],
+            })
+
+        results.sort(key=lambda r: r["volume_mn"], reverse=True)
+        return jsonify({
+            "count":             len(results),
+            "stocks":            results[:200],
+            "has_fundamentals":  bool(fundamentals),
+            "krx_api_enriched":  bool(krx_stocks),
+            "universe_source":   "naver_finance",
+            "universe_size":     naver_uni.get("stock_count", 0),
+            "fetched_at":        naver_uni.get("fetched_at"),
+        })
+
+    # ─── 2순위 폴백: data.json 테마 (기존 134종목) ───
+    if not DATA_JSON.exists():
+        return jsonify({"error": "data.json 미수집"}), 503
+    try:
+        data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"error": "data.json 로드 실패"}), 500
 
     seen = set()
     results = []
@@ -1040,10 +1088,10 @@ def api_screener():
                     chg = krx_chg
                 krx_vol = _krx_get_float(krx_row, "ACC_TRDVAL", "accTrdVal", "TRDVAL")
                 if krx_vol is not None:
-                    vol_mn = krx_vol / 1_000_000   # 원 → 백만원
+                    vol_mn = krx_vol / 1_000_000
                 market_cap = _krx_get_float(krx_row, "MKTCAP", "mktCap")
                 if market_cap is not None:
-                    market_cap = market_cap / 1_000_000    # 원 → 백만원
+                    market_cap = market_cap / 1_000_000
                 mkt = krx_row.get("MKT_NM") or krx_row.get("mktNm") or ""
                 if "KOSPI" in mkt.upper() or "유가증권" in mkt:
                     mkt = "KOSPI"
@@ -1058,14 +1106,12 @@ def api_screener():
             if not mkt:
                 mkt = f.get("market", "")
 
-            # 필터
-            if market != "ALL" and mkt and mkt != market:
-                continue
-            if chg < min_change:                             continue
-            if vol_mn < min_volume:                          continue
-            if per is not None and per > max_per:            continue
-            if pbr is not None and pbr > max_pbr:            continue
-            if q and q not in code and q not in name:        continue
+            if market != "ALL" and mkt and mkt != market: continue
+            if chg < min_change:                          continue
+            if vol_mn < min_volume:                       continue
+            if per is not None and per > max_per:         continue
+            if pbr is not None and pbr > max_pbr:         continue
+            if q and q not in code and q not in name:     continue
 
             results.append({
                 "code": code, "name": name,
@@ -1079,10 +1125,12 @@ def api_screener():
 
     results.sort(key=lambda r: r["volume_mn"], reverse=True)
     return jsonify({
-        "count": len(results),
-        "stocks": results[:100],
-        "has_fundamentals": bool(fundamentals),
-        "krx_api_enriched": bool(krx_stocks),
+        "count":             len(results),
+        "stocks":            results[:200],
+        "has_fundamentals":  bool(fundamentals),
+        "krx_api_enriched":  bool(krx_stocks),
+        "universe_source":   "themes_fallback",
+        "universe_size":     len(results),
     })
 
 
@@ -1268,79 +1316,306 @@ def api_short():
     return jsonify(result)
 
 
+def _parse_pct(s: str) -> float:
+    """'+7.94%', '-1.32%' → float"""
+    if not s:
+        return 0.0
+    s = s.replace("%", "").replace(",", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _scrape_naver_sectors() -> list[dict]:
+    """
+    네이버 금융 업종 랜딩 페이지에서 79개 KRX 업종 요약을 스크랩.
+    URL: https://finance.naver.com/sise/sise_group.naver?type=upjong
+    Returns: [{no, name, change_pct, total, up, flat, down}]
+    """
+    import re as _re
+    import requests as _rq
+    from bs4 import BeautifulSoup
+
+    url = "https://finance.naver.com/sise/sise_group.naver"
+    try:
+        res = _rq.get(url, params={"type": "upjong"},
+                      headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        res.encoding = "euc-kr"
+    except Exception as exc:
+        print(f"[Naver 업종 랜딩 실패] {exc}")
+        return []
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    table = soup.select_one("table.type_1")
+    if table is None:
+        return []
+
+    out: list[dict] = []
+    for tr in table.select("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 6:
+            continue
+        link = tds[0].select_one("a[href*='no=']")
+        if link is None:
+            continue
+        href = link.get("href", "")
+        m = _re.search(r"no=(\d+)", href)
+        if not m:
+            continue
+        no = m.group(1)
+        name = link.get_text(strip=True)
+        change_pct = _parse_pct(tds[1].get_text())
+        try:
+            total = int(tds[2].get_text(strip=True))
+            up    = int(tds[3].get_text(strip=True))
+            flat  = int(tds[4].get_text(strip=True))
+            down  = int(tds[5].get_text(strip=True))
+        except ValueError:
+            total = up = flat = down = 0
+        out.append({
+            "no": no, "name": name, "change_pct": change_pct,
+            "total": total, "up": up, "flat": flat, "down": down,
+        })
+    return out
+
+
+def _scrape_naver_sector_detail(no: str) -> dict:
+    """
+    네이버 업종 상세 페이지에서 해당 업종 소속 종목 리스트 추출.
+    URL: sise_group_detail.naver?type=upjong&no=<no>
+    Returns: {sector_name, stocks: [{code, name, close, change_pct, volume, volume_mn}]}
+    """
+    import re as _re
+    import requests as _rq
+    from bs4 import BeautifulSoup
+
+    url = "https://finance.naver.com/sise/sise_group_detail.naver"
+    try:
+        res = _rq.get(url, params={"type": "upjong", "no": no},
+                      headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        res.encoding = "euc-kr"
+    except Exception as exc:
+        return {"error": f"네이버 요청 실패: {exc}"}
+
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    # 업종명은 페이지 상단 'em' 또는 h3
+    sector_name = ""
+    h3_em = soup.select_one("h3 em, div.h_sub em")
+    if h3_em:
+        sector_name = h3_em.get_text(strip=True)
+
+    # 종목 테이블: type_5
+    table = None
+    for t in soup.select("table"):
+        ths = [th.get_text(strip=True) for th in t.find_all("th")]
+        if "종목명" in ths and "현재가" in ths:
+            table = t
+            break
+    if table is None:
+        return {"sector_name": sector_name, "stocks": []}
+
+    code_pat = _re.compile(r"code=(\d{6})")
+    stocks: list[dict] = []
+    seen_codes: set = set()
+
+    for tr in table.select("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 8:
+            continue
+        # 종목명 링크에서 code 추출
+        name_a = tds[0].select_one("a[href*='code=']")
+        if name_a is None:
+            continue
+        m = code_pat.search(name_a.get("href", ""))
+        if not m:
+            continue
+        code = m.group(1)
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        name = name_a.get_text(strip=True).rstrip("*").strip()
+
+        def _int(cell_txt):
+            try:
+                return int(cell_txt.replace(",", "").strip())
+            except ValueError:
+                return 0
+
+        close        = _int(tds[1].get_text(strip=True))
+        change_pct   = _parse_pct(tds[3].get_text())
+        volume       = _int(tds[6].get_text(strip=True))
+        trd_value    = _int(tds[7].get_text(strip=True))  # 거래대금 (백만원 단위)
+
+        stocks.append({
+            "code":       code,
+            "name":       name,
+            "close":      close,
+            "change_pct": change_pct,
+            "volume":     volume,
+            "volume_mn":  trd_value,
+        })
+
+    return {"sector_name": sector_name, "stocks": stocks}
+
+
+def _build_naver_universe_background():
+    """
+    모든 79개 업종 상세 페이지를 순차 스크랩해 전 종목 딕셔너리를 구축.
+    결과는 cache/naver_universe_{date}.json 에 저장.
+    스크리너가 구독된 KRX API 없이도 2,500+ 커버 가능.
+    서버 부팅 시 백그라운드 스레드로 실행.
+    """
+    today = _get_trading_date()
+    out_file = BASE_DIR / "cache" / f"naver_universe_{today}.json"
+    if out_file.exists():
+        log.info("naver_universe 캐시 이미 존재 — 스킵 (%s)", out_file.name)
+        return
+    lock_file = out_file.with_suffix(".lock")
+    if lock_file.exists():
+        return
+    try:
+        lock_file.touch()
+    except Exception:
+        pass
+
+    try:
+        log.info("▶  Naver 업종 유니버스 빌드 시작")
+        sectors = _scrape_naver_sectors()
+        if not sectors:
+            log.warning("Naver 유니버스: 랜딩 스크랩 실패")
+            return
+
+        import time as _time
+        universe: dict = {}
+        stock_to_sector: dict = {}
+        for i, sec in enumerate(sectors):
+            no = sec["no"]
+            try:
+                detail = _scrape_naver_sector_detail(no)
+            except Exception as exc:
+                log.warning("섹터 %s 스크랩 예외: %s", no, exc)
+                continue
+            stocks = detail.get("stocks", []) if isinstance(detail, dict) else []
+            for s in stocks:
+                code = s["code"]
+                # 최초 출현 섹터를 기본으로, 추가 섹터는 리스트에 누적
+                if code not in universe:
+                    universe[code] = {**s, "sectors": [sec["name"]]}
+                    stock_to_sector[code] = sec["name"]
+                else:
+                    if sec["name"] not in universe[code]["sectors"]:
+                        universe[code]["sectors"].append(sec["name"])
+            _time.sleep(0.25)    # 네이버 rate limit 회피
+            if (i + 1) % 10 == 0:
+                log.info("  ... %d/%d 섹터 (누적 %d 종목)",
+                         i + 1, len(sectors), len(universe))
+
+        result = {
+            "fetched_at":  now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "sector_count": len(sectors),
+            "stock_count":  len(universe),
+            "stocks":       universe,
+        }
+        out_file.parent.mkdir(exist_ok=True)
+        out_file.write_text(json.dumps(result, ensure_ascii=False),
+                            encoding="utf-8")
+        log.info("✓  Naver 유니버스 빌드 완료: %d 종목 → %s",
+                 len(universe), out_file.name)
+    finally:
+        try: lock_file.unlink()
+        except Exception: pass
+
+
+def _load_naver_universe() -> dict:
+    """오늘자 naver_universe 캐시 로드 (없으면 빈 dict)."""
+    today = _get_trading_date()
+    f = BASE_DIR / "cache" / f"naver_universe_{today}.json"
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 @app.route("/api/sectors")
 def api_sectors():
     """
-    업종별 지수 — KRX Open API idx/kospi_dd_trd + idx/kosdaq_dd_trd 에서
-    업종지수만 필터링하여 반환. 구독되지 않았거나 실패 시 data.json themes 로 대체.
+    KRX 업종 랜딩 데이터 — 네이버 금융 업종 페이지 스크랩.
+    79개 업종의 이름·등락률·종목수 요약. 1시간 캐시.
     """
-    today      = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"krx_sectors_{today}.json"
-
-    # KRX API 결과 캐시
-    sectors_krx = None
+    cache_file = BASE_DIR / "cache" / "sectors_naver_landing.json"
     if cache_file.exists():
         try:
-            sectors_krx = json.loads(cache_file.read_text(encoding="utf-8"))
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            if age_min < 60:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
         except Exception:
-            sectors_krx = None
+            pass
 
-    if sectors_krx is None:
+    sectors = _scrape_naver_sectors()
+    if not sectors:
+        return jsonify({
+            "error": "Naver 업종 페이지 파싱 실패",
+            "source": "naver_finance",
+        }), 502
+
+    result = {
+        "source":       "naver_finance",
+        "count":        len(sectors),
+        "sectors":      sectors,
+        "fetched_at":   now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/sector/<no>")
+def api_sector_detail(no: str):
+    """
+    특정 업종 상세 — 해당 업종 소속 종목 리스트 (등락률/거래대금/현재가 포함).
+    6시간 캐시.
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d+", no):
+        return jsonify({"error": "잘못된 업종 번호"}), 400
+
+    cache_file = BASE_DIR / "cache" / f"sector_detail_{no}.json"
+    if cache_file.exists():
         try:
-            import krx_api
-            if krx_api.has_api_key():
-                rows: list = []
-                for series in (krx_api.krx_kospi_series(today),
-                               krx_api.krx_kosdaq_series(today)):
-                    if series:
-                        rows.extend(series)
-                if rows:
-                    sectors_krx = []
-                    for r in rows:
-                        name = (r.get("IDX_NM") or r.get("IDX_IND_NM") or "").strip()
-                        if not name:
-                            continue
-                        # 업종지수만 (대형주/중형주/소형주/KOSPI·KOSDAQ 대지수 제외 필터는 UI 측에서 선택)
-                        sectors_krx.append({
-                            "name":       name,
-                            "idx_class":  r.get("IDX_CLSS") or r.get("IDX_IND_CLSS"),
-                            "close":      _krx_get_float(r, "CLSPRC_IDX", "clsprcIdx", "TDD_CLSPRC"),
-                            "change_pct": _krx_get_float(r, "FLUC_RT", "flucRt"),
-                            "volume":     _krx_get_float(r, "ACC_TRDVOL", "accTrdVol"),
-                            "trd_value":  _krx_get_float(r, "ACC_TRDVAL", "accTrdVal"),
-                        })
-                    cache_file.parent.mkdir(exist_ok=True)
-                    cache_file.write_text(json.dumps(sectors_krx, ensure_ascii=False),
-                                          encoding="utf-8")
-        except Exception as exc:
-            print(f"[KRX 업종지수 로드 실패] {exc}")
+            age_hr = (now_kst().timestamp() - cache_file.stat().st_mtime) / 3600
+            if age_hr < 6:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
 
-    if sectors_krx:
-        return jsonify({"source": "krx_open_api", "sectors": sectors_krx})
+    detail = _scrape_naver_sector_detail(no)
+    if "error" in detail:
+        return jsonify(detail), 502
+    if not detail.get("stocks"):
+        return jsonify({"error": "종목 없음", **detail}), 502
 
-    # Fallback: data.json themes
-    if not DATA_JSON.exists():
-        return jsonify({"error": "data.json 미수집"}), 503
-    try:
-        data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        return jsonify({"error": "data.json 로드 실패"}), 500
-
-    themes = data.get("themes", [])
-    sectors = [{
-        "name":             t.get("name"),
-        "weighted_avg_pct": t.get("weighted_avg_pct", 0.0),
-        "stock_count":      t.get("stock_count", 0),
-        "active_count":     t.get("active_count", 0),
-        "volume_sum":       sum(s.get("volume_mn", 0) for s in t.get("stocks", [])),
-    } for t in themes]
-
-    return jsonify({
-        "source":  "themes_fallback",
-        "note":    "KRX 업종지수 API 미구독. KRX_API_KEY 설정 + 마이페이지에서 "
-                   "idx/kospi_dd_trd, idx/kosdaq_dd_trd 구독 후 사용 가능.",
-        "sectors": sectors,
-    })
+    result = {
+        "source":   "naver_finance",
+        "no":       no,
+        **detail,
+        "count":    len(detail["stocks"]),
+        "fetched_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return jsonify(result)
 
 
 @app.route("/api/krx_status")
@@ -1544,6 +1819,11 @@ def _startup():
         reason = "없음" if not DATA_JSON.exists() else "오늘 날짜 아님"
         log.info("data.json %s → data_fetcher.py 백그라운드 실행", reason)
         trigger_fetch(background=True)
+
+    # Phase 10: Naver 업종 유니버스 백그라운드 빌드 (비차단)
+    #   일 1회, 약 79 섹터 × 0.25s ≈ 20 초 소요.
+    threading.Thread(target=_build_naver_universe_background,
+                     daemon=True, name="naver-universe").start()
 
     # APScheduler: 장중 자동 갱신
     if _SCHEDULER_OK:
