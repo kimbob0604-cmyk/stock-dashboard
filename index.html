@@ -1108,6 +1108,9 @@ function renderStockGrid(theme) {
   stocks.forEach(s => {
     const card = document.createElement('div');
     card.className = 's-card';
+    // 종목코드를 DOM 속성에 박아두어 클릭 시 index/closure 에 의존하지 않도록 한다.
+    card.dataset.code = s.code;
+    card.dataset.name = s.name;
     const pct = s.change_pct;
     card.innerHTML = `
       <div class="s-info">
@@ -1120,7 +1123,6 @@ function renderStockGrid(theme) {
         <div class="s-vol">${(s.volume_mn || 0).toLocaleString()}M</div>
       </div>
     `;
-    card.addEventListener('click', () => openChartPanel(s.code, s.name));
     grid.appendChild(card);
   });
   requestAnimationFrame(() => {
@@ -1130,6 +1132,16 @@ function renderStockGrid(theme) {
     });
   });
 }
+
+// Event delegation — 한 번만 바인딩되므로 재렌더 중복 리스너/메모리 누수 없음.
+document.getElementById('stock-grid').addEventListener('click', (e) => {
+  const card = e.target.closest('.s-card');
+  if (!card) return;
+  const code = card.dataset.code;
+  const name = card.dataset.name;
+  console.log('[stock-card click]', { code, name });
+  if (code) openChartPanel(code, name);
+});
 
 function showDetail(theme) {
   APP.selectedTheme = theme;
@@ -1211,25 +1223,31 @@ function renderNewHighSectors() {
 // ─────────────────────────────────────────────────────────────────────────────
 // CHART PANEL (Phase 6)
 // ─────────────────────────────────────────────────────────────────────────────
+// 동시 클릭 경쟁 조건 방지: 가장 최근에 요청한 종목코드만 반영한다.
+let _chartRequestCode = null;
+
 async function openChartPanel(code, hintName) {
+  _chartRequestCode = code;                 // 이 클릭의 토큰 = 종목코드
   const panel = document.getElementById('chart-panel');
+  panel.dataset.code = code;                // 어떤 종목을 표시 중인지 DOM에도 기록
   panel.style.display = '';
   panel.innerHTML = `
     <div class="chart-header">
       <span class="chart-title">${hintName || code} (${code})</span>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
-    <div class="chart-loading"><div class="spin"></div>차트 데이터 로딩 중…</div>`;
+    <div class="chart-loading"><div class="spin"></div>차트 데이터 로딩 중… (${code})</div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   let data;
   try {
-    const res = await fetch(`/api/chart/${code}`);
+    const res = await fetch(`/api/chart/${code}`, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     data = await res.json();
     if (data.error) throw new Error(data.error);
   } catch (err) {
+    if (_chartRequestCode !== code) return; // 더 최근 요청이 있으면 버린다
     panel.innerHTML = `
       <div class="chart-header">
         <span class="chart-title">${hintName || code} (${code})</span>
@@ -1237,6 +1255,17 @@ async function openChartPanel(code, hintName) {
       </div>
       <div class="chart-error">차트 로드 실패: ${err.message}</div>`;
     document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
+    return;
+  }
+
+  // 응답이 돌아오는 사이 사용자가 다른 종목을 눌렀다면 이 결과는 버린다.
+  if (_chartRequestCode !== code) {
+    console.log('[openChartPanel] stale response discarded:', code, '→ latest:', _chartRequestCode);
+    return;
+  }
+  // 서버가 돌려준 코드와 요청한 코드가 다르면 서버/캐시 문제 — 방어적으로 중단.
+  if (data.code && data.code !== code) {
+    console.error('[openChartPanel] code mismatch — requested:', code, 'got:', data.code);
     return;
   }
 

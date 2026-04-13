@@ -21,9 +21,15 @@ import math
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from itertools import combinations as _comb
 from pathlib import Path
+
+# Render 등 UTC 서버에서도 KST 기준으로 날짜/시간 계산
+KST = timezone(timedelta(hours=9))
+
+def now_kst() -> datetime:
+    return datetime.now(KST)
 
 try:
     from flask import Flask, Response, jsonify, request, send_file
@@ -96,8 +102,8 @@ def _set(**kw):
 # 장중 여부
 # ─────────────────────────────────────────────────────────────────────────────
 def is_market_hours() -> bool:
-    """평일 09:00 ~ 15:30 여부"""
-    now = datetime.now()
+    """KST 기준 평일 09:00 ~ 15:30 여부"""
+    now = now_kst()
     if now.weekday() >= 5:          # 토/일
         return False
     t = now.hour * 100 + now.minute
@@ -108,12 +114,12 @@ def is_market_hours() -> bool:
 # 데이터 신선도 확인
 # ─────────────────────────────────────────────────────────────────────────────
 def data_is_fresh() -> bool:
-    """data.json 의 updated_at 이 오늘 날짜인지 확인"""
+    """data.json 의 updated_at 이 KST 오늘 날짜인지 확인"""
     if not DATA_JSON.exists():
         return False
     try:
         data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
-        today = datetime.today().strftime("%Y-%m-%d")
+        today = now_kst().strftime("%Y-%m-%d")
         return str(data.get("updated_at", "")).startswith(today)
     except Exception:
         return False
@@ -128,7 +134,7 @@ def _run_fetcher(force_market: bool = False):
         log.info("data_fetcher 이미 실행 중 — 중복 실행 방지")
         return
 
-    _set(state="running", started_at=datetime.now().isoformat(), error=None)
+    _set(state="running", started_at=now_kst().isoformat(), error=None)
     cmd = [sys.executable, str(FETCHER)]
     if force_market:
         cmd.append("--force-market")
@@ -146,11 +152,11 @@ def _run_fetcher(force_market: bool = False):
             err = (proc.stderr or proc.stdout or "").strip()[-500:]
             raise RuntimeError(err)
 
-        _set(state="idle", finished_at=datetime.now().isoformat(), error=None)
+        _set(state="idle", finished_at=now_kst().isoformat(), error=None)
         log.info("✓  data_fetcher.py 완료")
 
     except Exception as exc:
-        _set(state="error", finished_at=datetime.now().isoformat(), error=str(exc)[:500])
+        _set(state="error", finished_at=now_kst().isoformat(), error=str(exc)[:500])
         log.error("✗  data_fetcher.py 실패: %s", exc)
 
 
@@ -176,7 +182,7 @@ def _get_trading_date() -> str:
                 return ad.replace("-", "")
         except Exception:
             pass
-    return datetime.today().strftime("%Y%m%d")
+    return now_kst().strftime("%Y%m%d")
 
 
 def _calc_bollinger(closes: list, period: int = 20, num_std: float = 2) -> dict:
@@ -417,8 +423,7 @@ def api_rank_change(minutes_ago: int):
         prev = loaded.get("previous", {})
     elif isinstance(loaded, list) and loaded:
         curr = loaded[-1]["ranking"]
-        from datetime import timedelta
-        target     = datetime.now() - timedelta(minutes=minutes_ago)
+        target     = now_kst() - timedelta(minutes=minutes_ago)
         target_str = target.strftime("%Y-%m-%d %H:%M:%S")
         prev = next(
             (s["ranking"] for s in reversed(loaded) if s["timestamp"] <= target_str),
@@ -498,8 +503,7 @@ def api_chart(code: str):
     except ImportError:
         return jsonify({"error": "pykrx 미설치"}), 500
 
-    from datetime import timedelta
-    start = (datetime.strptime(today, "%Y%m%d") - timedelta(days=180)).strftime("%Y%m%d")
+    start = (datetime.strptime(today, "%Y%m%d").replace(tzinfo=KST) - timedelta(days=180)).strftime("%Y%m%d")
     try:
         df = _stock.get_market_ohlcv_by_date(start, today, code)
     except Exception as exc:

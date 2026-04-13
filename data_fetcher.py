@@ -27,8 +27,15 @@ data_fetcher.py  —  한국 주식 테마 데이터 수집기
 import argparse
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── 한국 시간대 ─────────────────────────────────────────────────────
+# Render 등 UTC 서버에서도 KST 기준으로 날짜가 계산되도록 명시.
+KST = timezone(timedelta(hours=9))
+
+def now_kst() -> datetime:
+    return datetime.now(KST)
 
 try:
     from pykrx import stock
@@ -60,12 +67,12 @@ MAX_LOOKBACK = 10
 # 날짜 헬퍼
 # ─────────────────────────────────────────────────────────────────────────────
 def today_str() -> str:
-    """달력상 오늘 (YYYYMMDD). 거래일 판별은 API 응답으로 결정."""
-    return datetime.today().strftime("%Y%m%d")
+    """KST 기준 오늘 (YYYYMMDD). 거래일 판별은 API 응답으로 결정."""
+    return now_kst().strftime("%Y%m%d")
 
 
 def date_str_minus(date_str: str, days: int) -> str:
-    d = datetime.strptime(date_str, "%Y%m%d") - timedelta(days=days)
+    d = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=KST) - timedelta(days=days)
     return d.strftime("%Y%m%d")
 
 
@@ -96,7 +103,7 @@ def write_cache(path: Path, data, key: str, date: str):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     meta = load_meta()
-    meta[key] = {"date": date, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    meta[key] = {"date": date, "created_at": now_kst().strftime("%Y-%m-%d %H:%M:%S")}
     save_meta(meta)
 
 
@@ -403,7 +410,7 @@ def fetch_new_highs(all_codes: list[str], mapping: list[dict],
 
     Cache: cache/new_high_{last_friday}.json  (주 단위 갱신)
     """
-    req_dt = datetime.strptime(req_date, "%Y%m%d")
+    req_dt = datetime.strptime(req_date, "%Y%m%d").replace(tzinfo=KST)
     # 직전 금요일 (오늘이 금요일이면 7일 전 금요일)
     days_back    = (req_dt.weekday() - 4) % 7 or 7
     last_friday  = req_dt - timedelta(days=days_back)
@@ -621,7 +628,7 @@ def save_ranking_history(themes_out: list[dict]) -> list[dict]:
     최근 288개 스냅샷만 유지 (5분 간격 × 24h = 288).
     이전 형식({previous, current})은 자동 마이그레이션.
     """
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     current = {
         t["name"]: i + 1
         for i, t in enumerate(
@@ -772,7 +779,7 @@ def main():
     apply_rank_changes(themes_out, current_history)
 
     output = {
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "actual_date": actual_date,
         "kospi":  indices.get("kospi",  {"value": 0.0, "change_pct": 0.0}),
         "kosdaq": indices.get("kosdaq", {"value": 0.0, "change_pct": 0.0}),
