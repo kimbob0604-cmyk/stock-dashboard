@@ -18,12 +18,33 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from itertools import combinations as _comb
 from pathlib import Path
+
+# ── .env 파일 로더 (python-dotenv 미의존) ──────────────────────────────
+# 로컬 개발 시 .env 파일이 있으면 os.environ 에 병합.
+# Render/프로덕션은 서비스의 환경변수를 직접 사용하므로 .env 가 없어도 무해.
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            os.environ.setdefault(key, val)  # 기존 환경변수 덮어쓰지 않음
+    except Exception as exc:
+        print(f"[.env 로드 실패] {exc}")
+
+_load_dotenv(Path(__file__).parent / ".env")
 
 # Render 등 UTC 서버에서도 KST 기준으로 날짜/시간 계산
 KST = timezone(timedelta(hours=9))
@@ -55,7 +76,6 @@ _scheduler = None
 BASE_DIR  = Path(__file__).parent
 DATA_JSON = BASE_DIR / "data.json"
 FETCHER   = BASE_DIR / "data_fetcher.py"
-import os
 # Render 등 호스팅 환경은 PORT 환경변수를 주입하며 0.0.0.0 바인딩이 필요.
 # 로컬 실행 시에는 127.0.0.1:8080 기본값 유지.
 PORT      = int(os.environ.get("PORT", 8080))
@@ -484,16 +504,76 @@ def api_stock_search():
     return jsonify(results)
 
 
+def _get_krx_all_stocks_cached() -> dict:
+    """
+    KRX Open API 로 KOSPI+KOSDAQ 전 종목 시세를 조회, 종목코드-레코드 dict 로 반환.
+    일 1회 호출 → cache/krx_all_stocks_{today}.json.
+    구독되지 않은 경우 {} 반환.
+
+    각 레코드는 KRX 응답 필드를 그대로 보관 (ISU_SRT_CD, ISU_ABBRV, TDD_CLSPRC,
+    FLUC_RT, ACC_TRDVAL, MKTCAP 등). 호출 측에서 필요 키만 추출.
+    """
+    today      = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"krx_all_stocks_{today}.json"
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    try:
+        import krx_api
+    except ImportError:
+        return {}
+
+    if not krx_api.has_api_key():
+        return {}
+
+    rows: list = []
+    k = krx_api.krx_all_stocks_kospi(today)
+    if k: rows.extend(k)
+    q = krx_api.krx_all_stocks_kosdaq(today)
+    if q: rows.extend(q)
+
+    if not rows:
+        return {}
+
+    # code → record
+    out = {}
+    for r in rows:
+        code = r.get("ISU_SRT_CD") or r.get("ISU_CD") or r.get("isuSrtCd")
+        if code:
+            out[str(code).strip()] = r
+
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+def _krx_get_float(row: dict, *keys) -> float | None:
+    """KRX 응답에서 숫자 필드 추출. 콤마 포함 문자열도 처리."""
+    for k in keys:
+        v = row.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            return float(str(v).replace(",", ""))
+        except ValueError:
+            continue
+    return None
+
+
 @app.route("/api/screener")
 def api_screener():
     """
-    종목 스크리너 — data.json 테마 종목 + pykrx 펀더멘털(있으면) 캐시 기반 필터.
-    API 호출 0회 (이미 수집된 데이터에서 서버-사이드 필터).
+    종목 스크리너 — data.json 테마 종목을 기본 소스로 하고,
+    KRX Open API 가 구독되어 있으면 전 종목 시세로 보강(시총·등락률 등).
+    API 호출은 일 1회만 발생 (캐시).
     """
     args = request.args
-    market     = (args.get("market") or "ALL").upper()   # ALL, KOSPI, KOSDAQ
+    market     = (args.get("market") or "ALL").upper()
     min_change = float(args.get("min_change", "-100") or -100)
-    min_volume = float(args.get("min_volume", "0")    or 0)    # 거래대금 (백만원)
+    min_volume = float(args.get("min_volume", "0")    or 0)
     max_per    = float(args.get("max_per",    "9999") or 9999)
     max_pbr    = float(args.get("max_pbr",    "9999") or 9999)
     q          = (args.get("q") or "").strip()
@@ -505,9 +585,9 @@ def api_screener():
     except Exception:
         return jsonify({"error": "data.json 로드 실패"}), 500
 
-    # 펀더멘털 캐시 로드 (선택적 — 없으면 필터 무시)
-    today = _get_trading_date()
-    fund_file = BASE_DIR / "cache" / f"fundamental_{today}.json"
+    krx_stocks  = _get_krx_all_stocks_cached()   # code → KRX 레코드 (빈 dict면 미구독)
+    today       = _get_trading_date()
+    fund_file   = BASE_DIR / "cache" / f"fundamental_{today}.json"
     fundamentals: dict = {}
     if fund_file.exists():
         try:
@@ -515,7 +595,6 @@ def api_screener():
         except Exception:
             fundamentals = {}
 
-    # 종목 flatten (테마 중복 제거)
     seen = set()
     results = []
     for theme in data.get("themes", []):
@@ -528,25 +607,42 @@ def api_screener():
             chg    = float(s.get("change_pct", 0.0))
             vol_mn = float(s.get("volume_mn",  0.0))
 
+            # KRX 보강 (가능하면 KRX 수치 우선)
+            krx_row = krx_stocks.get(code) or {}
+            mkt     = ""
+            market_cap = None
+            if krx_row:
+                krx_chg = _krx_get_float(krx_row, "FLUC_RT", "flucRt", "CHG_RT")
+                if krx_chg is not None:
+                    chg = krx_chg
+                krx_vol = _krx_get_float(krx_row, "ACC_TRDVAL", "accTrdVal", "TRDVAL")
+                if krx_vol is not None:
+                    vol_mn = krx_vol / 1_000_000   # 원 → 백만원
+                market_cap = _krx_get_float(krx_row, "MKTCAP", "mktCap")
+                if market_cap is not None:
+                    market_cap = market_cap / 1_000_000    # 원 → 백만원
+                mkt = krx_row.get("MKT_NM") or krx_row.get("mktNm") or ""
+                if "KOSPI" in mkt.upper() or "유가증권" in mkt:
+                    mkt = "KOSPI"
+                elif "KOSDAQ" in mkt.upper() or "코스닥" in mkt:
+                    mkt = "KOSDAQ"
+
             f = fundamentals.get(code, {})
-            per        = f.get("per")
-            pbr        = f.get("pbr")
-            market_cap = f.get("market_cap")     # 백만원
-            mkt        = f.get("market", "")     # KOSPI | KOSDAQ | ''
+            per = f.get("per")
+            pbr = f.get("pbr")
+            if market_cap is None:
+                market_cap = f.get("market_cap")
+            if not mkt:
+                mkt = f.get("market", "")
 
             # 필터
             if market != "ALL" and mkt and mkt != market:
                 continue
-            if chg < min_change:
-                continue
-            if vol_mn < min_volume:
-                continue
-            if per is not None and per > max_per:
-                continue
-            if pbr is not None and pbr > max_pbr:
-                continue
-            if q and q not in code and q not in name:
-                continue
+            if chg < min_change:                             continue
+            if vol_mn < min_volume:                          continue
+            if per is not None and per > max_per:            continue
+            if pbr is not None and pbr > max_pbr:            continue
+            if q and q not in code and q not in name:        continue
 
             results.append({
                 "code": code, "name": name,
@@ -558,12 +654,12 @@ def api_screener():
                 "theme": theme.get("name"),
             })
 
-    # 거래대금 내림차순 정렬, 최대 100개
     results.sort(key=lambda r: r["volume_mn"], reverse=True)
     return jsonify({
         "count": len(results),
         "stocks": results[:100],
         "has_fundamentals": bool(fundamentals),
+        "krx_api_enriched": bool(krx_stocks),
     })
 
 
@@ -688,9 +784,54 @@ def api_short():
 @app.route("/api/sectors")
 def api_sectors():
     """
-    업종별 지수 — pykrx get_index_ohlcv_by_date 시도 (현재 대부분 실패).
-    실패 시 data.json 테마를 대안으로 반환한다 (custom sector 대체).
+    업종별 지수 — KRX Open API idx/kospi_dd_trd + idx/kosdaq_dd_trd 에서
+    업종지수만 필터링하여 반환. 구독되지 않았거나 실패 시 data.json themes 로 대체.
     """
+    today      = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"krx_sectors_{today}.json"
+
+    # KRX API 결과 캐시
+    sectors_krx = None
+    if cache_file.exists():
+        try:
+            sectors_krx = json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            sectors_krx = None
+
+    if sectors_krx is None:
+        try:
+            import krx_api
+            if krx_api.has_api_key():
+                rows: list = []
+                for series in (krx_api.krx_kospi_series(today),
+                               krx_api.krx_kosdaq_series(today)):
+                    if series:
+                        rows.extend(series)
+                if rows:
+                    sectors_krx = []
+                    for r in rows:
+                        name = (r.get("IDX_NM") or r.get("IDX_IND_NM") or "").strip()
+                        if not name:
+                            continue
+                        # 업종지수만 (대형주/중형주/소형주/KOSPI·KOSDAQ 대지수 제외 필터는 UI 측에서 선택)
+                        sectors_krx.append({
+                            "name":       name,
+                            "idx_class":  r.get("IDX_CLSS") or r.get("IDX_IND_CLSS"),
+                            "close":      _krx_get_float(r, "CLSPRC_IDX", "clsprcIdx", "TDD_CLSPRC"),
+                            "change_pct": _krx_get_float(r, "FLUC_RT", "flucRt"),
+                            "volume":     _krx_get_float(r, "ACC_TRDVOL", "accTrdVol"),
+                            "trd_value":  _krx_get_float(r, "ACC_TRDVAL", "accTrdVal"),
+                        })
+                    cache_file.parent.mkdir(exist_ok=True)
+                    cache_file.write_text(json.dumps(sectors_krx, ensure_ascii=False),
+                                          encoding="utf-8")
+        except Exception as exc:
+            print(f"[KRX 업종지수 로드 실패] {exc}")
+
+    if sectors_krx:
+        return jsonify({"source": "krx_open_api", "sectors": sectors_krx})
+
+    # Fallback: data.json themes
     if not DATA_JSON.exists():
         return jsonify({"error": "data.json 미수집"}), 503
     try:
@@ -698,7 +839,6 @@ def api_sectors():
     except Exception:
         return jsonify({"error": "data.json 로드 실패"}), 500
 
-    # 현재는 테마맵 데이터를 그대로 반환 (pykrx 업종지수 API 부재)
     themes = data.get("themes", [])
     sectors = [{
         "name":             t.get("name"),
@@ -709,9 +849,27 @@ def api_sectors():
     } for t in themes]
 
     return jsonify({
-        "source": "themes_fallback",
-        "note":   "KRX 공식 업종지수 API 미연동. 현재는 테마 데이터로 대체 표시.",
+        "source":  "themes_fallback",
+        "note":    "KRX 업종지수 API 미구독. KRX_API_KEY 설정 + 마이페이지에서 "
+                   "idx/kospi_dd_trd, idx/kosdaq_dd_trd 구독 후 사용 가능.",
         "sectors": sectors,
+    })
+
+
+@app.route("/api/krx_status")
+def api_krx_status():
+    """KRX Open API 구독 상태 진단 — 각 엔드포인트에 실제 호출해서 성공 여부 리포트."""
+    try:
+        import krx_api
+    except ImportError:
+        return jsonify({"error": "krx_api 모듈 로드 실패"}), 500
+    return jsonify({
+        "has_api_key": krx_api.has_api_key(),
+        "base_url":    krx_api.KRX_API_BASE,
+        "probed_date": _get_trading_date(),
+        "subscriptions": krx_api.probe_subscriptions(_get_trading_date()),
+        "note": ("각 엔드포인트별로 openapi.krx.co.kr 마이페이지에서 별도 구독이 필요합니다. "
+                 "ok=false 인 항목은 '활용 신청' 후 다시 호출하세요."),
     })
 
 

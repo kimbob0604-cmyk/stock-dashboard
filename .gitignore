@@ -14,6 +14,11 @@ env/
 cache/
 data.json
 
+# Secrets (API 키 등) — 절대 커밋 금지
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 .idea/

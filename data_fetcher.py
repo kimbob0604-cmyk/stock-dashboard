@@ -26,9 +26,26 @@ data_fetcher.py  —  한국 주식 테마 데이터 수집기
 
 import argparse
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── .env 로더 (python-dotenv 미의존) ──
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except Exception as exc:
+        print(f"[.env 로드 실패] {exc}")
+
+_load_dotenv(Path(__file__).parent / ".env")
 
 # ── 한국 시간대 ─────────────────────────────────────────────────────
 # Render 등 UTC 서버에서도 KST 기준으로 날짜가 계산되도록 명시.
