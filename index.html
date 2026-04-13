@@ -1482,23 +1482,40 @@ function renderList() {
 // ─────────────────────────────────────────────────────────────────────────────
 // DETAIL
 // ─────────────────────────────────────────────────────────────────────────────
+// 종목 이름의 HTML 안전 이스케이프 (innerHTML 템플릿 인젝션 방지)
+function _escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function renderStockGrid(theme) {
   const stocks = sortStocks(theme.stocks);
   const grid   = document.getElementById('stock-grid');
   grid.innerHTML = '';
-  stocks.forEach(s => {
+
+  console.log('[renderStockGrid] theme=', theme.name, 'id=', theme.id,
+              'stocks=', stocks.length,
+              'codes=', stocks.map(s => s.code));
+
+  stocks.forEach((s, i) => {
     const card = document.createElement('div');
     card.className = 's-card';
-    // 종목코드를 DOM 속성에 박아두어 클릭 시 index/closure 에 의존하지 않도록 한다.
-    card.dataset.code = s.code;
-    card.dataset.name = s.name;
+    // ── 단일 진실 원천: dataset.code / dataset.name ──
+    // 클릭 이벤트가 이 속성만 읽도록 해 index/closure 의존을 완전히 제거.
+    card.dataset.code  = s.code;
+    card.dataset.name  = s.name;
+    card.dataset.index = String(i);                 // 디버그 전용 (매칭에는 사용 X)
+
     const pct = s.change_pct;
+    const safeName = _escHtml(s.name);
+    const safeCode = _escHtml(s.code);
     card.innerHTML = `
       <div class="s-info">
-        <div class="s-name" title="${s.name}">${s.name}</div>
-        <div class="s-code">${s.code}</div>
+        <div class="s-name" title="${safeName}">${safeName}</div>
+        <div class="s-code">${safeCode}</div>
       </div>
-      <div class="s-spark" id="spark-${theme.id}-${s.code}"></div>
+      <div class="s-spark" id="spark-${theme.id}-${safeCode}"></div>
       <div class="s-right">
         <div class="s-pct" style="color:${pctTextColor(pct)}">${fmtPct(pct)}</div>
         <div class="s-vol">${(s.volume_mn || 0).toLocaleString()}M</div>
@@ -1515,13 +1532,42 @@ function renderStockGrid(theme) {
 }
 
 // Event delegation — 한 번만 바인딩되므로 재렌더 중복 리스너/메모리 누수 없음.
+// 클릭 시 읽는 것은 card.dataset.code 하나뿐 (index/closure 의존 0).
 document.getElementById('stock-grid').addEventListener('click', (e) => {
   const card = e.target.closest('.s-card');
   if (!card) return;
-  const code = card.dataset.code;
-  const name = card.dataset.name;
-  console.log('[stock-card click]', { code, name });
-  if (code) openChartPanel(code, name);
+
+  const code      = card.dataset.code;
+  const name      = card.dataset.name;
+  const debugIdx  = card.dataset.index;
+
+  // 🔎 sanity check: card 안에 실제로 표시된 code 문자열과 dataset.code 가 일치해야 한다.
+  //   (렌더 드리프트/부분 업데이트가 있었다면 여기서 mismatch 가 드러난다.)
+  const shownCode = card.querySelector('.s-code')?.textContent?.trim();
+  const shownName = card.querySelector('.s-name')?.textContent?.trim();
+
+  console.log('[stock-card click]', {
+    dataset_code: code,
+    dataset_name: name,
+    dataset_index: debugIdx,
+    shown_code:   shownCode,
+    shown_name:   shownName,
+    card_element: card,
+  });
+
+  if (!code) {
+    console.error('[stock-card click] ❌ dataset.code 누락', card);
+    return;
+  }
+  if (shownCode && shownCode !== code) {
+    console.error('[stock-card click] ❌ 카드 DOM 드리프트 감지',
+                  'dataset.code=', code, 'shown=', shownCode,
+                  '→ shown 쪽을 신뢰');
+    openChartPanel(shownCode, shownName || code);
+    return;
+  }
+
+  openChartPanel(code, name);
 });
 
 function showDetail(theme) {
@@ -1608,45 +1654,75 @@ function renderNewHighSectors() {
 let _chartRequestCode = null;
 
 async function openChartPanel(code, hintName) {
+  console.log('[openChartPanel] ▶ entry', { code, hintName, _chartRequestCode_prev: _chartRequestCode });
+
+  if (!code || !/^\d{6}$/.test(String(code))) {
+    console.error('[openChartPanel] ❌ invalid code:', code);
+    return;
+  }
+
   _chartRequestCode = code;                 // 이 클릭의 토큰 = 종목코드
   const panel = document.getElementById('chart-panel');
   panel.dataset.code = code;                // 어떤 종목을 표시 중인지 DOM에도 기록
   panel.style.display = '';
+  // 이전 콘텐츠를 즉시 clear → 이전 차트 잔상이 남지 않도록.
+  const safeCode = _escHtml(code);
+  const safeName = _escHtml(hintName || code);
   panel.innerHTML = `
     <div class="chart-header">
-      <span class="chart-title">${hintName || code} (${code})</span>
+      <span class="chart-title">${safeName} (${safeCode})</span>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
-    <div class="chart-loading"><div class="spin"></div>차트 데이터 로딩 중… (${code})</div>`;
+    <div class="chart-loading"><div class="spin"></div>차트 데이터 로딩 중… (${safeCode})</div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
+  const fetchUrl = `/api/chart/${code}`;
+  console.log('[openChartPanel] 🌐 fetch', fetchUrl);
+
   let data;
   try {
-    const res = await fetch(`/api/chart/${code}`, { cache: 'no-store' });
+    const res = await fetch(fetchUrl, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     data = await res.json();
     if (data.error) throw new Error(data.error);
+    console.log('[openChartPanel] ✅ response', {
+      requested: code,
+      returned_code: data.code,
+      returned_name: data.name,
+      candles: Array.isArray(data.close) ? data.close.length : 0,
+    });
   } catch (err) {
-    if (_chartRequestCode !== code) return; // 더 최근 요청이 있으면 버린다
+    if (_chartRequestCode !== code) {
+      console.log('[openChartPanel] ⚠  error but stale, drop', { code, latest: _chartRequestCode });
+      return;
+    }
     panel.innerHTML = `
       <div class="chart-header">
-        <span class="chart-title">${hintName || code} (${code})</span>
+        <span class="chart-title">${safeName} (${safeCode})</span>
         <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
       </div>
-      <div class="chart-error">차트 로드 실패: ${err.message}</div>`;
+      <div class="chart-error">차트 로드 실패: ${_escHtml(err.message)}</div>`;
     document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
     return;
   }
 
   // 응답이 돌아오는 사이 사용자가 다른 종목을 눌렀다면 이 결과는 버린다.
   if (_chartRequestCode !== code) {
-    console.log('[openChartPanel] stale response discarded:', code, '→ latest:', _chartRequestCode);
+    console.log('[openChartPanel] ⚠  stale response discarded:', code, '→ latest:', _chartRequestCode);
     return;
   }
   // 서버가 돌려준 코드와 요청한 코드가 다르면 서버/캐시 문제 — 방어적으로 중단.
-  if (data.code && data.code !== code) {
-    console.error('[openChartPanel] code mismatch — requested:', code, 'got:', data.code);
+  if (data.code && String(data.code) !== String(code)) {
+    console.error('[openChartPanel] ❌ server returned different code',
+                  { requested: code, got: data.code });
+    panel.innerHTML = `
+      <div class="chart-header">
+        <span class="chart-title">${safeName} (${safeCode})</span>
+        <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
+      </div>
+      <div class="chart-error">서버 응답 코드 불일치 (요청 ${safeCode}, 응답 ${_escHtml(String(data.code))}) — 캐시 문제일 수 있습니다. 새로고침 후 재시도해 주세요.</div>`;
+    document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
     return;
   }
 
