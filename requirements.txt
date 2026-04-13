@@ -5,3 +5,5 @@ APScheduler>=3.10
 gunicorn>=21.2
 yfinance>=0.2.40
 requests>=2.31
+beautifulsoup4>=4.12
+PyPDF2>=3.0

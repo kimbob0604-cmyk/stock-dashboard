@@ -563,6 +563,429 @@ def _krx_get_float(row: dict, *keys) -> float | None:
     return None
 
 
+def _get_stock_name(code: str) -> str | None:
+    """
+    종목 코드로부터 이름 조회. data.json 테마 → cache/stock_master_*.json 순서로 탐색.
+    """
+    code = (code or "").strip()
+    if not code:
+        return None
+    if DATA_JSON.exists():
+        try:
+            data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+            for theme in data.get("themes", []):
+                for s in theme.get("stocks", []):
+                    if s.get("code") == code:
+                        return s.get("name") or code
+        except Exception:
+            pass
+    # stock_master cache fallback
+    import glob as _glob
+    masters = sorted(
+        _glob.glob(str(BASE_DIR / "cache" / "stock_master_*.json")), reverse=True
+    )
+    for m in masters:
+        try:
+            with open(m, encoding="utf-8") as f:
+                master = json.load(f)
+            if code in master:
+                return master[code]
+        except Exception:
+            continue
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 뉴스 검색 (네이버 검색 API)  —  Phase 10
+# ─────────────────────────────────────────────────────────────────────────────
+def _format_time_ago(pub_date_str: str) -> str:
+    """RFC 2822 (pubDate) → 'N분 전/N시간 전/N일 전' 한국어 표기."""
+    try:
+        from email.utils import parsedate_to_datetime
+        pub_dt = parsedate_to_datetime(pub_date_str)
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+        delta = now_kst() - pub_dt.astimezone(KST)
+        mins  = int(delta.total_seconds() / 60)
+        if mins < 1:   return "방금"
+        if mins < 60:  return f"{mins}분 전"
+        hrs = mins // 60
+        if hrs < 24:   return f"{hrs}시간 전"
+        days = hrs // 24
+        return f"{days}일 전"
+    except Exception:
+        return ""
+
+
+_NEWS_SOURCE_MAP = {
+    # 주요 경제/종합지
+    "hankyung.com": "한국경제",       "mk.co.kr":      "매일경제",
+    "sedaily.com":  "서울경제",       "edaily.co.kr":  "이데일리",
+    "mt.co.kr":     "머니투데이",     "news1.kr":      "뉴스1",
+    "newsis.com":   "뉴시스",         "yna.co.kr":     "연합뉴스",
+    "yonhapnewstv.co.kr": "연합뉴스TV",
+    "chosun.com":   "조선일보",       "donga.com":     "동아일보",
+    "joongang.co.kr": "중앙일보",     "khan.co.kr":    "경향신문",
+    "heraldcorp.com": "헤럴드경제",   "fnnews.com":    "파이낸셜뉴스",
+    "etnews.com":   "전자신문",       "thebell.co.kr": "더벨",
+    "bloter.net":   "블로터",         "businesspost.co.kr": "비즈니스포스트",
+    "infostock.co.kr": "인포스탁데일리", "etoday.co.kr":    "이투데이",
+    "ajunews.com":  "아주경제",       "biz.chosun.com": "조선비즈",
+    "dt.co.kr":     "디지털타임스",   "asiae.co.kr":   "아시아경제",
+    "einfomax.co.kr": "연합인포맥스", "newspim.com":   "뉴스핌",
+    "tf.co.kr":     "더팩트",         "ebn.co.kr":     "EBN",
+    "smedaily.co.kr": "SME데일리",    "pinpointnews.co.kr": "핀포인트뉴스",
+    "niceeconomy.co.kr": "나이스경제", "lcnews.co.kr": "로컬뉴스",
+    "joongangenews.com": "중앙이뉴스",
+}
+
+def _news_source(url: str) -> str:
+    u = (url or "").lower()
+    for domain, name in _NEWS_SOURCE_MAP.items():
+        if domain in u:
+            return name
+    return "기타"
+
+
+def _strip_html(s: str) -> str:
+    import re as _re
+    return _re.sub(r"<[^>]+>", "", s or "")
+
+
+@app.route("/api/news/<code>")
+def api_news(code: str):
+    """
+    종목 관련 뉴스 검색 (네이버 검색 API).
+    캐시: cache/news_{code}.json, TTL 1시간.
+    NAVER_CLIENT_ID/SECRET 미설정 시 503 + hint.
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    stock_name = _get_stock_name(code)
+    if not stock_name:
+        return jsonify({"error": "종목 없음"}), 404
+
+    cache_file = BASE_DIR / "cache" / f"news_{code}.json"
+    if cache_file.exists():
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            if age_min < 60:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    client_id     = os.environ.get("NAVER_CLIENT_ID", "")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
+    if not (client_id and client_secret):
+        return jsonify({
+            "error": "네이버 검색 API 키 미설정",
+            "hint":  ".env 또는 환경변수에 NAVER_CLIENT_ID, NAVER_CLIENT_SECRET 추가",
+        }), 503
+
+    try:
+        import requests as _rq
+        res = _rq.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            headers={
+                "X-Naver-Client-Id":     client_id,
+                "X-Naver-Client-Secret": client_secret,
+            },
+            params={
+                "query":   f"{stock_name} 주가",
+                "display": 15,
+                "sort":    "date",
+            },
+            timeout=8,
+        )
+        res.raise_for_status()
+        data = res.json()
+    except Exception as exc:
+        return jsonify({"error": f"네이버 API 호출 실패: {exc}"}), 502
+
+    items_in = data.get("items", []) or []
+    items = []
+    for it in items_in:
+        link = it.get("originallink") or it.get("link") or ""
+        items.append({
+            "title":       _strip_html(it.get("title", "")),
+            "description": _strip_html(it.get("description", "")),
+            "link":        link,
+            "source":      _news_source(link),
+            "pubDate":     it.get("pubDate", ""),
+            "timeAgo":     _format_time_ago(it.get("pubDate", "")),
+        })
+
+    result = {
+        "code":  code,
+        "name":  stock_name,
+        "count": len(items),
+        "items": items,
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 애널 리포트 마이닝 (네이버 금융 리서치 + PyPDF2)  —  Phase 10
+# ─────────────────────────────────────────────────────────────────────────────
+def _crawl_naver_research(code: str) -> list[dict]:
+    """네이버 금융 리서치 페이지에서 해당 종목의 리포트 목록 스크랩."""
+    import requests as _rq
+    from bs4 import BeautifulSoup
+
+    url = "https://finance.naver.com/research/company_list.naver"
+    res = _rq.get(
+        url,
+        params={"searchType": "itemCode", "itemCode": code},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    res.encoding = "euc-kr"
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    table = soup.select_one("table.type_1")
+    if table is None:
+        return []
+
+    out: list[dict] = []
+    for row in table.select("tr"):
+        cols = row.select("td")
+        if len(cols) < 5:
+            continue
+        title_tag = cols[1].select_one("a")
+        if title_tag is None:
+            continue
+        title       = title_tag.text.strip()
+        detail_link = title_tag.get("href", "")
+
+        pdf_url = ""
+        pdf_tag = cols[1].select_one('a[href$=".pdf"]')
+        if pdf_tag is None:
+            # 일부 레이아웃은 별도 셀(다운로드 아이콘)에 pdf 링크가 있음
+            for a in row.select('a[href$=".pdf"]'):
+                pdf_url = a.get("href", "")
+                break
+        else:
+            pdf_url = pdf_tag.get("href", "")
+
+        broker = cols[2].text.strip() if len(cols) > 2 else ""
+        date   = cols[3].text.strip() if len(cols) > 3 else ""
+        out.append({
+            "title":       title,
+            "broker":      broker,
+            "date":        date,
+            "pdf_url":     pdf_url,
+            "detail_link": (
+                f"https://finance.naver.com/research/{detail_link}"
+                if detail_link else ""
+            ),
+        })
+    return out
+
+
+def _extract_report_pdf(report_info: dict) -> dict:
+    """리포트 PDF 텍스트 추출 + 정규식 규칙 기반 핵심 수치 추출."""
+    import re as _re
+    import requests as _rq
+    from io import BytesIO
+
+    result = {
+        "title":            report_info.get("title", ""),
+        "broker":           report_info.get("broker", ""),
+        "date":             report_info.get("date", ""),
+        "pdf_url":          report_info.get("pdf_url", ""),
+        "target_price":     None,
+        "opinion":          None,
+        "current_price":    None,
+        "upside":           None,
+        "key_points":       [],
+        "revenue_estimate": None,
+        "op_estimate":      None,
+        "eps_estimate":     None,
+    }
+    pdf_url = result["pdf_url"]
+    if not pdf_url:
+        return result
+
+    try:
+        pdf_res = _rq.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if pdf_res.status_code != 200:
+            return result
+        from PyPDF2 import PdfReader
+        reader = PdfReader(BytesIO(pdf_res.content))
+        text = ""
+        for i, page in enumerate(reader.pages):
+            if i >= 3:
+                break
+            t = page.extract_text() or ""
+            text += t + "\n"
+    except Exception as exc:
+        print(f"[리포트 PDF 추출 실패] {report_info.get('title','')}: {exc}")
+        return result
+
+    if not text:
+        return result
+
+    # ── 목표주가 ──
+    for pat in (
+        r"목표주가[:\s]*([0-9,]+)\s*원",
+        r"목표가[:\s]*([0-9,]+)\s*원",
+        r"Target\s*Price[:\s]*([0-9,]+)",
+        r"TP[:\s]*([0-9,]+)\s*원",
+        r"목표주가\s*\(원\)[:\s]*([0-9,]+)",
+        r"([0-9,]+)\s*원\s*\(목표주가\)",
+    ):
+        m = _re.search(pat, text)
+        if m:
+            try:
+                result["target_price"] = int(m.group(1).replace(",", ""))
+                break
+            except ValueError:
+                continue
+
+    # ── 투자의견 ──
+    opinion_map = {
+        "buy": "매수", "strong buy": "매수", "outperform": "매수", "비중확대": "매수",
+        "trading buy": "Trading Buy",
+        "neutral": "중립", "hold": "중립", "시장수익률": "중립",
+        "sell": "매도",  "underperform": "매도",  "비중축소": "매도",
+        "매수": "매수", "중립": "중립", "매도": "매도",
+    }
+    for pat in (
+        r"투자의견[:\s]*(매수|Buy|Strong Buy|Outperform|비중확대|중립|Neutral|Hold|시장수익률|매도|Sell|Underperform|비중축소|Trading Buy|Not Rated)",
+        r"Rating[:\s]*(Buy|Strong Buy|Outperform|Neutral|Hold|Sell|Underperform)",
+        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(유지\)",
+        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(상향\)",
+        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(하향\)",
+        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(신규\)",
+    ):
+        m = _re.search(pat, text, _re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            result["opinion"] = opinion_map.get(raw.lower(), raw)
+            break
+
+    # ── 상승여력 ──
+    for pat in (
+        r"상승여력[:\s]*([0-9.]+)\s*%",
+        r"Upside[:\s]*([0-9.]+)\s*%",
+        r"괴리율[:\s]*([0-9.]+)\s*%",
+    ):
+        m = _re.search(pat, text)
+        if m:
+            try:
+                result["upside"] = float(m.group(1))
+                break
+            except ValueError:
+                continue
+
+    # 목표주가 - 현재가 로 상승여력 역산
+    if result["upside"] is None and result["target_price"]:
+        for pat in (
+            r"현재주가[:\s]*([0-9,]+)\s*원",
+            r"현재가[:\s]*([0-9,]+)\s*원",
+            r"주가[:\s]*([0-9,]+)\s*원",
+        ):
+            m = _re.search(pat, text)
+            if m:
+                try:
+                    cur = int(m.group(1).replace(",", ""))
+                    result["current_price"] = cur
+                    if cur > 0:
+                        result["upside"] = round((result["target_price"] / cur - 1) * 100, 1)
+                    break
+                except ValueError:
+                    continue
+
+    # ── 매출·영업이익·EPS 추정 ──
+    m = _re.search(r"매출(?:액)?[:\s]*([0-9,.]+)\s*(조|억|백만)?", text)
+    if m:
+        result["revenue_estimate"] = m.group(1) + (m.group(2) or "")
+    m = _re.search(r"영업이익[:\s]*([0-9,.]+)\s*(조|억|백만)?", text)
+    if m:
+        result["op_estimate"] = m.group(1) + (m.group(2) or "")
+    m = _re.search(r"(?:EPS|주당순이익)[:\s]*([0-9,]+)\s*원?", text)
+    if m:
+        result["eps_estimate"] = m.group(1) + "원"
+
+    # ── 핵심 포인트 (글머리 기호) ──
+    bullets: list[str] = []
+    for pat in (
+        r"[•·▶►■□○●➜➤\-]\s*(.{15,80})",
+        r"\d\)\s*(.{15,80})",
+        r"\d\.\s*(.{15,80})",
+    ):
+        for m in _re.findall(pat, text):
+            cleaned = m.strip()
+            if len(cleaned) > 15 and _re.search(r"[가-힣]", cleaned):
+                if cleaned not in bullets:
+                    bullets.append(cleaned)
+            if len(bullets) >= 5:
+                break
+        if len(bullets) >= 5:
+            break
+    result["key_points"] = bullets[:5]
+    return result
+
+
+@app.route("/api/reports/<code>")
+def api_reports(code: str):
+    """
+    종목 관련 증권사 리포트 크롤링 + 규칙 기반 핵심 정보 추출.
+    캐시: cache/reports_{code}.json, TTL 6시간.
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    stock_name = _get_stock_name(code)
+    if not stock_name:
+        return jsonify({"error": "종목 없음"}), 404
+
+    cache_file = BASE_DIR / "cache" / f"reports_{code}.json"
+    if cache_file.exists():
+        try:
+            age_hr = (now_kst().timestamp() - cache_file.stat().st_mtime) / 3600
+            if age_hr < 6:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    try:
+        report_list = _crawl_naver_research(code)
+    except Exception as exc:
+        return jsonify({"error": f"리서치 크롤링 실패: {exc}", "items": []}), 502
+
+    reports: list[dict] = []
+    for info in report_list[:5]:
+        try:
+            extracted = _extract_report_pdf(info)
+            if extracted:
+                reports.append(extracted)
+        except Exception as exc:
+            print(f"[리포트 추출 실패] {info.get('title','')}: {exc}")
+            continue
+
+    result = {
+        "code":  code,
+        "name":  stock_name,
+        "count": len(reports),
+        "items": reports,
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify(result)
+
+
 @app.route("/api/screener")
 def api_screener():
     """

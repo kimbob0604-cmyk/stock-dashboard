@@ -792,6 +792,91 @@ select:focus { border-color: var(--accent); }
   margin-top: 14px; padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* ── CHART PANEL TABS (Phase 10) ──────────────────────────────────── */
+.chart-tab-bar {
+  display: flex; gap: 0;
+  margin-top: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.chart-tab-btn {
+  background: none; border: none; color: var(--text-sub);
+  padding: 10px 20px; cursor: pointer;
+  font-size: 13px; font-weight: 600; font-family: inherit;
+  border-bottom: 2px solid transparent;
+  transition: color 0.1s, border-color 0.1s;
+}
+.chart-tab-btn:hover         { color: var(--text); }
+.chart-tab-btn.active        { color: var(--text); border-bottom-color: #FF3333; }
+
+#chart-tab-content { padding-top: 6px; }
+.chart-empty {
+  background: var(--surface2); border: 1px dashed var(--border);
+  border-radius: 10px; padding: 26px; text-align: center;
+  color: var(--text-muted); font-size: 13px; margin-top: 14px;
+}
+.chart-empty .chart-empty-title { color: var(--text); font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+
+/* 뉴스 리스트 */
+.news-list   { padding: 14px 0; }
+.news-header { color: var(--text-muted); font-size: 12px; margin-bottom: 10px; }
+.news-item {
+  display: block; padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  transition: background 0.1s;
+  border-radius: 6px;
+}
+.news-item:hover { background: var(--surface2); }
+.news-title  { color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.4; }
+.news-desc   { color: var(--text-sub); font-size: 12px; margin-top: 5px; line-height: 1.5; }
+.news-meta   { margin-top: 6px; }
+.news-source { color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.news-time   { color: var(--text-muted); font-size: 11px; margin-left: 10px; }
+
+/* 리포트 카드 */
+.report-list   { padding: 14px 0; }
+.report-header { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
+.report-item {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; margin-bottom: 12px;
+}
+.report-top { margin-bottom: 12px; }
+.report-title-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 4px;
+}
+.report-broker { color: #FFD700; font-size: 12px; font-weight: 700; }
+.report-date   { color: var(--text-muted); font-size: 11px; }
+.report-title  { color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.4; }
+
+.report-metrics {
+  display: flex; gap: 24px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.report-metric { text-align: left; }
+.metric-label  { display: block; color: var(--text-muted); font-size: 11px; margin-bottom: 3px; }
+.metric-value  { font-size: 15px; font-weight: 700; color: var(--text); }
+
+.report-keypoints { margin-top: 8px; }
+.keypoints-label  { color: var(--text-muted); font-size: 12px; margin-bottom: 5px; }
+.keypoint         { color: var(--text); font-size: 12.5px; line-height: 1.55; }
+
+.report-estimates { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.estimate-tag {
+  background: var(--bg); color: var(--text-sub);
+  padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; border: 1px solid var(--border);
+}
+
+.report-pdf-link {
+  display: inline-block; margin-top: 10px;
+  color: #6495ED; font-size: 12px; text-decoration: none;
+}
+.report-pdf-link:hover { text-decoration: underline; }
 </style>
 </head>
 <body class="page-thememap">
@@ -1577,12 +1662,156 @@ async function openChartPanel(code, hintName) {
     <div class="chart-canvas-wrap">
       <canvas id="cv-volume" width="${W}" height="${HV}"></canvas>
     </div>
-    <div id="chart-analysis"></div>`;
+    <div class="chart-tab-bar" id="chart-tab-bar">
+      <button class="chart-tab-btn active" data-ctab="analysis">기술적 분석</button>
+      <button class="chart-tab-btn"        data-ctab="reports">리포트</button>
+      <button class="chart-tab-btn"        data-ctab="news">뉴스</button>
+    </div>
+    <div id="chart-tab-content"></div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
 
   _drawCandles(document.getElementById('cv-candle'), data, W, HC);
   _drawVolume(document.getElementById('cv-volume'),  data, W, HV);
-  _renderAnalysis(document.getElementById('chart-analysis'), data.analysis);
+
+  // Phase 10: 차트 패널 탭 상태 유지 + 기본은 '기술적 분석'
+  CHART_STATE.code = code;
+  CHART_STATE.data = data;
+  CHART_STATE.tab  = 'analysis';
+  _renderAnalysis(document.getElementById('chart-tab-content'), data.analysis);
+
+  document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
+}
+
+// Phase 10: chart panel 3-tab (analysis/reports/news) controller
+const CHART_STATE = { code: null, data: null, tab: 'analysis' };
+
+function _chartTabClick(e) {
+  const btn = e.target.closest('.chart-tab-btn');
+  if (!btn) return;
+  const tab = btn.dataset.ctab;
+  if (tab === CHART_STATE.tab) return;
+  document.querySelectorAll('#chart-tab-bar .chart-tab-btn')
+    .forEach(b => b.classList.toggle('active', b === btn));
+  CHART_STATE.tab = tab;
+  const container = document.getElementById('chart-tab-content');
+  if (tab === 'analysis') {
+    _renderAnalysis(container, CHART_STATE.data && CHART_STATE.data.analysis);
+  } else if (tab === 'reports') {
+    _loadReports(CHART_STATE.code, container);
+  } else if (tab === 'news') {
+    _loadNews(CHART_STATE.code, container);
+  }
+}
+
+async function _loadNews(code, container) {
+  container.innerHTML = '<div class="chart-loading"><div class="spin"></div>뉴스 로딩 중…</div>';
+  try {
+    const r = await fetch(`/api/news/${code}`);
+    const d = await r.json();
+    if (CHART_STATE.tab !== 'news' || CHART_STATE.code !== code) return;
+    if (!r.ok || d.error) {
+      container.innerHTML = `<div class="chart-empty">
+        <div class="chart-empty-title">뉴스를 불러올 수 없음</div>
+        ${d.error || ('HTTP ' + r.status)}
+        ${d.hint ? `<br><span style="color:var(--text-sub)">${d.hint}</span>` : ''}
+      </div>`;
+      return;
+    }
+    if (!d.items || !d.items.length) {
+      container.innerHTML = '<div class="chart-empty">관련 뉴스가 없습니다.</div>';
+      return;
+    }
+    const rows = d.items.map(it => `
+      <a class="news-item" href="${it.link}" target="_blank" rel="noopener">
+        <div class="news-title">${it.title}</div>
+        <div class="news-desc">${it.description}</div>
+        <div class="news-meta">
+          <span class="news-source">${it.source}</span>
+          <span class="news-time">${it.timeAgo}</span>
+        </div>
+      </a>`).join('');
+    container.innerHTML = `
+      <div class="news-list">
+        <div class="news-header">${d.name} 관련 뉴스 (${d.count}건)</div>
+        ${rows}
+      </div>`;
+  } catch (err) {
+    container.innerHTML = `<div class="chart-empty">뉴스 로드 실패: ${err.message}</div>`;
+  }
+}
+
+async function _loadReports(code, container) {
+  container.innerHTML = '<div class="chart-loading"><div class="spin"></div>리포트 로딩 중… (PDF 파싱 시간이 걸릴 수 있습니다)</div>';
+  try {
+    const r = await fetch(`/api/reports/${code}`);
+    const d = await r.json();
+    if (CHART_STATE.tab !== 'reports' || CHART_STATE.code !== code) return;
+    if (!r.ok || d.error) {
+      container.innerHTML = `<div class="chart-empty">
+        <div class="chart-empty-title">리포트를 불러올 수 없음</div>
+        ${d.error || ('HTTP ' + r.status)}
+      </div>`;
+      return;
+    }
+    if (!d.items || !d.items.length) {
+      container.innerHTML = '<div class="chart-empty">관련 증권사 리포트가 없습니다.</div>';
+      return;
+    }
+    const opinionColor = (op) => ({
+      '매수': '#FF3333', 'Trading Buy': '#FF7F50',
+      '중립': '#FFD700', '매도': '#33AA33',
+    })[op] || 'var(--text-sub)';
+
+    const rows = d.items.map(item => {
+      const target = item.target_price != null
+        ? `₩${item.target_price.toLocaleString()}`
+        : '—';
+      const upStr = item.upside != null
+        ? `${item.upside >= 0 ? '+' : ''}${item.upside}%`
+        : '—';
+      const upCol = item.upside != null && item.upside < 0 ? '#33AA33' : '#FF3333';
+      const estimates = [
+        item.revenue_estimate ? `<span class="estimate-tag">매출 ${item.revenue_estimate}</span>` : '',
+        item.op_estimate      ? `<span class="estimate-tag">영업이익 ${item.op_estimate}</span>`   : '',
+        item.eps_estimate     ? `<span class="estimate-tag">EPS ${item.eps_estimate}</span>`       : '',
+      ].filter(Boolean).join('');
+      const keyPts = (item.key_points || []).map(p => `<div class="keypoint">• ${p}</div>`).join('');
+      return `
+        <div class="report-item">
+          <div class="report-top">
+            <div class="report-title-row">
+              <span class="report-broker">${item.broker || '—'}</span>
+              <span class="report-date">${item.date || ''}</span>
+            </div>
+            <div class="report-title">${item.title}</div>
+          </div>
+          <div class="report-metrics">
+            <div class="report-metric">
+              <span class="metric-label">투자의견</span>
+              <span class="metric-value" style="color:${opinionColor(item.opinion)}">${item.opinion || '—'}</span>
+            </div>
+            <div class="report-metric">
+              <span class="metric-label">목표주가</span>
+              <span class="metric-value">${target}</span>
+            </div>
+            <div class="report-metric">
+              <span class="metric-label">상승여력</span>
+              <span class="metric-value" style="color:${upCol}">${upStr}</span>
+            </div>
+          </div>
+          ${keyPts ? `<div class="report-keypoints"><div class="keypoints-label">핵심 포인트</div>${keyPts}</div>` : ''}
+          ${estimates ? `<div class="report-estimates">${estimates}</div>` : ''}
+          ${item.pdf_url ? `<a class="report-pdf-link" href="${item.pdf_url}" target="_blank" rel="noopener">📄 PDF 원문 보기</a>` : ''}
+        </div>`;
+    }).join('');
+    container.innerHTML = `
+      <div class="report-list">
+        <div class="report-header">${d.name} 증권사 리포트 (최근 ${d.count}건)</div>
+        ${rows}
+      </div>`;
+  } catch (err) {
+    container.innerHTML = `<div class="chart-empty">리포트 로드 실패: ${err.message}</div>`;
+  }
 }
 
 function closeChartPanel() {
