@@ -1725,6 +1725,103 @@ def api_compare():
     return jsonify(result)
 
 
+@app.route("/api/price/<code>")
+def api_price(code: str):
+    """
+    단일 종목 현재가. 기존 캐시에서만 조회 (pykrx/외부 호출 없음).
+    우선순위:
+      1) naver_universe 캐시 (일 1회 빌드, 4,000+ 종목, Phase 10)
+      2) data.json 테마 종목 (134)
+      3) cache/chart_{code}_{date}.json (온디맨드 차트 캐시)
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    # 1) Naver universe
+    uni = _load_naver_universe()
+    if uni and code in uni.get("stocks", {}):
+        s = uni["stocks"][code]
+        close = s.get("close") or 0
+        chg   = float(s.get("change_pct", 0.0))
+        prev  = round(close / (1 + chg / 100)) if chg not in (0.0, None) and close else close
+        return jsonify({
+            "code":       code,
+            "name":       s.get("name", code),
+            "price":      int(close),
+            "prev_close": int(prev),
+            "change":     int(close - prev),
+            "change_pct": round(chg, 2),
+            "volume_mn":  int(s.get("volume_mn", 0)),
+            "source":     "naver_universe",
+            "fetched_at": uni.get("fetched_at"),
+        })
+
+    # 2) data.json themes
+    if DATA_JSON.exists():
+        try:
+            data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if data:
+            for theme in data.get("themes", []):
+                for s in theme.get("stocks", []):
+                    if s.get("code") != code:
+                        continue
+                    # 테마 엔트리에는 price 가 없고 change_pct 만 있음.
+                    # 가격은 chart 캐시에서 보강 시도.
+                    chg = float(s.get("change_pct", 0.0))
+                    price = None
+                    prev  = None
+                    today = _get_trading_date()
+                    cf = BASE_DIR / "cache" / f"chart_{code}_{today}.json"
+                    if cf.exists():
+                        try:
+                            chart = json.loads(cf.read_text(encoding="utf-8"))
+                            closes = chart.get("close", [])
+                            if len(closes) >= 2:
+                                price = int(closes[-1])
+                                prev  = int(closes[-2])
+                                chg   = round((price / prev - 1) * 100, 2) if prev else chg
+                        except Exception:
+                            pass
+                    return jsonify({
+                        "code":       code,
+                        "name":       s.get("name", code),
+                        "price":      price,
+                        "prev_close": prev,
+                        "change":     (price - prev) if (price is not None and prev is not None) else None,
+                        "change_pct": round(chg, 2),
+                        "volume_mn":  int(s.get("volume_mn", 0)),
+                        "source":     "data_json_themes",
+                        "fetched_at": data.get("updated_at"),
+                    })
+
+    # 3) Chart cache (last resort)
+    import glob as _glob
+    for cf in sorted(_glob.glob(str(BASE_DIR / "cache" / f"chart_{code}_*.json")), reverse=True):
+        try:
+            chart = json.loads(open(cf, encoding="utf-8").read())
+            closes = chart.get("close", [])
+            if len(closes) >= 2:
+                price = int(closes[-1])
+                prev  = int(closes[-2])
+                return jsonify({
+                    "code":       code,
+                    "name":       chart.get("name", code),
+                    "price":      price,
+                    "prev_close": prev,
+                    "change":     price - prev,
+                    "change_pct": round((price / prev - 1) * 100, 2) if prev else 0,
+                    "source":     "chart_cache",
+                    "fetched_at": chart.get("dates", [None])[-1],
+                })
+        except Exception:
+            continue
+
+    return jsonify({"error": "종목 없음"}), 404
+
+
 @app.route("/api/chart/<code>")
 def api_chart(code: str):
     import re as _re

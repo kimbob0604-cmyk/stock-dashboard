@@ -761,6 +761,79 @@ select:focus { border-color: var(--accent); }
   margin-bottom: 4px;
 }
 .chart-canvas-wrap canvas { display: block; }
+/* Phase 11: 차트 wrap 을 position:relative 로 두고 overlay canvas 를 절대 위치로 겹침 */
+.chart-cv-wrap { position: relative; }
+.chart-cv-wrap .chart-overlay {
+  position: absolute;
+  top: 8px;    /* wrap 의 padding-top 만큼 */
+  left: 0;
+  pointer-events: auto;
+  cursor: crosshair;
+  background: transparent;
+}
+
+/* OHLCV 트레이딩뷰 스타일 정보 바 (차트 좌측 상단 고정) */
+.ohlcv-bar {
+  position: absolute;
+  top: 14px;
+  left: 78px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: 'Noto Sans KR', sans-serif;
+  z-index: 12;
+  pointer-events: none;
+  background: rgba(28,28,30,0.82);
+  padding: 3px 10px;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+}
+.ohlcv-bar .ohlcv-date  { color: var(--text); font-weight: 700; margin-right: 6px; }
+.ohlcv-bar .ohlcv-label { color: var(--text-muted); margin-left: 4px; font-size: 10px; }
+.ohlcv-bar .ohlcv-value { color: var(--text); font-weight: 600; margin-left: 2px; }
+.ohlcv-bar .ohlcv-chg-label { margin-left: 6px; }
+
+/* 크로스헤어 축 라벨 */
+.crosshair-axis-label {
+  position: absolute;
+  background: var(--surface2);
+  color: var(--text);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: 'Noto Sans KR', sans-serif;
+  font-weight: 600;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  z-index: 11;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.crosshair-price {
+  right: 94px;            /* 캔들 우측 여백(120) 안쪽에 정렬 */
+  transform: translateY(-50%);
+}
+.crosshair-date {
+  bottom: 0;
+  transform: translateX(-50%);
+}
+
+/* 차트 헤더 좌측(제목 + 실시간 가격 세로 정렬) */
+.chart-header-left { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.chart-live-price {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+.live-price-value  { color: var(--text); font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+.live-price-change { font-size: 13px; font-weight: 600; }
+.live-price-time   { color: var(--text-muted); font-size: 11px; }
+
+.price-flash {
+  animation: price-flash 1s ease;
+}
+@keyframes price-flash {
+  0%, 10% { color: #FFD700; }
+  100%    { color: var(--text); }
+}
 .chart-loading, .chart-error {
   display: flex; align-items: center; justify-content: center;
   height: 100px; gap: 8px; color: var(--text-muted); font-size: 13px;
@@ -1747,17 +1820,53 @@ async function openChartPanel(code, hintName) {
   const W = 1152, HC = 400, HV = 80;
   // 🔒 헤더는 유저가 클릭한 code/name 을 고정. 서버 응답의 data.name 은 부가 정보로만 사용.
   const displayName = _escHtml(hintName || data.name || code);
+
+  // Phase 11: 초기 현재가/등락 — 서버가 돌려준 close 배열에서 계산
+  const closes = data.close || [];
+  const curPrice = closes.length ? closes[closes.length - 1] : 0;
+  const prevPrice = closes.length >= 2 ? closes[closes.length - 2] : curPrice;
+  const dayChg   = curPrice - prevPrice;
+  const dayChgPct= prevPrice ? (dayChg / prevPrice * 100) : 0;
+  const dayCol   = dayChg > 0 ? '#FF3333' : dayChg < 0 ? '#33AA33' : 'var(--text-muted)';
+  const daySign  = dayChg > 0 ? '+' : '';
+  const lastDate = (data.dates && data.dates[data.dates.length - 1]) || '';
+
   panel.innerHTML = `
     <div class="chart-header" data-header-code="${safeCode}">
-      <span class="chart-title">${displayName} (${safeCode})</span>
+      <div class="chart-header-left">
+        <span class="chart-title">${displayName} (${safeCode})</span>
+        <div class="chart-live-price" id="chart-live-price">
+          <span class="live-price-value">₩${curPrice.toLocaleString()}</span>
+          <span class="live-price-change" style="color:${dayCol}">
+            ${daySign}${dayChg.toLocaleString()} (${daySign}${dayChgPct.toFixed(2)}%)
+          </span>
+          <span class="live-price-time" id="chart-price-time">기준: ${_escHtml(lastDate)}</span>
+        </div>
+      </div>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
-    <div class="chart-canvas-wrap">
+
+    <div class="chart-canvas-wrap chart-cv-wrap">
       <canvas id="cv-candle" width="${W}" height="${HC}"></canvas>
+      <canvas id="cv-candle-overlay" width="${W}" height="${HC}" class="chart-overlay"></canvas>
+      <div id="ohlcv-bar" class="ohlcv-bar" style="display:none;">
+        <span class="ohlcv-date" id="ohlcv-date"></span>
+        <span class="ohlcv-label">시</span><span class="ohlcv-value" id="ohlcv-open"></span>
+        <span class="ohlcv-label">고</span><span class="ohlcv-value" id="ohlcv-high"></span>
+        <span class="ohlcv-label">저</span><span class="ohlcv-value" id="ohlcv-low"></span>
+        <span class="ohlcv-label">종</span><span class="ohlcv-value" id="ohlcv-close"></span>
+        <span class="ohlcv-label ohlcv-chg-label">등락</span><span class="ohlcv-value" id="ohlcv-chg"></span>
+        <span class="ohlcv-label">거래량</span><span class="ohlcv-value" id="ohlcv-vol"></span>
+      </div>
+      <div id="crosshair-price" class="crosshair-axis-label crosshair-price" style="display:none;"></div>
     </div>
-    <div class="chart-canvas-wrap">
+
+    <div class="chart-canvas-wrap chart-cv-wrap">
       <canvas id="cv-volume" width="${W}" height="${HV}"></canvas>
+      <canvas id="cv-volume-overlay" width="${W}" height="${HV}" class="chart-overlay"></canvas>
+      <div id="crosshair-date" class="crosshair-axis-label crosshair-date" style="display:none;"></div>
     </div>
+
     <div class="chart-tab-bar" id="chart-tab-bar">
       <button class="chart-tab-btn active" data-ctab="analysis">기술적 분석</button>
       <button class="chart-tab-btn"        data-ctab="reports">리포트</button>
@@ -1776,6 +1885,10 @@ async function openChartPanel(code, hintName) {
   _renderAnalysis(document.getElementById('chart-tab-content'), data.analysis);
 
   document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
+
+  // Phase 11: 크로스헤어 + 실시간 가격 polling
+  _setupCrosshair(data, W, HC, HV);
+  _startChartPricePolling(code);
 }
 
 // Phase 10: chart panel 3-tab (analysis/reports/news) controller
@@ -1916,6 +2029,7 @@ function closeChartPanel() {
     try { _chartAbortCtrl.abort(); } catch {}
     _chartAbortCtrl = null;
   }
+  _stopChartPricePolling();
   _chartRequestCode = null;
   CHART_STATE.code  = null;
   CHART_STATE.data  = null;
@@ -1927,26 +2041,241 @@ function closeChartPanel() {
   console.log('[closeChartPanel] 🗙 reset');
 }
 
-function _drawCandles(canvas, data, W, H) {
-  const ctx = canvas.getContext('2d');
-  const { dates, open: O, high: Hi, low: Lo, close: C, bollinger: bb, fibonacci: fib, trendlines: tl } = data;
-  const len = dates.length;
+// ─────────────────────────────────────────────────────────────────────────────
+// CROSSHAIR + OHLCV TOOLTIP (Phase 11)
+// ─────────────────────────────────────────────────────────────────────────────
+function _fmtVolShort(v) {
+  if (v >= 1e8) return (v / 1e8).toFixed(1) + '억';
+  if (v >= 1e4) return (v / 1e4).toFixed(0) + '만';
+  return v.toLocaleString();
+}
+
+function _setupCrosshair(data, W, HC, HV) {
+  const candleOv = document.getElementById('cv-candle-overlay');
+  const volOv    = document.getElementById('cv-volume-overlay');
+  if (!candleOv || !volOv) return;
+
+  const sc = _chartScale(data, W, HC);
+  const { PAD, cw, ch, len, toX, toY, fromX } = sc;
+
+  const ohlcvBar  = document.getElementById('ohlcv-bar');
+  const priceLbl  = document.getElementById('crosshair-price');
+  const dateLbl   = document.getElementById('crosshair-date');
+
+  const { dates, open: O, high: Hi, low: Lo, close: C, volume: V } = data;
+
+  const cCtx = candleOv.getContext('2d');
+  const vCtx = volOv.getContext('2d');
+  const volW = volOv.width;
+  const volH = volOv.height;
+  // 거래량 차트의 좌우 여백 (drawVolume 와 동일)
+  const volPAD = { top: 6, right: 120, bottom: 16, left: 68 };
+
+  function clear() {
+    cCtx.clearRect(0, 0, W, HC);
+    vCtx.clearRect(0, 0, volW, volH);
+    ohlcvBar.style.display = 'none';
+    priceLbl.style.display = 'none';
+    dateLbl.style.display  = 'none';
+  }
+
+  function drawAt(idx, mouseY) {
+    if (idx < 0 || idx >= len) return;
+    const x = toX(idx);
+
+    // ── 캔들 오버레이 ──
+    cCtx.clearRect(0, 0, W, HC);
+    cCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+    cCtx.lineWidth   = 1;
+    cCtx.setLineDash([4, 4]);
+    // 수직선
+    cCtx.beginPath(); cCtx.moveTo(x, PAD.top); cCtx.lineTo(x, HC - PAD.bottom); cCtx.stroke();
+    // 수평선 (mouseY 가 범위 내일 때만)
+    if (mouseY != null && mouseY >= PAD.top && mouseY <= HC - PAD.bottom) {
+      cCtx.beginPath();
+      cCtx.moveTo(PAD.left, mouseY);
+      cCtx.lineTo(W - PAD.right, mouseY);
+      cCtx.stroke();
+    }
+    cCtx.setLineDash([]);
+    // 캔들 하이라이트 박스
+    const bt = toY(Math.max(O[idx], C[idx]));
+    const bb2 = toY(Math.min(O[idx], C[idx]));
+    cCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+    cCtx.lineWidth = 1;
+    cCtx.strokeRect(x - sc.bw / 2 - 1, bt - 1, sc.bw + 2, Math.max(1, bb2 - bt + 2));
+
+    // ── 거래량 오버레이 (수직선 동기화) ──
+    vCtx.clearRect(0, 0, volW, volH);
+    vCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+    vCtx.lineWidth = 1;
+    vCtx.setLineDash([4, 4]);
+    vCtx.beginPath();
+    vCtx.moveTo(x, volPAD.top);
+    vCtx.lineTo(x, volH - volPAD.bottom);
+    vCtx.stroke();
+    vCtx.setLineDash([]);
+
+    // ── OHLCV 바 ──
+    const isUp = C[idx] >= O[idx];
+    const col  = isUp ? '#FF3333' : '#33AA33';
+    const chg  = idx > 0 ? (C[idx] - C[idx - 1]) : 0;
+    const chgPct = idx > 0 && C[idx - 1] ? (chg / C[idx - 1] * 100) : 0;
+    const chgSign = chg > 0 ? '+' : '';
+    const chgCol  = chg > 0 ? '#FF3333' : chg < 0 ? '#33AA33' : 'var(--text-muted)';
+
+    document.getElementById('ohlcv-date').textContent  = dates[idx];
+    document.getElementById('ohlcv-open').textContent  = O[idx].toLocaleString();
+    document.getElementById('ohlcv-open').style.color  = col;
+    document.getElementById('ohlcv-high').textContent  = Hi[idx].toLocaleString();
+    document.getElementById('ohlcv-high').style.color  = col;
+    document.getElementById('ohlcv-low').textContent   = Lo[idx].toLocaleString();
+    document.getElementById('ohlcv-low').style.color   = col;
+    document.getElementById('ohlcv-close').textContent = C[idx].toLocaleString();
+    document.getElementById('ohlcv-close').style.color = col;
+    document.getElementById('ohlcv-chg').innerHTML     =
+      `<span style="color:${chgCol}">${chgSign}${chg.toLocaleString()} (${chgSign}${chgPct.toFixed(2)}%)</span>`;
+    document.getElementById('ohlcv-vol').textContent   = _fmtVolShort(V[idx]);
+    ohlcvBar.style.display = 'flex';
+
+    // ── 축 라벨 ──
+    if (mouseY != null && mouseY >= PAD.top && mouseY <= HC - PAD.bottom) {
+      const price = sc.fromY(mouseY);
+      priceLbl.style.display = 'block';
+      priceLbl.style.top     = (mouseY / HC * 100) + '%';
+      priceLbl.textContent   = '₩' + Math.round(price).toLocaleString();
+    } else {
+      priceLbl.style.display = 'none';
+    }
+    dateLbl.style.display = 'block';
+    dateLbl.style.left    = (x / volW * 100) + '%';
+    dateLbl.textContent   = dates[idx];
+  }
+
+  function onMove(e, ownerCanvas, ownerH) {
+    const rect = ownerCanvas.getBoundingClientRect();
+    const scaleX = ownerCanvas.width  / rect.width;
+    const mx = (e.clientX - rect.left) * scaleX;
+    if (mx < PAD.left || mx > W - PAD.right) { clear(); return; }
+    const idx = fromX(mx);
+    // 캔들 오버레이 위일 때만 수평선(y 추적), 거래량 오버레이일 때는 수직선만
+    let mouseY = null;
+    if (ownerCanvas === candleOv) {
+      const scaleY = ownerCanvas.height / rect.height;
+      mouseY = (e.clientY - rect.top) * scaleY;
+      if (mouseY < PAD.top || mouseY > HC - PAD.bottom) { mouseY = null; }
+    }
+    drawAt(idx, mouseY);
+  }
+
+  candleOv.addEventListener('mousemove', e => onMove(e, candleOv, HC));
+  volOv.addEventListener('mousemove',    e => onMove(e, volOv,    volH));
+  candleOv.addEventListener('mouseleave', clear);
+  volOv.addEventListener('mouseleave',    clear);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE PRICE POLLING (Phase 11)  —  /api/price/<code> 5분 주기
+// ─────────────────────────────────────────────────────────────────────────────
+let _chartPriceTimer = null;
+let _chartPriceCode  = null;
+
+function _startChartPricePolling(code) {
+  _stopChartPricePolling();
+  _chartPriceCode = code;
+  // 즉시 한 번 호출 (openChartPanel 진입 직후라도 최신 가격 시도)
+  _fetchAndApplyLivePrice(code);
+  _chartPriceTimer = setInterval(() => {
+    if (_chartPriceCode !== code) { _stopChartPricePolling(); return; }
+    if (document.hidden) return;   // 탭 비활성 시 스킵
+    _fetchAndApplyLivePrice(code);
+  }, 5 * 60 * 1000);
+}
+
+function _stopChartPricePolling() {
+  if (_chartPriceTimer) {
+    clearInterval(_chartPriceTimer);
+    _chartPriceTimer = null;
+  }
+  _chartPriceCode = null;
+}
+
+async function _fetchAndApplyLivePrice(code) {
+  try {
+    const r = await fetch(`/api/price/${code}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p.error || p.price == null) return;
+    if (CHART_STATE.code !== code) return;   // 패널이 다른 종목으로 전환됨
+    const el = document.getElementById('chart-live-price');
+    if (!el) return;
+    const valEl  = el.querySelector('.live-price-value');
+    const chgEl  = el.querySelector('.live-price-change');
+    const timeEl = document.getElementById('chart-price-time');
+    if (!valEl || !chgEl) return;
+
+    const prev = parseInt((valEl.textContent || '').replace(/[^\d]/g, ''), 10) || 0;
+    valEl.textContent = '₩' + Number(p.price).toLocaleString();
+
+    const chg = p.change != null ? p.change : 0;
+    const pct = p.change_pct != null ? p.change_pct : 0;
+    const col = chg > 0 ? '#FF3333' : chg < 0 ? '#33AA33' : 'var(--text-muted)';
+    const sign = chg > 0 ? '+' : '';
+    chgEl.style.color = col;
+    chgEl.textContent = `${sign}${Number(chg).toLocaleString()} (${sign}${Number(pct).toFixed(2)}%)`;
+
+    if (timeEl) {
+      const now = new Date();
+      timeEl.textContent = '기준: ' + now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    // 가격 변경 시 플래시
+    if (prev && Number(p.price) !== prev) {
+      valEl.classList.remove('price-flash');
+      void valEl.offsetWidth;
+      valEl.classList.add('price-flash');
+    }
+    console.log('[live-price]', code, p.source, '→', p.price, `${sign}${pct}%`);
+  } catch (err) {
+    console.warn('[live-price] fetch failed', err);
+  }
+}
+
+// 캔들 차트 스케일 계산 — drawCandles 와 crosshair 가 공유해 오차 방지.
+function _chartScale(data, W, H) {
   const PAD = { top: 20, right: 120, bottom: 28, left: 68 };
   const cw  = W - PAD.left - PAD.right;
   const ch  = H - PAD.top  - PAD.bottom;
+  const len = data.dates.length;
+  const bb  = data.bollinger || { upper: [], lower: [], sma_20: [] };
 
-  // price range including bollinger
-  const allHi  = [...Hi];
-  const allLo  = [...Lo];
-  bb.upper.forEach(v => v !== null && allHi.push(v));
-  bb.lower.forEach(v => v !== null && allLo.push(v));
+  const allHi = [...data.high];
+  const allLo = [...data.low];
+  (bb.upper || []).forEach(v => v !== null && allHi.push(v));
+  (bb.lower || []).forEach(v => v !== null && allLo.push(v));
   const maxP = Math.max(...allHi);
   const minP = Math.min(...allLo);
   const rng  = maxP - minP || 1;
 
-  const toX = i  => PAD.left + (i / (len - 1)) * cw;
-  const toY = p  => PAD.top  + (1 - (p - minP) / rng) * ch;
-  const bw  = Math.max(2, (cw / len) * 0.65);
+  return {
+    PAD, cw, ch, len, minP, maxP, rng,
+    toX: i => PAD.left + (len > 1 ? (i / (len - 1)) * cw : cw / 2),
+    toY: p => PAD.top  + (1 - (p - minP) / rng) * ch,
+    fromX: x => {
+      if (len <= 1) return 0;
+      const r = Math.round((x - PAD.left) / cw * (len - 1));
+      return Math.max(0, Math.min(len - 1, r));
+    },
+    fromY: y => minP + (1 - (y - PAD.top) / ch) * rng,
+    bw:    Math.max(2, (cw / len) * 0.65),
+  };
+}
+
+function _drawCandles(canvas, data, W, H) {
+  const ctx = canvas.getContext('2d');
+  const { dates, open: O, high: Hi, low: Lo, close: C, bollinger: bb, fibonacci: fib, trendlines: tl } = data;
+  const sc = _chartScale(data, W, H);
+  const { PAD, cw, ch, len, minP, maxP, rng, toX, toY, bw } = sc;
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#1C1C1E';
@@ -3612,6 +3941,10 @@ init();
     if (!document.hidden && isFlaskEnv) {
       clearTimeout(statusTimer);
       poll();
+      // Phase 11: 차트 패널이 열려있으면 즉시 한 번 가격 갱신 (5분 경과 기다리지 않음)
+      if (CHART_STATE && CHART_STATE.code) {
+        _fetchAndApplyLivePrice(CHART_STATE.code);
+      }
     }
   });
 
