@@ -484,6 +484,96 @@ def api_stock_search():
     return jsonify(results)
 
 
+@app.route("/api/compare")
+def api_compare():
+    import re as _re
+    code1  = (request.args.get("code1")  or "").strip()
+    code2  = (request.args.get("code2")  or "").strip()
+    period = (request.args.get("period") or "1M").strip()
+    if not (_re.fullmatch(r"\d{6}", code1) and _re.fullmatch(r"\d{6}", code2)):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    PERIOD_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365, "3Y": 365 * 3, "5Y": 365 * 5}
+    if period not in PERIOD_DAYS:
+        period = "1M"
+
+    today      = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"compare_{code1}_{code2}_{period}_{today}.json"
+    if cache_file.exists():
+        return Response(
+            cache_file.read_text(encoding="utf-8"),
+            content_type="application/json; charset=utf-8",
+        )
+
+    try:
+        from pykrx import stock as _stock
+    except ImportError:
+        return jsonify({"error": "pykrx 미설치"}), 500
+
+    start_dt = datetime.strptime(today, "%Y%m%d").replace(tzinfo=KST) \
+               - timedelta(days=PERIOD_DAYS[period] + 10)  # 버퍼 10일
+    start    = start_dt.strftime("%Y%m%d")
+
+    try:
+        df1 = _stock.get_market_ohlcv_by_date(start, today, code1)
+        df2 = _stock.get_market_ohlcv_by_date(start, today, code2)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    if df1 is None or df2 is None or df1.empty or df2.empty:
+        return jsonify({"error": "데이터 없음"}), 404
+
+    close_col = next((c for c in df1.columns if "종가" in c), None)
+    if close_col is None:
+        return jsonify({"error": "종가 컬럼 없음"}), 500
+
+    # 공통 거래일만 사용
+    common = df1.index.intersection(df2.index)
+    if len(common) < 2:
+        return jsonify({"error": "공통 거래일 부족"}), 404
+    df1 = df1.loc[common]
+    df2 = df2.loc[common]
+
+    c1 = df1[close_col].tolist()
+    c2 = df2[close_col].tolist()
+    b1 = float(c1[0]) or 1.0
+    b2 = float(c2[0]) or 1.0
+    returns1 = [round((float(v) / b1 - 1) * 100, 2) for v in c1]
+    returns2 = [round((float(v) / b2 - 1) * 100, 2) for v in c2]
+    dates    = [d.strftime("%Y-%m-%d") for d in common]
+
+    try:
+        name1 = _stock.get_market_ticker_name(code1) or code1
+    except Exception:
+        name1 = code1
+    try:
+        name2 = _stock.get_market_ticker_name(code2) or code2
+    except Exception:
+        name2 = code2
+
+    result = {
+        "period": period,
+        "dates":  dates,
+        "stock1": {
+            "code":          code1,
+            "name":          name1,
+            "current_price": int(c1[-1]),
+            "change_pct":    returns1[-1],
+            "returns":       returns1,
+        },
+        "stock2": {
+            "code":          code2,
+            "name":          name2,
+            "current_price": int(c2[-1]),
+            "change_pct":    returns2[-1],
+            "returns":       returns2,
+        },
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify(result)
+
+
 @app.route("/api/chart/<code>")
 def api_chart(code: str):
     import re as _re

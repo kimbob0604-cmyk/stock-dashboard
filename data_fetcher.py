@@ -564,6 +564,63 @@ def weighted_avg(stocks_list: list[dict]) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STEP 3.5 — 시황 분석 (해외 지수 + 환율, yfinance 사용, 선택적 의존성)
+# ─────────────────────────────────────────────────────────────────────────────
+def fetch_market_overview(req_date: str, force: bool = False) -> dict:
+    """
+    S&P500, NASDAQ, USD/KRW, 나스닥100 선물 을 yfinance 로 수집.
+    yfinance 미설치 또는 네트워크 실패 시 빈 dict 반환 (graceful).
+
+    Cache: cache/market_overview_{YYYYMMDD}.json  (일 1회, force-market 시 재수집)
+    """
+    cache_key  = f"market_overview_{req_date}"
+    cache_file = CACHE_DIR / f"market_overview_{req_date}.json"
+
+    if not force and cache_hit(cache_key, req_date) and cache_file.exists():
+        print(f"  [캐시] 시황 분석  ({req_date})")
+        return read_cache(cache_file)
+
+    try:
+        import yfinance as yf  # 선택 의존성
+    except ImportError:
+        print("  ⚠  yfinance 미설치 — 시황 데이터 스킵 (pip install yfinance)")
+        return {}
+
+    tickers = {
+        "sp500":          "^GSPC",
+        "nasdaq":         "^IXIC",
+        "usd_krw":        "KRW=X",
+        "nasdaq_futures": "NQ=F",
+    }
+
+    print(f"  시황 데이터 수집 중 (yfinance, {len(tickers)}개)…")
+    overview: dict = {}
+    for key, symbol in tickers.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="5d")
+            if hist is None or hist.empty or "Close" not in hist.columns:
+                print(f"    {key}: 빈 응답 — 스킵")
+                continue
+            closes = hist["Close"].dropna().tolist()
+            if not closes:
+                continue
+            current = float(closes[-1])
+            if len(closes) >= 2:
+                prev = float(closes[-2])
+                change_pct = round((current / prev - 1) * 100, 2) if prev else 0.0
+            else:
+                change_pct = 0.0
+            overview[key] = {"value": round(current, 2), "change_pct": change_pct}
+            print(f"    {key}: {current:,.2f}  {change_pct:+.2f}%")
+        except Exception as exc:
+            print(f"    {key}: 실패 — {exc!r}")
+
+    if overview:
+        write_cache(cache_file, overview, cache_key, req_date)
+    return overview
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STEP 4 — 전 종목 마스터 (종목 검색 UI용, 일 1회)
 # ─────────────────────────────────────────────────────────────────────────────
 def build_stock_master(date: str) -> dict:
@@ -725,6 +782,10 @@ def main():
     else:
         print("  → 해당 섹터 없음")
 
+    # ── 3.5 시황 분석 (해외 지수 · 환율, yfinance 선택 의존성)
+    print("\n[+]  시황 분석")
+    market_overview = fetch_market_overview(actual_date, force=force)
+
     # ── 종목명
     print("\n[+]  종목명 확인")
     name_map: dict[str, str] = {}
@@ -785,6 +846,7 @@ def main():
         "kosdaq": indices.get("kosdaq", {"value": 0.0, "change_pct": 0.0}),
         "themes": themes_out,
         "new_high_sectors": new_high_sectors,
+        "market_overview": market_overview,
     }
 
     with open(OUT_FILE, "w", encoding="utf-8") as f:

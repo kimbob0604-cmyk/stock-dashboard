@@ -3,3 +3,4 @@ pykrx>=1.0.51
 pandas>=2.0
 APScheduler>=3.10
 gunicorn>=21.2
+yfinance>=0.2.40
