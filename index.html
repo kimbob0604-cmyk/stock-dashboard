@@ -2559,6 +2559,9 @@ async function _scrFetch() {
       return;
     }
 
+    console.log('[screener] rendered', d.count, 'stocks, first 5=',
+                d.stocks.slice(0, 5).map(s => `${s.code}:${s.name}`));
+
     const rows = d.stocks.map((s, i) => {
       const pctCol = s.change_pct > 0 ? '#FF3333' : s.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
       const sign   = s.change_pct > 0 ? '+' : '';
@@ -2566,11 +2569,15 @@ async function _scrFetch() {
       const pbr    = s.pbr != null ? s.pbr.toFixed(1) : '—';
       const cap    = s.market_cap != null ? _fmtMarketCap(s.market_cap) : '—';
       const vol    = (s.volume_mn || 0).toLocaleString();
-      return `<tr data-code="${s.code}" data-name="${s.name}">
+      const safeCode  = _escHtml(s.code);
+      const safeName  = _escHtml(s.name);
+      const safeTheme = _escHtml(s.theme || '');
+      // data-code/data-name 은 HTML 속성 이스케이프, 셀 내용도 동일 소스로 렌더.
+      return `<tr data-code="${safeCode}" data-name="${safeName}">
         <td><span class="rank">${i + 1}</span></td>
-        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
-        <td style="font-weight:600">${s.name}</td>
-        <td style="font-size:11px;color:var(--text-muted)">${s.theme || ''}</td>
+        <td style="color:var(--text-muted);font-size:11px">${safeCode}</td>
+        <td style="font-weight:600">${safeName}</td>
+        <td style="font-size:11px;color:var(--text-muted)">${safeTheme}</td>
         <td class="r" style="color:${pctCol};font-weight:700">${sign}${s.change_pct.toFixed(2)}%</td>
         <td class="r" style="color:var(--text-sub)">${vol}M</td>
         <td class="r" style="color:var(--text-sub)">${cap}</td>
@@ -2598,7 +2605,22 @@ async function _scrFetch() {
     results.querySelector('tbody').addEventListener('click', (e) => {
       const tr = e.target.closest('tr');
       if (!tr) return;
-      openChartPanel(tr.dataset.code, tr.dataset.name);
+      const clickedCode = tr.dataset.code;
+      const clickedName = tr.dataset.name;
+      // 화면에 표시된 code 셀 (2번째 td) 과 dataset 이 일치하는지 교차검증
+      const shownCode = tr.querySelector('td:nth-child(2)')?.textContent?.trim();
+      const shownName = tr.querySelector('td:nth-child(3)')?.textContent?.trim();
+      console.log('[screener click]', {
+        dataset_code: clickedCode, dataset_name: clickedName,
+        shown_code:   shownCode,   shown_name:   shownName,
+      });
+      if (shownCode && shownCode !== clickedCode) {
+        console.error('[screener click] ❌ row DOM drift — shown vs dataset mismatch',
+                      { shown: shownCode, dataset: clickedCode });
+        openChartPanel(shownCode, shownName || clickedName);
+        return;
+      }
+      openChartPanel(clickedCode, clickedName);
     });
   } catch (err) {
     countEl.textContent = '';
@@ -2921,14 +2943,17 @@ async function _shortFetch() {
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
 
-    const rows = (d.stocks || []).map((s, i) => `
-      <tr data-code="${s.code}" data-name="${s.name}">
+    const rows = (d.stocks || []).map((s, i) => {
+      const sc = _escHtml(s.code);
+      const sn = _escHtml(s.name);
+      return `<tr data-code="${sc}" data-name="${sn}">
         <td><span class="rank">${i + 1}</span></td>
-        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
-        <td style="font-weight:600">${s.name}</td>
+        <td style="color:var(--text-muted);font-size:11px">${sc}</td>
+        <td style="font-weight:600">${sn}</td>
         <td class="r">${s.ratio != null ? s.ratio.toFixed(2) + '%' : '—'}</td>
         <td class="r" style="color:var(--text-sub)">${s.balance != null ? s.balance.toLocaleString() : '—'}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
 
     results.innerHTML = `
       <table class="pg-table">
@@ -2940,7 +2965,9 @@ async function _shortFetch() {
       </table>`;
     results.querySelector('tbody').addEventListener('click', (e) => {
       const tr = e.target.closest('tr');
-      if (tr) openChartPanel(tr.dataset.code, tr.dataset.name);
+      if (!tr) return;
+      console.log('[short click]', { code: tr.dataset.code, name: tr.dataset.name });
+      openChartPanel(tr.dataset.code, tr.dataset.name);
     });
   } catch (err) {
     results.innerHTML = `<div class="pg-empty">
