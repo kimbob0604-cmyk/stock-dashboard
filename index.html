@@ -1650,26 +1650,40 @@ function renderNewHighSectors() {
 // ─────────────────────────────────────────────────────────────────────────────
 // CHART PANEL (Phase 6)
 // ─────────────────────────────────────────────────────────────────────────────
-// 동시 클릭 경쟁 조건 방지: 가장 최근에 요청한 종목코드만 반영한다.
+// 단일 진실 원천은 _chartRequestCode (가장 최근 요청 코드).
+// 이전 fetch 는 AbortController 로 실제로 취소해 네트워크/파서 단계에서 사라지게 한다.
 let _chartRequestCode = null;
+let _chartAbortCtrl   = null;
 
 async function openChartPanel(code, hintName) {
-  console.log('[openChartPanel] ▶ entry', { code, hintName, _chartRequestCode_prev: _chartRequestCode });
+  console.log('[openChartPanel] ▶ entry', {
+    code, hintName, _chartRequestCode_prev: _chartRequestCode,
+  });
 
-  if (!code || !/^\d{6}$/.test(String(code))) {
+  code = String(code || '').trim();
+  if (!/^\d{6}$/.test(code)) {
     console.error('[openChartPanel] ❌ invalid code:', code);
     return;
   }
 
-  _chartRequestCode = code;                 // 이 클릭의 토큰 = 종목코드
+  // 🛑 이전 요청 실제 취소 (응답 파싱까지 중단). stale 렌더 원천 차단.
+  if (_chartAbortCtrl) {
+    try { _chartAbortCtrl.abort(); } catch {}
+  }
+  _chartAbortCtrl    = new AbortController();
+  const myAbort      = _chartAbortCtrl;
+  _chartRequestCode  = code;
+
   const panel = document.getElementById('chart-panel');
-  panel.dataset.code = code;                // 어떤 종목을 표시 중인지 DOM에도 기록
+  panel.dataset.code = code;                // 패널이 어떤 종목을 담당 중인지 명시
   panel.style.display = '';
-  // 이전 콘텐츠를 즉시 clear → 이전 차트 잔상이 남지 않도록.
+
+  // ── 헤더는 "유저가 클릭한" code/name 을 단일 진실로 사용. 서버 응답을 그대로 붙이지 않는다. ──
   const safeCode = _escHtml(code);
   const safeName = _escHtml(hintName || code);
+
   panel.innerHTML = `
-    <div class="chart-header">
+    <div class="chart-header" data-header-code="${safeCode}">
       <span class="chart-title">${safeName} (${safeCode})</span>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
@@ -1682,23 +1696,27 @@ async function openChartPanel(code, hintName) {
 
   let data;
   try {
-    const res = await fetch(fetchUrl, { cache: 'no-store' });
+    const res = await fetch(fetchUrl, { cache: 'no-store', signal: myAbort.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     data = await res.json();
     if (data.error) throw new Error(data.error);
     console.log('[openChartPanel] ✅ response', {
-      requested: code,
+      requested:     code,
       returned_code: data.code,
       returned_name: data.name,
       candles: Array.isArray(data.close) ? data.close.length : 0,
     });
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('[openChartPanel] 🚫 aborted (newer click):', code);
+      return;
+    }
     if (_chartRequestCode !== code) {
       console.log('[openChartPanel] ⚠  error but stale, drop', { code, latest: _chartRequestCode });
       return;
     }
     panel.innerHTML = `
-      <div class="chart-header">
+      <div class="chart-header" data-header-code="${safeCode}">
         <span class="chart-title">${safeName} (${safeCode})</span>
         <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
       </div>
@@ -1712,12 +1730,12 @@ async function openChartPanel(code, hintName) {
     console.log('[openChartPanel] ⚠  stale response discarded:', code, '→ latest:', _chartRequestCode);
     return;
   }
-  // 서버가 돌려준 코드와 요청한 코드가 다르면 서버/캐시 문제 — 방어적으로 중단.
-  if (data.code && String(data.code) !== String(code)) {
+  // 서버가 돌려준 코드와 요청한 코드가 다르면 서버/캐시 문제 — 렌더 대신 에러 패널.
+  if (data.code && String(data.code) !== code) {
     console.error('[openChartPanel] ❌ server returned different code',
                   { requested: code, got: data.code });
     panel.innerHTML = `
-      <div class="chart-header">
+      <div class="chart-header" data-header-code="${safeCode}">
         <span class="chart-title">${safeName} (${safeCode})</span>
         <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
       </div>
@@ -1727,9 +1745,11 @@ async function openChartPanel(code, hintName) {
   }
 
   const W = 1152, HC = 400, HV = 80;
+  // 🔒 헤더는 유저가 클릭한 code/name 을 고정. 서버 응답의 data.name 은 부가 정보로만 사용.
+  const displayName = _escHtml(hintName || data.name || code);
   panel.innerHTML = `
-    <div class="chart-header">
-      <span class="chart-title">${data.name} (${data.code})</span>
+    <div class="chart-header" data-header-code="${safeCode}">
+      <span class="chart-title">${displayName} (${safeCode})</span>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
     <div class="chart-canvas-wrap">
@@ -1891,9 +1911,20 @@ async function _loadReports(code, container) {
 }
 
 function closeChartPanel() {
+  // 진행 중 fetch 취소 + 토큰/상태 리셋 → 뒤늦게 돌아오는 응답이 패널에 주입되지 않도록.
+  if (_chartAbortCtrl) {
+    try { _chartAbortCtrl.abort(); } catch {}
+    _chartAbortCtrl = null;
+  }
+  _chartRequestCode = null;
+  CHART_STATE.code  = null;
+  CHART_STATE.data  = null;
+  CHART_STATE.tab   = 'analysis';
   const panel = document.getElementById('chart-panel');
   panel.style.display = 'none';
   panel.innerHTML = '';
+  delete panel.dataset.code;
+  console.log('[closeChartPanel] 🗙 reset');
 }
 
 function _drawCandles(canvas, data, W, H) {
