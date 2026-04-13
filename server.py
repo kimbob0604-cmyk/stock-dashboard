@@ -1725,6 +1725,171 @@ def api_compare():
     return jsonify(result)
 
 
+@app.route("/api/financial/<code>")
+def api_financial(code: str):
+    """
+    종목 재무 요약 — 네이버 금융 main.naver 페이지 스크랩.
+    24h 캐시: cache/financial_{code}.json
+    추출 항목: PER, PBR, ROE, EPS, BPS, 시가총액, 시가총액 순위, 동일업종 PER,
+              배당수익률, 추정PER, 매출/영업이익/순이익 (3년 + 추정).
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    cache_file = BASE_DIR / "cache" / f"financial_{code}.json"
+    if cache_file.exists():
+        try:
+            age_hr = (now_kst().timestamp() - cache_file.stat().st_mtime) / 3600
+            if age_hr < 24:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    try:
+        import requests as _rq
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return jsonify({"error": "bs4/requests 미설치"}), 500
+
+    try:
+        res = _rq.get(
+            "https://finance.naver.com/item/main.naver",
+            params={"code": code},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        # main.naver 는 UTF-8 (frgn.naver / company_list.naver 와 다름!)
+        res.encoding = "utf-8"
+        soup = BeautifulSoup(res.text, "html.parser")
+    except Exception as exc:
+        return jsonify({"error": f"네이버 요청 실패: {exc}"}), 502
+
+    def _num(s):
+        if not s:
+            return None
+        m = _re.search(r"[-+]?[\d,]+\.?\d*", s.replace("\n", "").replace(" ", ""))
+        if not m:
+            return None
+        try:
+            return float(m.group(0).replace(",", ""))
+        except ValueError:
+            return None
+
+    result: dict = {
+        "code":       code,
+        "name":       _get_stock_name(code) or code,
+        "per":        None, "eps": None,
+        "estimate_per": None, "estimate_eps": None,
+        "pbr":        None, "bps": None,
+        "dividend_yield": None,
+        "market_cap":     None,
+        "market_cap_rank": None,
+        "industry_per":   None,
+        "shares_outstanding": None,
+        "foreign_ratio":  None,
+        "annual": [],   # [{period, revenue, op_profit, net_profit, op_margin, net_margin}]
+    }
+
+    # ── 시가총액 + 순위 ──
+    cap = soup.select_one("#_market_sum")
+    if cap:
+        # 부모 노드까지 포함해야 '억원' 단위까지 잡힘
+        parent_txt = " ".join(cap.parent.get_text(" ", strip=True).split())
+        # '1,189조 8,472 억원' → '1,189조 8,472억원'
+        parent_txt = parent_txt.replace("억 원", "억원").replace(" 억원", "억원")
+        result["market_cap"] = parent_txt
+    # 시가총액 순위는 별도 td 에 들어있음 ('코스피1위')
+    for th in soup.find_all("th"):
+        if "시가총액순위" in th.get_text(strip=True):
+            td = th.find_next("td")
+            if td:
+                result["market_cap_rank"] = td.get_text(strip=True)
+            break
+
+    # ── PER / PBR / 배당 / 추정PER ──
+    per_tbl = soup.select_one("table.per_table")
+    if per_tbl:
+        for tr in per_tbl.select("tr"):
+            th_text = tr.select_one("th").get_text(strip=True) if tr.select_one("th") else ""
+            td_text = tr.select_one("td").get_text(strip=True) if tr.select_one("td") else ""
+            # td 가 'X배lY원' 형태 → '|' 로 분리
+            if "추정PER" in th_text:
+                parts = td_text.split("l")
+                result["estimate_per"] = _num(parts[0]) if len(parts) > 0 else None
+                result["estimate_eps"] = _num(parts[1]) if len(parts) > 1 else None
+            elif "PER" in th_text:
+                parts = td_text.split("l")
+                result["per"] = _num(parts[0]) if len(parts) > 0 else None
+                result["eps"] = _num(parts[1]) if len(parts) > 1 else None
+            elif "PBR" in th_text:
+                parts = td_text.split("l")
+                result["pbr"] = _num(parts[0]) if len(parts) > 0 else None
+                result["bps"] = _num(parts[1]) if len(parts) > 1 else None
+            elif "배당수익률" in th_text:
+                result["dividend_yield"] = _num(td_text)
+
+    # ── 동일업종 PER ──
+    same_per_tbl = soup.find("table", {"summary": _re.compile("동일업종 PER")})
+    if same_per_tbl:
+        td = same_per_tbl.select_one("td")
+        if td:
+            result["industry_per"] = _num(td.get_text(strip=True))
+
+    # ── 외국인 보유 + 발행주식수 (#tab_con1 영역) ──
+    body_text = soup.get_text("\n", strip=True)
+    m = _re.search(r"외국인소진율[\s]*([\d.]+)\s*%", body_text)
+    if m: result["foreign_ratio"] = float(m.group(1))
+    m = _re.search(r"상장주식수[\s\(\)\w]*?\n?([\d,]+)", body_text)
+    if m:
+        try: result["shares_outstanding"] = int(m.group(1).replace(",", ""))
+        except ValueError: pass
+
+    # ── 매출/영업이익/순이익 (cop_analysis 표) ──
+    cop = soup.select_one("section.cop_analysis, .section.cop_analysis")
+    if cop:
+        # 헤더에서 기간 추출
+        periods: list[str] = []
+        first_thead_tr = cop.select_one("thead tr:nth-of-type(2)")
+        if first_thead_tr:
+            for th in first_thead_tr.select("th"):
+                txt = th.get_text(strip=True)
+                if _re.match(r"\d{4}\.\d{2}", txt):
+                    periods.append(txt)
+
+        # tbody 행에서 매출액 / 영업이익 / 당기순이익 추출
+        rows_map: dict[str, list[float | None]] = {}
+        for tr in cop.select("tbody tr"):
+            th = tr.select_one("th")
+            if not th: continue
+            label = th.get_text(strip=True)
+            if label in ("매출액", "영업이익", "당기순이익", "영업이익률", "순이익률"):
+                rows_map[label] = [_num(td.get_text(strip=True)) for td in tr.select("td")]
+
+        # 기간별로 묶기
+        n = min(len(periods),
+                len(rows_map.get("매출액", []) or []),
+                len(rows_map.get("영업이익", []) or []) if rows_map.get("영업이익") else 0,
+                len(rows_map.get("당기순이익", []) or []) if rows_map.get("당기순이익") else 0)
+        for k in range(n):
+            result["annual"].append({
+                "period":     periods[k],
+                "revenue":    rows_map["매출액"][k]    if "매출액"    in rows_map else None,
+                "op_profit":  rows_map["영업이익"][k]  if "영업이익"  in rows_map else None,
+                "net_profit": rows_map["당기순이익"][k] if "당기순이익" in rows_map else None,
+                "op_margin":  rows_map["영업이익률"][k] if "영업이익률" in rows_map and k < len(rows_map["영업이익률"]) else None,
+                "net_margin": rows_map["순이익률"][k]   if "순이익률"   in rows_map and k < len(rows_map["순이익률"])   else None,
+            })
+
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return jsonify(result)
+
+
 @app.route("/api/price/<code>")
 def api_price(code: str):
     """
@@ -1828,20 +1993,35 @@ def api_chart(code: str):
     if not _re.fullmatch(r"\d{6}", code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
+    # Phase 12-1: 기간 파라미터 (기본 180일). 클램프 7~3650.
+    try:
+        days = int(request.args.get("days", "180"))
+    except ValueError:
+        days = 180
+    days = max(7, min(3650, days))
+
     today      = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"chart_{code}_{today}.json"
+    cache_file = BASE_DIR / "cache" / f"chart_{code}_{days}d_{today}.json"
     if cache_file.exists():
         return Response(
             cache_file.read_text(encoding="utf-8"),
             content_type="application/json; charset=utf-8",
         )
+    # 하위 호환: 기존 이름(180일 기본) 캐시가 있으면 그대로 사용
+    if days == 180:
+        legacy = BASE_DIR / "cache" / f"chart_{code}_{today}.json"
+        if legacy.exists():
+            return Response(
+                legacy.read_text(encoding="utf-8"),
+                content_type="application/json; charset=utf-8",
+            )
 
     try:
         from pykrx import stock as _stock
     except ImportError:
         return jsonify({"error": "pykrx 미설치"}), 500
 
-    start = (datetime.strptime(today, "%Y%m%d").replace(tzinfo=KST) - timedelta(days=180)).strftime("%Y%m%d")
+    start = (datetime.strptime(today, "%Y%m%d").replace(tzinfo=KST) - timedelta(days=days)).strftime("%Y%m%d")
     try:
         df = _stock.get_market_ohlcv_by_date(start, today, code)
     except Exception as exc:
@@ -1869,6 +2049,7 @@ def api_chart(code: str):
 
     result = {
         "code": code, "name": name,
+        "days":  days,
         "dates": dates,
         "open": opens, "high": highs, "low": lows, "close": closes,
         "volume": volumes,

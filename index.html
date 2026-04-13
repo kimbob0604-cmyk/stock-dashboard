@@ -301,7 +301,7 @@ select:focus { border-color: var(--accent); }
 
 .s-card {
   display: grid;
-  grid-template-columns: 1fr 88px auto;
+  grid-template-columns: 1fr 88px auto auto;
   align-items: center;
   gap: 10px;
   padding: 11px 14px;
@@ -834,6 +834,116 @@ select:focus { border-color: var(--accent); }
   0%, 10% { color: #FFD700; }
   100%    { color: var(--text); }
 }
+
+/* ── Phase 12-1: 기간 버튼 ──────────────────────────────────────── */
+.chart-controls-row {
+  display: flex; align-items: center; gap: 12px;
+  margin: 8px 0 6px;
+}
+.chart-period-bar { display: flex; gap: 6px; }
+.chart-period-btn {
+  background: var(--surface2); color: var(--text-sub);
+  border: 1px solid var(--border);
+  padding: 4px 13px; border-radius: 14px; cursor: pointer;
+  font-size: 12px; font-weight: 600; font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.chart-period-btn:hover { background: var(--border); color: var(--text); }
+.chart-period-btn.active {
+  background: #FF3333; color: #fff; border-color: #FF3333;
+}
+
+/* ── Phase 12-3: 오버레이 토글 ────────────────────────────────── */
+.chart-overlay-toggles { display: flex; gap: 6px; }
+.overlay-toggle {
+  background: var(--surface2); color: var(--text-sub);
+  border: 1px solid var(--border);
+  padding: 4px 12px; border-radius: 14px; cursor: pointer;
+  font-size: 11px; font-weight: 600; font-family: inherit;
+}
+.overlay-toggle:hover:not(:disabled) { background: var(--border); color: var(--text); }
+.overlay-toggle.active {
+  background: rgba(68,136,255,0.2); color: #6495ED; border-color: #6495ED;
+}
+.overlay-toggle:disabled { opacity: 0.5; cursor: wait; }
+
+/* ── Phase 12-2: 관심종목 ─────────────────────────────────────── */
+.watchlist-star {
+  background: none; border: none;
+  color: #555; font-size: 16px; cursor: pointer;
+  padding: 2px 4px; line-height: 1;
+  transition: color 0.1s, transform 0.1s;
+}
+.watchlist-star:hover { color: #FFD700; transform: scale(1.15); }
+.watchlist-star.star-active { color: #FFD700; }
+.watchlist-star-lg {
+  background: none; border: none; color: #555; font-size: 22px;
+  cursor: pointer; padding: 0 6px 0 0; line-height: 1;
+}
+.watchlist-star-lg:hover { color: #FFD700; }
+.watchlist-star-lg.star-active { color: #FFD700; }
+
+.chart-title-row { display: flex; align-items: center; gap: 6px; }
+
+.sidebar-badge {
+  background: #FF3333; color: #fff;
+  border-radius: 10px; padding: 1px 7px;
+  font-size: 10px; font-weight: 700;
+  margin-left: auto;
+  display: none;
+}
+
+.watchlist-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.watchlist-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px;
+  cursor: pointer; position: relative;
+  transition: border-color 0.1s, background 0.1s;
+}
+.watchlist-card:hover { border-color: var(--accent); }
+.watchlist-card .wl-card-star {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 18px;
+}
+.wl-name { color: var(--text); font-size: 14px; font-weight: 700; padding-right: 24px; }
+.wl-code { color: var(--text-muted); font-size: 11px; margin-top: 2px; display: flex; gap: 6px; align-items: center; }
+.wl-theme {
+  background: var(--bg); color: var(--text-sub);
+  padding: 1px 6px; border-radius: 4px; font-size: 10px;
+  border: 1px solid var(--border);
+}
+.wl-card-bottom {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-top: 10px;
+}
+.wl-pct { font-size: 16px; font-weight: 700; }
+.wl-price { color: var(--text); font-size: 12px; font-weight: 600; }
+.wl-vol { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+
+/* ── Phase 12-4: 재무 카드 ────────────────────────────────────── */
+.financial-wrap { padding: 14px 0; }
+.financial-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  margin-bottom: 16px;
+}
+.financial-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.fin-label { color: var(--text-muted); font-size: 11px; font-weight: 600;
+             text-transform: uppercase; letter-spacing: 0.4px; }
+.fin-value { color: var(--text); font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+.fin-desc  { color: var(--text-sub); font-size: 11px; }
+
+.financial-table-title { color: var(--text-muted); font-size: 12px; margin: 14px 0 6px; }
+.financial-table th { font-size: 12px; }
+.financial-table td { font-size: 12px; }
+.financial-source { color: var(--text-muted); font-size: 10px; margin-top: 10px; text-align: right; }
 .chart-loading, .chart-error {
   display: flex; align-items: center; justify-content: center;
   height: 100px; gap: 8px; color: var(--text-muted); font-size: 13px;
@@ -959,6 +1069,7 @@ select:focus { border-color: var(--accent); }
   <div class="sidebar-logo">📊 DASHBOARD</div>
   <ul class="sidebar-menu" id="sidebar-menu">
     <li class="sidebar-item active" data-page="thememap"><span class="mi">🗺️</span>테마맵</li>
+    <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
     <li class="sidebar-item"        data-page="market"><span class="mi">📈</span>시황분석</li>
     <li class="sidebar-item"        data-page="compare"><span class="mi">🔍</span>종목비교</li>
     <li class="sidebar-item"        data-page="screener"><span class="mi">🔎</span>종목스크리너</li>
@@ -1112,6 +1223,11 @@ select:focus { border-color: var(--accent); }
   <!-- ========= PAGE: 업종별맵 ========= -->
   <div class="page" id="page-sector">
     <div id="sector-view"></div>
+  </div>
+
+  <!-- ========= PAGE: 관심종목 (Phase 12-2) ========= -->
+  <div class="page" id="page-watchlist">
+    <div id="watchlist-view"></div>
   </div>
 
   <!-- SHARED: CHART PANEL (모든 페이지에서 종목 클릭 시 열림) -->
@@ -1389,6 +1505,41 @@ let APP = {
   selectedTheme: null
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WATCHLIST (Phase 12-2) — localStorage 기반, 서버 불필요
+// ─────────────────────────────────────────────────────────────────────────────
+const _WATCHLIST_KEY = 'watchlist';
+
+function getWatchlist() {
+  try { return JSON.parse(localStorage.getItem(_WATCHLIST_KEY) || '[]'); }
+  catch { return []; }
+}
+function _saveWatchlist(list) {
+  try { localStorage.setItem(_WATCHLIST_KEY, JSON.stringify(list)); }
+  catch (e) { console.warn('[watchlist] save failed', e); }
+}
+function isInWatchlist(code) {
+  return getWatchlist().some(i => i.code === code);
+}
+function toggleWatchlist(code, name) {
+  let list = getWatchlist();
+  const idx = list.findIndex(i => i.code === code);
+  const added = idx < 0;
+  if (added) list.push({ code, name, addedAt: new Date().toISOString() });
+  else       list.splice(idx, 1);
+  _saveWatchlist(list);
+  updateWatchlistBadge();
+  console.log('[watchlist]', added ? '+' : '-', code, name, 'total=', list.length);
+  return added;
+}
+function updateWatchlistBadge() {
+  const el = document.getElementById('sidebar-watchlist-badge');
+  if (!el) return;
+  const n = getWatchlist().length;
+  el.textContent = n > 0 ? n : '';
+  el.style.display = n > 0 ? 'inline-block' : 'none';
+}
+
 function getSortedThemes() {
   if (!APP.data) return [];
   const themes = APP.data.themes.map(t => ({
@@ -1583,6 +1734,7 @@ function renderStockGrid(theme) {
     const pct = s.change_pct;
     const safeName = _escHtml(s.name);
     const safeCode = _escHtml(s.code);
+    const fav = isInWatchlist(s.code);
     card.innerHTML = `
       <div class="s-info">
         <div class="s-name" title="${safeName}">${safeName}</div>
@@ -1593,6 +1745,8 @@ function renderStockGrid(theme) {
         <div class="s-pct" style="color:${pctTextColor(pct)}">${fmtPct(pct)}</div>
         <div class="s-vol">${(s.volume_mn || 0).toLocaleString()}M</div>
       </div>
+      <button class="watchlist-star ${fav ? 'star-active' : ''}"
+              title="관심종목 토글">${fav ? '★' : '☆'}</button>
     `;
     grid.appendChild(card);
   });
@@ -1609,6 +1763,16 @@ function renderStockGrid(theme) {
 document.getElementById('stock-grid').addEventListener('click', (e) => {
   const card = e.target.closest('.s-card');
   if (!card) return;
+
+  // Phase 12-2: 카드 내부 ☆ 버튼 클릭은 차트 패널 열지 말고 watchlist 토글만
+  const star = e.target.closest('.watchlist-star');
+  if (star) {
+    e.stopPropagation();
+    const added = toggleWatchlist(card.dataset.code, card.dataset.name);
+    star.textContent = added ? '★' : '☆';
+    star.classList.toggle('star-active', added);
+    return;
+  }
 
   const code      = card.dataset.code;
   const name      = card.dataset.name;
@@ -1831,10 +1995,17 @@ async function openChartPanel(code, hintName) {
   const daySign  = dayChg > 0 ? '+' : '';
   const lastDate = (data.dates && data.dates[data.dates.length - 1]) || '';
 
+  const favStar = isInWatchlist(code) ? '★' : '☆';
+  const favClass = isInWatchlist(code) ? 'star-active' : '';
+
   panel.innerHTML = `
     <div class="chart-header" data-header-code="${safeCode}">
       <div class="chart-header-left">
-        <span class="chart-title">${displayName} (${safeCode})</span>
+        <div class="chart-title-row">
+          <button class="watchlist-star-lg ${favClass}" id="chart-star-btn"
+                  title="관심종목 토글">${favStar}</button>
+          <span class="chart-title">${displayName} (${safeCode})</span>
+        </div>
         <div class="chart-live-price" id="chart-live-price">
           <span class="live-price-value">₩${curPrice.toLocaleString()}</span>
           <span class="live-price-change" style="color:${dayCol}">
@@ -1844,6 +2015,20 @@ async function openChartPanel(code, hintName) {
         </div>
       </div>
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
+    </div>
+
+    <!-- Phase 12-1: 기간 + 12-3: 오버레이 토글 -->
+    <div class="chart-controls-row">
+      <div class="chart-period-bar" id="chart-period-bar">
+        <button class="chart-period-btn" data-days="30">1M</button>
+        <button class="chart-period-btn" data-days="90">3M</button>
+        <button class="chart-period-btn active" data-days="180">6M</button>
+        <button class="chart-period-btn" data-days="365">1Y</button>
+        <button class="chart-period-btn" data-days="1095">3Y</button>
+      </div>
+      <div class="chart-overlay-toggles">
+        <button class="overlay-toggle" id="toggle-flow">수급 OFF</button>
+      </div>
     </div>
 
     <div class="chart-canvas-wrap chart-cv-wrap">
@@ -1871,28 +2056,119 @@ async function openChartPanel(code, hintName) {
       <button class="chart-tab-btn active" data-ctab="analysis">기술적 분석</button>
       <button class="chart-tab-btn"        data-ctab="reports">리포트</button>
       <button class="chart-tab-btn"        data-ctab="news">뉴스</button>
+      <button class="chart-tab-btn"        data-ctab="financial">재무</button>
     </div>
     <div id="chart-tab-content"></div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
+  document.getElementById('chart-star-btn').addEventListener('click', _toggleChartStar);
 
   _drawCandles(document.getElementById('cv-candle'), data, W, HC);
-  _drawVolume(document.getElementById('cv-volume'),  data, W, HV);
+  _drawVolume(document.getElementById('cv-volume'),  data, W, HV, null);
 
-  // Phase 10: 차트 패널 탭 상태 유지 + 기본은 '기술적 분석'
-  CHART_STATE.code = code;
-  CHART_STATE.data = data;
-  CHART_STATE.tab  = 'analysis';
+  // Phase 10/11: 차트 패널 상태 + 기본 '기술적 분석' + 크로스헤어 + 가격 polling
+  CHART_STATE.code        = code;
+  CHART_STATE.data        = data;
+  CHART_STATE.tab         = 'analysis';
+  CHART_STATE.days        = data.days || 180;
+  CHART_STATE.flowVisible = false;
+  CHART_STATE.flowData    = null;
   _renderAnalysis(document.getElementById('chart-tab-content'), data.analysis);
 
-  document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
+  // 기본 선택된 기간 버튼 하이라이트
+  document.querySelectorAll('#chart-period-bar .chart-period-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.days) === CHART_STATE.days);
+  });
 
-  // Phase 11: 크로스헤어 + 실시간 가격 polling
+  document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
+  document.getElementById('chart-period-bar').addEventListener('click', _chartPeriodClick);
+  document.getElementById('toggle-flow').addEventListener('click', _toggleFlowOverlay);
+
   _setupCrosshair(data, W, HC, HV);
   _startChartPricePolling(code);
 }
 
+// Phase 12-1: 기간 버튼 클릭 → 서버에 ?days=N 재요청 → 차트 재렌더링
+async function _chartPeriodClick(e) {
+  const btn = e.target.closest('.chart-period-btn');
+  if (!btn) return;
+  const days = parseInt(btn.dataset.days);
+  if (!days || days === CHART_STATE.days) return;
+  const code = CHART_STATE.code;
+  if (!code) return;
+
+  document.querySelectorAll('#chart-period-bar .chart-period-btn').forEach(b => {
+    b.classList.toggle('active', b === btn);
+  });
+
+  try {
+    const r = await fetch(`/api/chart/${code}?days=${days}`, { cache: 'no-store' });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    if (CHART_STATE.code !== code) return;   // 다른 종목으로 전환됨
+
+    CHART_STATE.data = d;
+    CHART_STATE.days = days;
+    // flow 캐시는 유지하되 오버레이는 재계산 필요
+    const W = 1152, HC = 400, HV = 80;
+    _drawCandles(document.getElementById('cv-candle'), d, W, HC);
+    _drawVolume(document.getElementById('cv-volume'), d, W, HV,
+                CHART_STATE.flowVisible ? CHART_STATE.flowData : null);
+    _setupCrosshair(d, W, HC, HV);
+    if (CHART_STATE.tab === 'analysis') {
+      _renderAnalysis(document.getElementById('chart-tab-content'), d.analysis);
+    }
+    console.log('[period]', code, days, 'days → candles=', d.close.length);
+  } catch (err) {
+    console.error('[period] fetch failed', err);
+  }
+}
+
+// Phase 12-2: 차트 헤더의 ☆ 버튼 토글
+function _toggleChartStar() {
+  const code = CHART_STATE.code;
+  if (!code) return;
+  const name = (CHART_STATE.data && CHART_STATE.data.name) || code;
+  const added = toggleWatchlist(code, name);
+  const btn = document.getElementById('chart-star-btn');
+  if (btn) {
+    btn.textContent = added ? '★' : '☆';
+    btn.classList.toggle('star-active', added);
+  }
+}
+
+// Phase 12-3: 수급 오버레이 토글
+async function _toggleFlowOverlay() {
+  const btn = document.getElementById('toggle-flow');
+  if (!btn) return;
+  CHART_STATE.flowVisible = !CHART_STATE.flowVisible;
+
+  if (CHART_STATE.flowVisible && !CHART_STATE.flowData) {
+    btn.textContent = '수급 로딩…';
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/flow/${CHART_STATE.code}`);
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+      CHART_STATE.flowData = d;
+    } catch (err) {
+      CHART_STATE.flowVisible = false;
+      btn.textContent = '수급 없음';
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = '수급 OFF'; }, 1500);
+      return;
+    }
+    btn.disabled = false;
+  }
+  btn.textContent = CHART_STATE.flowVisible ? '수급 ON' : '수급 OFF';
+  btn.classList.toggle('active', CHART_STATE.flowVisible);
+
+  const W = 1152, HV = 80;
+  _drawVolume(document.getElementById('cv-volume'), CHART_STATE.data, W, HV,
+              CHART_STATE.flowVisible ? CHART_STATE.flowData : null);
+}
+
 // Phase 10: chart panel 3-tab (analysis/reports/news) controller
-const CHART_STATE = { code: null, data: null, tab: 'analysis' };
+const CHART_STATE = { code: null, data: null, tab: 'analysis', days: 180, flowVisible: false, flowData: null };
 
 function _chartTabClick(e) {
   const btn = e.target.closest('.chart-tab-btn');
@@ -1909,6 +2185,8 @@ function _chartTabClick(e) {
     _loadReports(CHART_STATE.code, container);
   } else if (tab === 'news') {
     _loadNews(CHART_STATE.code, container);
+  } else if (tab === 'financial') {
+    _loadFinancial(CHART_STATE.code, container);
   }
 }
 
@@ -2020,6 +2298,74 @@ async function _loadReports(code, container) {
       </div>`;
   } catch (err) {
     container.innerHTML = `<div class="chart-empty">리포트 로드 실패: ${err.message}</div>`;
+  }
+}
+
+async function _loadFinancial(code, container) {
+  container.innerHTML = '<div class="chart-loading"><div class="spin"></div>재무 데이터 로딩 중…</div>';
+  try {
+    const r = await fetch(`/api/financial/${code}`);
+    const d = await r.json();
+    if (CHART_STATE.tab !== 'financial' || CHART_STATE.code !== code) return;
+    if (!r.ok || d.error) {
+      container.innerHTML = `<div class="chart-empty">
+        <div class="chart-empty-title">재무 데이터 불러오기 실패</div>${d.error || ('HTTP ' + r.status)}
+      </div>`;
+      return;
+    }
+
+    const fmt = (v, suf) => v == null ? '—' : (Math.round(v * 100) / 100).toLocaleString() + (suf || '');
+    const fmtBign = (v) => {
+      if (v == null) return '—';
+      // 입력 단위: 억원
+      if (Math.abs(v) >= 10000) return (v / 10000).toFixed(1) + '조';
+      return v.toLocaleString() + '억';
+    };
+
+    const cards = [
+      { label: 'PER',         value: fmt(d.per, '배'),         desc: d.eps != null ? `EPS ${d.eps.toLocaleString()}원` : '주가수익비율' },
+      { label: '추정 PER',    value: fmt(d.estimate_per, '배'), desc: d.estimate_eps != null ? `추정 EPS ${d.estimate_eps.toLocaleString()}원` : '컨센서스 추정' },
+      { label: 'PBR',         value: fmt(d.pbr, '배'),         desc: d.bps != null ? `BPS ${d.bps.toLocaleString()}원` : '주가순자산비율' },
+      { label: '동일업종 PER', value: fmt(d.industry_per, '배'), desc: '업종 평균 비교' },
+      { label: '시가총액',    value: d.market_cap || '—',      desc: d.market_cap_rank || '' },
+      { label: '배당수익률',  value: fmt(d.dividend_yield, '%'), desc: '연 환산 시가배당률' },
+    ];
+
+    const cardHTML = cards.map(c => `
+      <div class="financial-card">
+        <div class="fin-label">${_escHtml(c.label)}</div>
+        <div class="fin-value">${_escHtml(c.value)}</div>
+        ${c.desc ? `<div class="fin-desc">${_escHtml(c.desc)}</div>` : ''}
+      </div>`).join('');
+
+    let annualHTML = '';
+    if (d.annual && d.annual.length) {
+      const headers = d.annual.map(a => `<th class="r">${_escHtml(a.period)}</th>`).join('');
+      const rev    = d.annual.map(a => `<td class="r">${fmtBign(a.revenue)}</td>`).join('');
+      const op     = d.annual.map(a => `<td class="r">${fmtBign(a.op_profit)}</td>`).join('');
+      const np     = d.annual.map(a => `<td class="r">${fmtBign(a.net_profit)}</td>`).join('');
+      const opM    = d.annual.map(a => `<td class="r">${a.op_margin == null ? '—' : a.op_margin.toFixed(1) + '%'}</td>`).join('');
+      annualHTML = `
+        <div class="financial-table-title">기업실적 분석 (단위: 억원, IFRS 연결)</div>
+        <table class="pg-table financial-table">
+          <thead><tr><th></th>${headers}</tr></thead>
+          <tbody>
+            <tr><th>매출액</th>${rev}</tr>
+            <tr><th>영업이익</th>${op}</tr>
+            <tr><th>당기순이익</th>${np}</tr>
+            <tr><th>영업이익률</th>${opM}</tr>
+          </tbody>
+        </table>`;
+    }
+
+    container.innerHTML = `
+      <div class="financial-wrap">
+        <div class="financial-grid">${cardHTML}</div>
+        ${annualHTML}
+        <div class="financial-source">출처: 네이버 금융 (24시간 캐시)</div>
+      </div>`;
+  } catch (err) {
+    container.innerHTML = `<div class="chart-empty">로드 실패: ${_escHtml(err.message)}</div>`;
   }
 }
 
@@ -2380,15 +2726,16 @@ function _drawCandles(canvas, data, W, H) {
   }
 }
 
-function _drawVolume(canvas, data, W, H) {
+function _drawVolume(canvas, data, W, H, flowData) {
   const ctx = canvas.getContext('2d');
-  const { open: O, close: C, volume: V } = data;
+  const { open: O, close: C, volume: V, dates: D } = data;
   const len  = V.length;
   const PAD  = { top: 6, right: 120, bottom: 16, left: 68 };
   const cw   = W - PAD.left - PAD.right;
   const ch   = H - PAD.top  - PAD.bottom;
   const maxV = Math.max(...V) || 1;
   const bw   = Math.max(2, (cw / len) * 0.65);
+  const flowOn = !!(flowData && flowData.dates && flowData.dates.length);
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#1C1C1E';
@@ -2398,10 +2745,14 @@ function _drawVolume(canvas, data, W, H) {
   ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(W - PAD.right, PAD.top); ctx.stroke();
 
+  // 볼륨 바 — flow 오버레이가 켜졌으면 투명도 낮춤
   for (let i = 0; i < len; i++) {
     const x   = PAD.left + (i / (len - 1)) * cw;
     const bh  = (V[i] / maxV) * ch;
-    const col = C[i] >= O[i] ? '#FF000088' : '#00880088';
+    const upDown = C[i] >= O[i];
+    const col = flowOn
+      ? (upDown ? '#FF000033' : '#00880033')
+      : (upDown ? '#FF000088' : '#00880088');
     ctx.fillStyle = col;
     ctx.fillRect(x - bw / 2, PAD.top + ch - bh, bw, bh);
   }
@@ -2411,6 +2762,60 @@ function _drawVolume(canvas, data, W, H) {
   ctx.textAlign = 'right';
   const maxLbl = maxV >= 1e6 ? (maxV / 1e6).toFixed(0) + 'M' : (maxV / 1e3).toFixed(0) + 'K';
   ctx.fillText(maxLbl, PAD.left - 6, PAD.top + 10);
+
+  // ── Phase 12-3: 외국인/기관 수급 오버레이 ──
+  if (flowOn) {
+    // flowData: {dates, foreign_value[], inst_value[]}  (Naver 크롤, 20일)
+    const flowMap = {};
+    for (let k = 0; k < flowData.dates.length; k++) {
+      flowMap[flowData.dates[k]] = {
+        f: flowData.foreign_value ? flowData.foreign_value[k] : 0,
+        i: flowData.inst_value    ? flowData.inst_value[k]    : 0,
+      };
+    }
+    let maxAbs = 1;
+    flowData.dates.forEach(d => {
+      const r = flowMap[d] || {};
+      maxAbs = Math.max(maxAbs, Math.abs(r.f || 0), Math.abs(r.i || 0));
+    });
+    const midY  = PAD.top + ch / 2;
+    const halfH = ch / 2 - 1;
+    const halfBw = Math.max(1, bw / 2);
+
+    for (let i = 0; i < len; i++) {
+      const date = D[i];
+      const r = flowMap[date];
+      if (!r) continue;
+      const x = PAD.left + (i / (len - 1)) * cw;
+      // 외국인 (좌측 절반) — 빨강(매수)/초록(매도)
+      if (r.f) {
+        const h = (Math.abs(r.f) / maxAbs) * halfH;
+        ctx.fillStyle = r.f > 0 ? '#FF3333cc' : '#33AA33cc';
+        ctx.fillRect(x - halfBw, r.f > 0 ? midY - h : midY, halfBw - 0.5, h);
+      }
+      // 기관 (우측 절반) — 주황(매수)/하늘(매도)
+      if (r.i) {
+        const h = (Math.abs(r.i) / maxAbs) * halfH;
+        ctx.fillStyle = r.i > 0 ? '#FF9F0Acc' : '#5AC8FAcc';
+        ctx.fillRect(x + 0.5, r.i > 0 ? midY - h : midY, halfBw - 0.5, h);
+      }
+    }
+    // 0 기준선
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(PAD.left, midY); ctx.lineTo(W - PAD.right, midY); ctx.stroke();
+
+    // 범례
+    ctx.fillStyle = '#FF3333'; ctx.fillRect(PAD.left + 30, PAD.top + 1, 8, 8);
+    ctx.fillStyle = '#33AA33'; ctx.fillRect(PAD.left + 80, PAD.top + 1, 8, 8);
+    ctx.fillStyle = '#FF9F0A'; ctx.fillRect(PAD.left + 130, PAD.top + 1, 8, 8);
+    ctx.fillStyle = '#5AC8FA'; ctx.fillRect(PAD.left + 175, PAD.top + 1, 8, 8);
+    ctx.fillStyle = '#AEAEB2'; ctx.font = '10px Noto Sans KR, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('외국인+', PAD.left + 41,  PAD.top + 9);
+    ctx.fillText('외국인−', PAD.left + 91,  PAD.top + 9);
+    ctx.fillText('기관+',   PAD.left + 141, PAD.top + 9);
+    ctx.fillText('기관−',   PAD.left + 186, PAD.top + 9);
+  }
 }
 
 function _renderAnalysis(container, analysis) {
@@ -2755,13 +3160,14 @@ function _drawCompareChart(canvas, data, color1, color2) {
 // SIDEBAR ROUTER (Phase 9)
 // ─────────────────────────────────────────────────────────────────────────────
 const PAGE_RENDERERS = {
-  thememap: () => { renderCurrentView(); if (APP.data && APP.data.new_high_sectors) renderNewHighSectors(); },
-  market:   () => { renderMarketOverview(); },
-  compare:  () => { openComparePanel(); },
-  screener: () => { renderScreener(); },
-  flow:     () => { renderFlowPage(); },
-  short:    () => { renderShortPage(); },
-  sector:   () => { renderSectorPage(); },
+  thememap:  () => { renderCurrentView(); if (APP.data && APP.data.new_high_sectors) renderNewHighSectors(); },
+  watchlist: () => { renderWatchlistPage(); },
+  market:    () => { renderMarketOverview(); },
+  compare:   () => { openComparePanel(); },
+  screener:  () => { renderScreener(); },
+  flow:      () => { renderFlowPage(); },
+  short:     () => { renderShortPage(); },
+  sector:    () => { renderSectorPage(); },
 };
 
 function navigateTo(page) {
@@ -2793,6 +3199,96 @@ document.getElementById('sidebar-menu').addEventListener('click', (e) => {
 document.getElementById('sidebar-settings').addEventListener('click', () => {
   openSettingsModal();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WATCHLIST PAGE (Phase 12-2)  —  localStorage 기반, 사이드바에서 진입
+// ─────────────────────────────────────────────────────────────────────────────
+function _findStockInThemes(code) {
+  if (!APP.data || !APP.data.themes) return null;
+  for (const t of APP.data.themes) {
+    for (const s of (t.stocks || [])) {
+      if (s.code === code) return { ...s, theme: t.name };
+    }
+  }
+  return null;
+}
+
+async function renderWatchlistPage() {
+  const root = document.getElementById('watchlist-view');
+  const list = getWatchlist();
+
+  if (!list.length) {
+    root.innerHTML = `
+      <div class="pg-wrap">
+        <div class="pg-title">관심종목</div>
+        <div class="pg-sub">자주 보는 종목을 모아보세요</div>
+        <div class="pg-empty">
+          <div class="pg-empty-title">관심종목이 없습니다</div>
+          종목 카드의 ☆ 버튼을 눌러 추가하세요.
+        </div>
+      </div>`;
+    return;
+  }
+
+  // 캐시에 없는 종목은 /api/price 로 보강
+  const cards = await Promise.all(list.map(async (item) => {
+    let stock = _findStockInThemes(item.code);
+    let priceInfo = null;
+    if (!stock) {
+      try {
+        const r = await fetch(`/api/price/${item.code}`);
+        if (r.ok) {
+          const p = await r.json();
+          if (!p.error) priceInfo = p;
+        }
+      } catch {}
+    }
+    return { item, stock, priceInfo };
+  }));
+
+  const rows = cards.map(({ item, stock, priceInfo }) => {
+    const sc = _escHtml(item.code);
+    const sn = _escHtml(item.name || (stock && stock.name) || (priceInfo && priceInfo.name) || item.code);
+    const chg = (stock && stock.change_pct) ?? (priceInfo && priceInfo.change_pct) ?? null;
+    const price = (priceInfo && priceInfo.price) ?? null;
+    const vol = (stock && stock.volume_mn) ?? (priceInfo && priceInfo.volume_mn) ?? null;
+    const col = chg == null ? 'var(--text-muted)' : chg > 0 ? '#FF3333' : chg < 0 ? '#33AA33' : 'var(--text-muted)';
+    const sign = chg == null ? '' : chg > 0 ? '+' : '';
+    const themeStr = stock && stock.theme ? `<span class="wl-theme">${_escHtml(stock.theme)}</span>` : '';
+    return `<div class="watchlist-card" data-code="${sc}" data-name="${sn}">
+      <button class="watchlist-star star-active wl-card-star" title="제거">★</button>
+      <div class="wl-name">${sn}</div>
+      <div class="wl-code">${sc} ${themeStr}</div>
+      <div class="wl-card-bottom">
+        <span class="wl-pct" style="color:${col}">${chg == null ? '—' : sign + chg.toFixed(2) + '%'}</span>
+        <span class="wl-price">${price != null ? '₩' + price.toLocaleString() : ''}</span>
+      </div>
+      <div class="wl-vol">${vol != null ? vol.toLocaleString() + 'M' : ''}</div>
+    </div>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="pg-wrap">
+      <div class="pg-title">관심종목</div>
+      <div class="pg-sub">${list.length}종목 · 클릭 → 차트, ★ → 제거</div>
+      <div class="watchlist-grid">${rows}</div>
+    </div>`;
+
+  // 카드 클릭(차트) / 별 클릭(제거) 델리게이션
+  root.querySelector('.watchlist-grid').addEventListener('click', (e) => {
+    const card = e.target.closest('.watchlist-card');
+    if (!card) return;
+    const code = card.dataset.code;
+    const name = card.dataset.name;
+    if (e.target.closest('.wl-card-star')) {
+      e.stopPropagation();
+      toggleWatchlist(code, name);
+      renderWatchlistPage();
+      return;
+    }
+    openChartPanel(code, name);
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCREENER PAGE (Phase 9)
@@ -3785,6 +4281,7 @@ async function init() {
     renderIndices();
     renderCurrentView();
     renderNewHighSectors();
+    updateWatchlistBadge();        // Phase 12-2
     const first = getSortedThemes()[0];
     if (first) showDetail(first);
     console.log('[init] render complete');
