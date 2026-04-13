@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# 데이터 캐시 (런타임 생성)
+cache/
+data.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 로그
+*.log

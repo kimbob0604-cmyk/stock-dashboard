@@ -1,0 +1,5 @@
+Flask>=3.0
+pykrx>=1.0.51
+pandas>=2.0
+APScheduler>=3.10
+gunicorn>=21.2

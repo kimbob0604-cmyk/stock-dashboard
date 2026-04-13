@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: stock-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:$PORT server:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TZ
+        value: Asia/Seoul
+    autoDeploy: true
