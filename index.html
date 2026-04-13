@@ -19,6 +19,8 @@
   --text-sub:   #AEAEB2;
   --text-muted: #636366;
   --accent:     #0A84FF;
+  --sidebar-bg: #151515;
+  --accent-2:   #30D158;
 }
 
 html, body {
@@ -30,6 +32,63 @@ html, body {
   font-size: 13px;
   line-height: 1.5;
 }
+
+body { display: flex; }
+
+/* ── SIDEBAR ─────────────────────────────────────────────────────── */
+#sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid #2C2C2E;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 300;
+}
+.sidebar-logo {
+  padding: 18px 16px;
+  font-size: 14px; font-weight: 800; letter-spacing: 0.5px;
+  border-bottom: 1px solid #2C2C2E;
+}
+.sidebar-menu { list-style: none; padding: 8px 0; margin: 0; flex: 1; }
+.sidebar-item {
+  padding: 11px 16px;
+  color: #888;
+  font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.sidebar-item:hover { background: #1C1C1E; color: #ccc; }
+.sidebar-item.active {
+  background: #1C1C1E;
+  color: var(--text);
+  border-left-color: var(--accent-2);
+}
+.sidebar-bottom {
+  border-top: 1px solid #2C2C2E;
+  padding: 6px 0;
+}
+.sidebar-item .mi { display: inline-block; width: 22px; }
+
+/* ── MAIN WRAP ───────────────────────────────────────────────────── */
+#main-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Non-thememap 페이지일 때 테마맵 전용 컨트롤 숨김 */
+body:not(.page-thememap) .ctrl-left { visibility: hidden; }
+
+/* 페이지 섹션 */
+.page { display: none; }
+.page.active { display: block; }
 
 /* ── TOPBAR ─────────────────────────────────────────────────── */
 #topbar {
@@ -570,8 +629,6 @@ select:focus { border-color: var(--accent); }
 .cmp-error { color: #FF453A; }
 
 /* ── MARKET OVERVIEW VIEW (Phase 8-2) ─────────────────────────────── */
-#market-view { display: none; }
-#market-view.visible { display: block; }
 .ov-wrap {
   background: var(--surface); border-radius: 12px; padding: 20px 24px 24px;
 }
@@ -601,6 +658,80 @@ select:focus { border-color: var(--accent); }
 .ov-earnings-icon { font-size: 26px; }
 .ov-earnings-title { font-size: 15px; font-weight: 600; }
 .ov-earnings-sub   { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ── GENERIC PAGE CARD (Phase 9 new pages) ────────────────────────── */
+.pg-wrap {
+  background: var(--surface); border-radius: 12px; padding: 20px 24px 24px;
+}
+.pg-title { font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+.pg-sub   { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; }
+.pg-empty {
+  background: var(--surface2); border: 1px dashed var(--border);
+  border-radius: 10px; padding: 28px; text-align: center;
+  color: var(--text-muted); font-size: 13px;
+}
+.pg-empty .pg-empty-title { color: var(--text); font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+
+.pg-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.pg-tab {
+  background: var(--surface2); color: var(--text-sub); border: 1px solid var(--border);
+  padding: 6px 14px; border-radius: 16px; cursor: pointer;
+  font-size: 12px; font-weight: 600; font-family: inherit;
+}
+.pg-tab:hover  { background: var(--border); color: var(--text); }
+.pg-tab.active { background: var(--accent-2); color: #fff; border-color: var(--accent-2); }
+
+.pg-table { width: 100%; border-collapse: collapse; }
+.pg-table thead tr { background: var(--surface2); }
+.pg-table th {
+  padding: 10px 14px; font-size: 11px; font-weight: 600;
+  color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px;
+  text-align: left; white-space: nowrap;
+}
+.pg-table th.r, .pg-table td.r { text-align: right; }
+.pg-table tbody tr {
+  border-top: 1px solid var(--border); cursor: pointer;
+  transition: background 0.1s;
+}
+.pg-table tbody tr:hover { background: var(--surface2); }
+.pg-table td { padding: 9px 14px; font-size: 13px; }
+.pg-table .rank { color: var(--text-muted); font-size: 11px; }
+
+/* ── SCREENER (Phase 9) ───────────────────────────────────────────── */
+.scr-form {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px 16px;
+  padding: 14px 16px;
+  background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 14px;
+}
+.scr-field { display: flex; flex-direction: column; gap: 4px; }
+.scr-field label {
+  font-size: 11px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.scr-field input, .scr-field select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; font-family: inherit; font-size: 12px;
+  padding: 6px 10px; outline: none;
+}
+.scr-field input:focus, .scr-field select:focus { border-color: var(--accent); }
+.scr-actions {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 4px;
+}
+.scr-btn {
+  background: var(--accent-2); color: #fff; border: none; border-radius: 8px;
+  padding: 7px 18px; cursor: pointer; font-size: 13px; font-weight: 600;
+  font-family: inherit;
+}
+.scr-btn:hover { opacity: 0.88; }
+.scr-btn.secondary { background: var(--surface2); color: var(--text-sub); border: 1px solid var(--border); }
+.scr-btn.secondary:hover { background: var(--border); color: var(--text); }
+.scr-count { margin-left: auto; font-size: 12px; color: var(--text-muted); }
 
 /* ── CHART PANEL ─────────────────────────────────────────────────── */
 #chart-panel {
@@ -663,7 +794,26 @@ select:focus { border-color: var(--accent); }
 }
 </style>
 </head>
-<body>
+<body class="page-thememap">
+
+<!-- SIDEBAR NAV (Phase 9) -->
+<nav id="sidebar">
+  <div class="sidebar-logo">📊 DASHBOARD</div>
+  <ul class="sidebar-menu" id="sidebar-menu">
+    <li class="sidebar-item active" data-page="thememap"><span class="mi">🗺️</span>테마맵</li>
+    <li class="sidebar-item"        data-page="market"><span class="mi">📈</span>시황분석</li>
+    <li class="sidebar-item"        data-page="compare"><span class="mi">🔍</span>종목비교</li>
+    <li class="sidebar-item"        data-page="screener"><span class="mi">🔎</span>종목스크리너</li>
+    <li class="sidebar-item"        data-page="flow"><span class="mi">💰</span>수급동향</li>
+    <li class="sidebar-item"        data-page="short"><span class="mi">📉</span>공매도</li>
+    <li class="sidebar-item"        data-page="sector"><span class="mi">🏭</span>업종별맵</li>
+  </ul>
+  <div class="sidebar-bottom">
+    <div class="sidebar-item" id="sidebar-settings"><span class="mi">⚙️</span>설정</div>
+  </div>
+</nav>
+
+<div id="main-wrap">
 
 <!-- TOP BAR -->
 <header id="topbar">
@@ -683,13 +833,10 @@ select:focus { border-color: var(--accent); }
     <div class="tab-group" style="margin-left:6px;">
       <button class="tab-btn active" data-tab="map">Map</button>
       <button class="tab-btn"        data-tab="list">List</button>
-      <button class="tab-btn"        data-tab="market">시황</button>
     </div>
-    <button class="sm-cancel-btn" id="compare-open-btn"
-            style="margin-left:10px; padding: 5px 12px; font-size: 12px;">종목비교</button>
   </div>
   <div class="ctrl-right">
-    <button class="settings-btn" id="settings-btn" title="테마 설정">⚙</button>
+    <button class="settings-btn" id="settings-btn" title="테마 설정" style="display:none;">⚙</button>
     <div id="server-status">
       <span class="ctrl-label">갱신주기</span>
       <select id="sel-interval" title="자동 갱신 주기">
@@ -724,72 +871,96 @@ select:focus { border-color: var(--accent); }
 <!-- MAIN CONTENT -->
 <div id="content">
 
-  <!-- MAP VIEW -->
-  <div id="map-view">
-    <div class="loading" id="tm-loading"><div class="spin"></div>데이터 로딩 중…</div>
-    <svg id="treemap-svg" style="display:none;"></svg>
-  </div>
+  <!-- ========= PAGE: 테마맵 ========= -->
+  <div class="page active" id="page-thememap">
+    <div id="map-view">
+      <div class="loading" id="tm-loading"><div class="spin"></div>데이터 로딩 중…</div>
+      <svg id="treemap-svg" style="display:none;"></svg>
+    </div>
 
-  <!-- LIST VIEW -->
-  <div id="list-view">
-    <table class="list-table">
-      <thead>
-        <tr>
-          <th style="width:52px;">#</th>
-          <th>테마명</th>
-          <th class="r">가중평균%</th>
-          <th class="r">활성/전체</th>
-          <th class="r">거래대금</th>
-        </tr>
-      </thead>
-      <tbody id="list-tbody"></tbody>
-    </table>
-  </div>
+    <div id="list-view">
+      <table class="list-table">
+        <thead>
+          <tr>
+            <th style="width:52px;">#</th>
+            <th>테마명</th>
+            <th class="r">가중평균%</th>
+            <th class="r">활성/전체</th>
+            <th class="r">거래대금</th>
+          </tr>
+        </thead>
+        <tbody id="list-tbody"></tbody>
+      </table>
+    </div>
 
-  <!-- DETAIL PANEL -->
-  <div id="detail-panel">
-    <div class="dp-wrap">
-      <div class="dp-head">
-        <div class="dp-title">
-          <div>
-            <div class="dp-name" id="dp-name">—</div>
-            <div class="dp-meta" id="dp-meta">—</div>
+    <div id="detail-panel">
+      <div class="dp-wrap">
+        <div class="dp-head">
+          <div class="dp-title">
+            <div>
+              <div class="dp-name" id="dp-name">—</div>
+              <div class="dp-meta" id="dp-meta">—</div>
+            </div>
+            <span class="badge" id="dp-badge" style="font-size:16px;">—</span>
           </div>
-          <span class="badge" id="dp-badge" style="font-size:16px;">—</span>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="ctrl-label">종목정렬</span>
+            <select id="sel-stock-sort">
+              <option value="change_pct">등락률</option>
+              <option value="volume_mn">거래대금</option>
+              <option value="name">종목명</option>
+            </select>
+            <button class="dp-close" id="dp-close">✕ 닫기</button>
+          </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span class="ctrl-label">종목정렬</span>
-          <select id="sel-stock-sort">
-            <option value="change_pct">등락률</option>
-            <option value="volume_mn">거래대금</option>
-            <option value="name">종목명</option>
-          </select>
-          <button class="dp-close" id="dp-close">✕ 닫기</button>
-        </div>
+        <div id="stock-grid"></div>
       </div>
-      <div id="stock-grid"></div>
+    </div>
+
+    <div id="newhigh-section" style="display:none;">
+      <div class="nh-header">
+        <span class="nh-title">저번 주 52주 신고가 5종목 이상 섹터</span>
+        <span class="nh-sub" id="nh-sub"></span>
+      </div>
+      <div id="nh-cards"></div>
     </div>
   </div>
 
-  <!-- COMPARE PANEL (Phase 8-1) -->
-  <div id="compare-panel" style="display:none;"></div>
+  <!-- ========= PAGE: 시황분석 ========= -->
+  <div class="page" id="page-market">
+    <div id="market-view"></div>
+  </div>
 
-  <!-- MARKET OVERVIEW VIEW (Phase 8-2) -->
-  <div id="market-view"></div>
+  <!-- ========= PAGE: 종목비교 ========= -->
+  <div class="page" id="page-compare">
+    <div id="compare-panel"></div>
+  </div>
 
-  <!-- CHART PANEL (Phase 6) -->
+  <!-- ========= PAGE: 종목스크리너 ========= -->
+  <div class="page" id="page-screener">
+    <div id="screener-view"></div>
+  </div>
+
+  <!-- ========= PAGE: 수급동향 ========= -->
+  <div class="page" id="page-flow">
+    <div id="flow-view"></div>
+  </div>
+
+  <!-- ========= PAGE: 공매도 ========= -->
+  <div class="page" id="page-short">
+    <div id="short-view"></div>
+  </div>
+
+  <!-- ========= PAGE: 업종별맵 ========= -->
+  <div class="page" id="page-sector">
+    <div id="sector-view"></div>
+  </div>
+
+  <!-- SHARED: CHART PANEL (모든 페이지에서 종목 클릭 시 열림) -->
   <div id="chart-panel" style="display:none;"></div>
 
-  <!-- 52주 신고가 섹터 -->
-  <div id="newhigh-section" style="display:none;">
-    <div class="nh-header">
-      <span class="nh-title">저번 주 52주 신고가 5종목 이상 섹터</span>
-      <span class="nh-sub" id="nh-sub"></span>
-    </div>
-    <div id="nh-cards"></div>
-  </div>
-
 </div>
+</div><!-- /#main-wrap -->
 
 <!-- TOOLTIP -->
 <div id="tooltip">
@@ -1052,6 +1223,7 @@ function createSparkline(container, data, changePct, width = 88, height = 36) {
 // ─────────────────────────────────────────────────────────────────────────────
 let APP = {
   data:          null,
+  page:          'thememap',
   tab:           'map',
   sort:          'weighted_avg_pct',
   stockSort:     'change_pct',
@@ -1104,7 +1276,7 @@ function renderTreemap() {
   d3.select(svg).selectAll('*').remove();
 
   const themes = getSortedThemes();
-  const W = 1392, H = 560;
+  const W = 1192, H = 560;
   svg.setAttribute('width', W);
   svg.setAttribute('height', H);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -1393,7 +1565,7 @@ async function openChartPanel(code, hintName) {
     return;
   }
 
-  const W = 1352, HC = 400, HV = 80;
+  const W = 1152, HC = 400, HV = 80;
   panel.innerHTML = `
     <div class="chart-header">
       <span class="chart-title">${data.name} (${data.code})</span>
@@ -1702,7 +1874,7 @@ function openComparePanel(initialCode, initialName) {
         <button class="cmp-period-btn"        data-p="5Y">5Y</button>
       </div>
       <div class="cmp-canvas-wrap">
-        <canvas id="cmp-canvas" width="1352" height="320"></canvas>
+        <canvas id="cmp-canvas" width="1152" height="320"></canvas>
       </div>
       <div class="cmp-legend" id="cmp-legend"></div>`;
 
@@ -1912,6 +2084,386 @@ function _drawCompareChart(canvas, data, color1, color2) {
   };
   drawLine(r1, color1);
   drawLine(r2, color2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIDEBAR ROUTER (Phase 9)
+// ─────────────────────────────────────────────────────────────────────────────
+const PAGE_RENDERERS = {
+  thememap: () => { renderCurrentView(); if (APP.data && APP.data.new_high_sectors) renderNewHighSectors(); },
+  market:   () => { renderMarketOverview(); },
+  compare:  () => { openComparePanel(); },
+  screener: () => { renderScreener(); },
+  flow:     () => { renderFlowPage(); },
+  short:    () => { renderShortPage(); },
+  sector:   () => { renderSectorPage(); },
+};
+
+function navigateTo(page) {
+  if (!(page in PAGE_RENDERERS)) page = 'thememap';
+  APP.page = page;
+
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const pageEl = document.getElementById(`page-${page}`);
+  if (pageEl) pageEl.classList.add('active');
+
+  document.querySelectorAll('#sidebar-menu .sidebar-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.page === page);
+  });
+
+  document.body.classList.remove('page-thememap','page-market','page-compare',
+                                  'page-screener','page-flow','page-short','page-sector');
+  document.body.classList.add(`page-${page}`);
+
+  try { PAGE_RENDERERS[page](); }
+  catch (err) { console.error('[navigateTo] render error for', page, err); }
+}
+
+document.getElementById('sidebar-menu').addEventListener('click', (e) => {
+  const item = e.target.closest('.sidebar-item');
+  if (!item) return;
+  navigateTo(item.dataset.page);
+});
+
+document.getElementById('sidebar-settings').addEventListener('click', () => {
+  openSettingsModal();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCREENER PAGE (Phase 9)
+// ─────────────────────────────────────────────────────────────────────────────
+const SCR_STATE = { market: 'ALL', min_change: '', min_volume: '', max_per: '', max_pbr: '', q: '' };
+
+function renderScreener() {
+  const root = document.getElementById('screener-view');
+  if (root.dataset.built) return;        // 폼은 한 번만 마크업. 결과만 재랜더링.
+  root.dataset.built = '1';
+
+  root.innerHTML = `
+    <div class="pg-wrap">
+      <div class="pg-title">종목 스크리너</div>
+      <div class="pg-sub">수집된 캐시 데이터에서 필터링 · API 호출 0회</div>
+
+      <div class="scr-form">
+        <div class="scr-field">
+          <label>시장</label>
+          <select id="scr-market">
+            <option value="ALL">전체</option>
+            <option value="KOSPI">KOSPI</option>
+            <option value="KOSDAQ">KOSDAQ</option>
+          </select>
+        </div>
+        <div class="scr-field">
+          <label>등락률 ≥ (%)</label>
+          <input type="number" step="0.1" id="scr-min-change" placeholder="예: 3">
+        </div>
+        <div class="scr-field">
+          <label>거래대금 ≥ (백만원)</label>
+          <input type="number" step="100" id="scr-min-volume" placeholder="예: 10000">
+        </div>
+        <div class="scr-field">
+          <label>PER ≤</label>
+          <input type="number" step="0.1" id="scr-max-per" placeholder="예: 15">
+        </div>
+        <div class="scr-field">
+          <label>PBR ≤</label>
+          <input type="number" step="0.1" id="scr-max-pbr" placeholder="예: 1.5">
+        </div>
+        <div class="scr-field" style="grid-column: span 2;">
+          <label>검색 (종목명 또는 코드)</label>
+          <input type="text" id="scr-q" placeholder="예: 삼성 또는 005930">
+        </div>
+        <div class="scr-actions">
+          <button class="scr-btn" id="scr-run">검색</button>
+          <button class="scr-btn secondary" id="scr-reset">초기화</button>
+          <span class="scr-count" id="scr-count"></span>
+        </div>
+      </div>
+
+      <div id="scr-results"></div>
+    </div>`;
+
+  document.getElementById('scr-run').addEventListener('click', _scrFetch);
+  document.getElementById('scr-reset').addEventListener('click', () => {
+    ['scr-min-change','scr-min-volume','scr-max-per','scr-max-pbr','scr-q'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('scr-market').value = 'ALL';
+    _scrFetch();
+  });
+  root.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.tagName === 'INPUT') _scrFetch();
+  });
+
+  _scrFetch();  // 초기 로드
+}
+
+async function _scrFetch() {
+  const params = new URLSearchParams({
+    market:     document.getElementById('scr-market').value || 'ALL',
+    min_change: document.getElementById('scr-min-change').value || '-100',
+    min_volume: document.getElementById('scr-min-volume').value || '0',
+    max_per:    document.getElementById('scr-max-per').value || '9999',
+    max_pbr:    document.getElementById('scr-max-pbr').value || '9999',
+    q:          document.getElementById('scr-q').value || '',
+  });
+  const results = document.getElementById('scr-results');
+  const countEl = document.getElementById('scr-count');
+  results.innerHTML = '<div class="pg-empty">조회 중…</div>';
+
+  try {
+    const r = await fetch(`/api/screener?${params}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+
+    countEl.textContent = `결과: ${d.count}종목` + (d.has_fundamentals ? '' : '  (PER/PBR 데이터 없음)');
+
+    if (!d.stocks.length) {
+      results.innerHTML = '<div class="pg-empty"><div class="pg-empty-title">조건에 맞는 종목 없음</div>필터를 완화해 보세요.</div>';
+      return;
+    }
+
+    const rows = d.stocks.map((s, i) => {
+      const pctCol = s.change_pct > 0 ? '#FF3333' : s.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
+      const sign   = s.change_pct > 0 ? '+' : '';
+      const per    = s.per != null ? s.per.toFixed(1) : '—';
+      const pbr    = s.pbr != null ? s.pbr.toFixed(1) : '—';
+      const cap    = s.market_cap != null ? _fmtMarketCap(s.market_cap) : '—';
+      const vol    = (s.volume_mn || 0).toLocaleString();
+      return `<tr data-code="${s.code}" data-name="${s.name}">
+        <td><span class="rank">${i + 1}</span></td>
+        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
+        <td style="font-weight:600">${s.name}</td>
+        <td style="font-size:11px;color:var(--text-muted)">${s.theme || ''}</td>
+        <td class="r" style="color:${pctCol};font-weight:700">${sign}${s.change_pct.toFixed(2)}%</td>
+        <td class="r" style="color:var(--text-sub)">${vol}M</td>
+        <td class="r" style="color:var(--text-sub)">${cap}</td>
+        <td class="r" style="color:var(--text-sub)">${per}</td>
+        <td class="r" style="color:var(--text-sub)">${pbr}</td>
+      </tr>`;
+    }).join('');
+
+    results.innerHTML = `
+      <table class="pg-table">
+        <thead><tr>
+          <th style="width:52px">#</th>
+          <th>코드</th>
+          <th>종목명</th>
+          <th>테마</th>
+          <th class="r">등락률</th>
+          <th class="r">거래대금</th>
+          <th class="r">시총</th>
+          <th class="r">PER</th>
+          <th class="r">PBR</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+    results.querySelector('tbody').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr');
+      if (!tr) return;
+      openChartPanel(tr.dataset.code, tr.dataset.name);
+    });
+  } catch (err) {
+    countEl.textContent = '';
+    results.innerHTML = `<div class="pg-empty"><div class="pg-empty-title">조회 실패</div>${err.message}</div>`;
+  }
+}
+
+function _fmtMarketCap(mn) {
+  // mn 은 백만원
+  if (mn >= 10_000_000) return (mn / 10_000_000).toFixed(1) + '조';
+  if (mn >= 10_000)     return (mn / 10_000).toFixed(0)     + '억';
+  return mn.toLocaleString() + 'M';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FLOW PAGE (Phase 9)
+// ─────────────────────────────────────────────────────────────────────────────
+const FLOW_STATE = { type: 'foreign_buy' };
+
+function renderFlowPage() {
+  const root = document.getElementById('flow-view');
+  if (!root.dataset.built) {
+    root.dataset.built = '1';
+    root.innerHTML = `
+      <div class="pg-wrap">
+        <div class="pg-title">투자자별 수급동향</div>
+        <div class="pg-sub">외국인·기관 매매 TOP (일 1회 갱신)</div>
+        <div class="pg-tabs" id="flow-tabs">
+          <button class="pg-tab active" data-t="foreign_buy">외국인 순매수</button>
+          <button class="pg-tab"        data-t="foreign_sell">외국인 순매도</button>
+          <button class="pg-tab"        data-t="inst_buy">기관 순매수</button>
+          <button class="pg-tab"        data-t="inst_sell">기관 순매도</button>
+        </div>
+        <div id="flow-results"></div>
+      </div>`;
+    document.getElementById('flow-tabs').addEventListener('click', (e) => {
+      const btn = e.target.closest('.pg-tab');
+      if (!btn) return;
+      document.querySelectorAll('#flow-tabs .pg-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      FLOW_STATE.type = btn.dataset.t;
+      _flowFetch();
+    });
+  }
+  _flowFetch();
+}
+
+async function _flowFetch() {
+  const results = document.getElementById('flow-results');
+  results.innerHTML = '<div class="pg-empty">조회 중…</div>';
+  try {
+    const r = await fetch(`/api/flow?type=${FLOW_STATE.type}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+
+    const rows = (d.stocks || []).map((s, i) => `
+      <tr data-code="${s.code}" data-name="${s.name}">
+        <td><span class="rank">${i + 1}</span></td>
+        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
+        <td style="font-weight:600">${s.name}</td>
+        <td class="r" style="color:${s.net_value >= 0 ? '#FF3333' : '#33AA33'};font-weight:700">
+          ${s.net_value >= 0 ? '+' : ''}${(s.net_value / 1_000_000).toFixed(1)}억
+        </td>
+      </tr>`).join('');
+
+    results.innerHTML = `
+      <table class="pg-table">
+        <thead><tr>
+          <th style="width:52px">#</th><th>코드</th><th>종목명</th>
+          <th class="r">순매수 (억원)</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    results.querySelector('tbody').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr');
+      if (tr) openChartPanel(tr.dataset.code, tr.dataset.name);
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="pg-empty">
+      <div class="pg-empty-title">데이터 미연동</div>
+      ${err.message}<br><br>
+      <span style="color:var(--text-sub)">pykrx 투자자별 매매 API 가 현재 KRX 응답 포맷 변경으로 작동하지 않습니다.<br>
+      KRX_API_KEY 환경변수로 KRX Open API 연동 시 사용 가능합니다.</span>
+    </div>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHORT-SELLING PAGE (Phase 9)
+// ─────────────────────────────────────────────────────────────────────────────
+const SHORT_STATE = { sort: 'ratio' };
+
+function renderShortPage() {
+  const root = document.getElementById('short-view');
+  if (!root.dataset.built) {
+    root.dataset.built = '1';
+    root.innerHTML = `
+      <div class="pg-wrap">
+        <div class="pg-title">공매도 현황</div>
+        <div class="pg-sub">공매도 잔고 및 비중 TOP (일 1회 갱신)</div>
+        <div class="pg-tabs" id="short-tabs">
+          <button class="pg-tab active" data-s="ratio">공매도 비중 TOP</button>
+          <button class="pg-tab"        data-s="balance">공매도 잔고 TOP</button>
+        </div>
+        <div id="short-results"></div>
+      </div>`;
+    document.getElementById('short-tabs').addEventListener('click', (e) => {
+      const btn = e.target.closest('.pg-tab');
+      if (!btn) return;
+      document.querySelectorAll('#short-tabs .pg-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      SHORT_STATE.sort = btn.dataset.s;
+      _shortFetch();
+    });
+  }
+  _shortFetch();
+}
+
+async function _shortFetch() {
+  const results = document.getElementById('short-results');
+  results.innerHTML = '<div class="pg-empty">조회 중…</div>';
+  try {
+    const r = await fetch(`/api/short?sort=${SHORT_STATE.sort}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+
+    const rows = (d.stocks || []).map((s, i) => `
+      <tr data-code="${s.code}" data-name="${s.name}">
+        <td><span class="rank">${i + 1}</span></td>
+        <td style="color:var(--text-muted);font-size:11px">${s.code}</td>
+        <td style="font-weight:600">${s.name}</td>
+        <td class="r">${s.ratio != null ? s.ratio.toFixed(2) + '%' : '—'}</td>
+        <td class="r" style="color:var(--text-sub)">${s.balance != null ? s.balance.toLocaleString() : '—'}</td>
+      </tr>`).join('');
+
+    results.innerHTML = `
+      <table class="pg-table">
+        <thead><tr>
+          <th style="width:52px">#</th><th>코드</th><th>종목명</th>
+          <th class="r">공매도 비중</th><th class="r">잔고금액 (원)</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    results.querySelector('tbody').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr');
+      if (tr) openChartPanel(tr.dataset.code, tr.dataset.name);
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="pg-empty">
+      <div class="pg-empty-title">데이터 미연동</div>
+      ${err.message}<br><br>
+      <span style="color:var(--text-sub)">pykrx 공매도 API 가 현재 KRX 응답 포맷 변경으로 작동하지 않습니다.<br>
+      KRX_API_KEY 환경변수로 KRX Open API 연동 시 사용 가능합니다.</span>
+    </div>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTOR MAP PAGE (Phase 9) — 현재는 테마 데이터를 업종 대체로 표시
+// ─────────────────────────────────────────────────────────────────────────────
+function renderSectorPage() {
+  const root = document.getElementById('sector-view');
+  root.innerHTML = `
+    <div class="pg-wrap">
+      <div class="pg-title">업종별맵</div>
+      <div class="pg-sub">KRX 공식 업종지수 연동 준비 중 · 현재는 수집된 테마 데이터를 표시합니다</div>
+      <div id="sector-canvas"
+           style="background:var(--surface2);border-radius:10px;padding:8px;min-height:480px;">
+        <svg id="sector-svg"></svg>
+      </div>
+    </div>`;
+
+  if (!APP.data) return;
+  const svg = document.getElementById('sector-svg');
+  const W = 1152, H = 520;
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  d3.select(svg).selectAll('*').remove();
+
+  const themes = APP.data.themes || [];
+  const root2 = d3.hierarchy({ children: themes })
+    .sum(d => Math.max(Math.abs(d.weighted_avg_pct || 0.1), 0.1));
+  d3.treemap().size([W, H]).padding(3).round(true)(root2);
+
+  const cells = d3.select(svg).selectAll('g.t-cell')
+    .data(root2.leaves())
+    .enter().append('g').attr('class','t-cell')
+    .attr('transform', d => `translate(${d.x0},${d.y0})`);
+  cells.append('rect')
+    .attr('width',  d => Math.max(0, d.x1 - d.x0))
+    .attr('height', d => Math.max(0, d.y1 - d.y0))
+    .attr('rx', 6).attr('ry', 6)
+    .attr('fill', d => pctBgColor(d.data.weighted_avg_pct || 0));
+  cells.append('text')
+    .attr('x', 8).attr('y', 18).attr('fill', 'rgba(255,255,255,0.92)')
+    .attr('font-size', 12).attr('font-weight', 600)
+    .text(d => (d.x1 - d.x0 > 60 ? d.data.name : ''));
+  cells.append('text')
+    .attr('x', 8).attr('y', 34).attr('fill', 'rgba(255,255,255,0.75)')
+    .attr('font-size', 11)
+    .text(d => (d.x1 - d.x0 > 60 ? fmtPct(d.data.weighted_avg_pct || 0) : ''));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2170,24 +2722,9 @@ function hideTooltip() {
 // VIEW SWITCH
 // ─────────────────────────────────────────────────────────────────────────────
 function renderCurrentView() {
-  const mapEl    = document.getElementById('map-view');
-  const listEl   = document.getElementById('list-view');
-  const marketEl = document.getElementById('market-view');
-  const detailEl = document.getElementById('detail-panel');
-  const newhighEl = document.getElementById('newhigh-section');
-
-  if (APP.tab === 'market') {
-    mapEl.style.display    = 'none';
-    listEl.style.display   = 'none';
-    marketEl.classList.add('visible');
-    // 시황 뷰에서는 테마 상세·신고가 숨김
-    detailEl.classList.remove('visible');
-    if (newhighEl) newhighEl.style.display = 'none';
-    renderMarketOverview();
-    return;
-  }
-
-  marketEl.classList.remove('visible');
+  // 테마맵 페이지 내부 Map/List 전환 전용 (시황·비교는 사이드바 라우터가 담당)
+  const mapEl  = document.getElementById('map-view');
+  const listEl = document.getElementById('list-view');
   if (APP.tab === 'map') {
     mapEl.style.display  = '';
     listEl.style.display = 'none';
@@ -2196,10 +2733,6 @@ function renderCurrentView() {
     mapEl.style.display  = 'none';
     listEl.style.display = '';
     renderList();
-  }
-  // 비-시황 뷰로 복귀 시 신고가 섹터 복구 (데이터 있으면 renderNewHighSectors 가 처리)
-  if (newhighEl && APP.data && APP.data.new_high_sectors && APP.data.new_high_sectors.length) {
-    newhighEl.style.display = '';
   }
 }
 
@@ -2232,8 +2765,6 @@ document.getElementById('sel-stock-sort').addEventListener('change', e => {
   APP.stockSort = e.target.value;
   if (APP.selectedTheme) renderStockGrid(APP.selectedTheme);
 });
-
-document.getElementById('compare-open-btn').addEventListener('click', () => openComparePanel());
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INIT

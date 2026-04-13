@@ -484,6 +484,237 @@ def api_stock_search():
     return jsonify(results)
 
 
+@app.route("/api/screener")
+def api_screener():
+    """
+    종목 스크리너 — data.json 테마 종목 + pykrx 펀더멘털(있으면) 캐시 기반 필터.
+    API 호출 0회 (이미 수집된 데이터에서 서버-사이드 필터).
+    """
+    args = request.args
+    market     = (args.get("market") or "ALL").upper()   # ALL, KOSPI, KOSDAQ
+    min_change = float(args.get("min_change", "-100") or -100)
+    min_volume = float(args.get("min_volume", "0")    or 0)    # 거래대금 (백만원)
+    max_per    = float(args.get("max_per",    "9999") or 9999)
+    max_pbr    = float(args.get("max_pbr",    "9999") or 9999)
+    q          = (args.get("q") or "").strip()
+
+    if not DATA_JSON.exists():
+        return jsonify({"error": "data.json 미수집"}), 503
+    try:
+        data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"error": "data.json 로드 실패"}), 500
+
+    # 펀더멘털 캐시 로드 (선택적 — 없으면 필터 무시)
+    today = _get_trading_date()
+    fund_file = BASE_DIR / "cache" / f"fundamental_{today}.json"
+    fundamentals: dict = {}
+    if fund_file.exists():
+        try:
+            fundamentals = json.loads(fund_file.read_text(encoding="utf-8"))
+        except Exception:
+            fundamentals = {}
+
+    # 종목 flatten (테마 중복 제거)
+    seen = set()
+    results = []
+    for theme in data.get("themes", []):
+        for s in theme.get("stocks", []):
+            code = s.get("code")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            name   = s.get("name", code)
+            chg    = float(s.get("change_pct", 0.0))
+            vol_mn = float(s.get("volume_mn",  0.0))
+
+            f = fundamentals.get(code, {})
+            per        = f.get("per")
+            pbr        = f.get("pbr")
+            market_cap = f.get("market_cap")     # 백만원
+            mkt        = f.get("market", "")     # KOSPI | KOSDAQ | ''
+
+            # 필터
+            if market != "ALL" and mkt and mkt != market:
+                continue
+            if chg < min_change:
+                continue
+            if vol_mn < min_volume:
+                continue
+            if per is not None and per > max_per:
+                continue
+            if pbr is not None and pbr > max_pbr:
+                continue
+            if q and q not in code and q not in name:
+                continue
+
+            results.append({
+                "code": code, "name": name,
+                "change_pct": round(chg, 2),
+                "volume_mn":  int(vol_mn),
+                "per": per, "pbr": pbr,
+                "market_cap": market_cap,
+                "market": mkt,
+                "theme": theme.get("name"),
+            })
+
+    # 거래대금 내림차순 정렬, 최대 100개
+    results.sort(key=lambda r: r["volume_mn"], reverse=True)
+    return jsonify({
+        "count": len(results),
+        "stocks": results[:100],
+        "has_fundamentals": bool(fundamentals),
+    })
+
+
+@app.route("/api/flow")
+def api_flow():
+    """
+    투자자별 매매동향 — pykrx get_market_net_purchases_of_equities 시도.
+    실패 시 graceful error (프론트에서 "KRX API 미설정" 플래그 표시).
+    Cache: cache/flow_{type}_{date}.json
+    """
+    flow_type = (request.args.get("type") or "foreign_buy").strip()
+    valid = {"foreign_buy", "foreign_sell", "inst_buy", "inst_sell"}
+    if flow_type not in valid:
+        flow_type = "foreign_buy"
+
+    today      = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"flow_{flow_type}_{today}.json"
+    if cache_file.exists():
+        return Response(
+            cache_file.read_text(encoding="utf-8"),
+            content_type="application/json; charset=utf-8",
+        )
+
+    try:
+        from pykrx import stock as _stock
+    except ImportError:
+        return jsonify({"error": "pykrx 미설치"}), 500
+
+    investor = "외국인" if flow_type.startswith("foreign") else "기관합계"
+    ascending = flow_type.endswith("sell")   # 매도 TOP = 순매수 오름차순
+
+    try:
+        df = _stock.get_market_net_purchases_of_equities(today, today, "ALL", investor)
+    except Exception as exc:
+        return jsonify({
+            "error": f"pykrx 호출 실패 ({exc})",
+            "hint":  "KRX_API_KEY 환경변수 설정 후 사용 가능합니다.",
+        }), 503
+
+    if df is None or df.empty:
+        return jsonify({"error": "데이터 없음",
+                        "hint": "pykrx 투자자 API 가 응답하지 않습니다."}), 503
+
+    # 순매수 컬럼 탐색 (응답 스키마가 가변적)
+    net_col = next((c for c in df.columns if "순매수" in c and "거래대금" in c), None)
+    if net_col is None:
+        net_col = next((c for c in df.columns if "순매수" in c), None)
+    if net_col is None:
+        return jsonify({"error": "순매수 컬럼 없음"}), 503
+
+    df_sorted = df.sort_values(net_col, ascending=ascending).head(20)
+    stocks = []
+    for code, row in df_sorted.iterrows():
+        stocks.append({
+            "code":      str(code),
+            "name":      row.get("종목명", ""),
+            "net_value": int(row[net_col]) if row[net_col] is not None else 0,
+        })
+
+    result = {"type": flow_type, "stocks": stocks}
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/short")
+def api_short():
+    """
+    공매도 현황 — pykrx get_shorting_balance_by_ticker 시도.
+    Cache: cache/short_{sort}_{date}.json
+    """
+    sort_by = (request.args.get("sort") or "ratio").strip()
+    if sort_by not in ("ratio", "balance"):
+        sort_by = "ratio"
+
+    today      = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"short_{sort_by}_{today}.json"
+    if cache_file.exists():
+        return Response(
+            cache_file.read_text(encoding="utf-8"),
+            content_type="application/json; charset=utf-8",
+        )
+
+    try:
+        from pykrx import stock as _stock
+    except ImportError:
+        return jsonify({"error": "pykrx 미설치"}), 500
+
+    try:
+        df = _stock.get_shorting_balance_by_ticker(today, "KOSPI")
+    except Exception as exc:
+        return jsonify({
+            "error": f"pykrx 공매도 API 호출 실패 ({exc})",
+            "hint":  "KRX_API_KEY 환경변수 설정 후 사용 가능합니다.",
+        }), 503
+
+    if df is None or df.empty:
+        return jsonify({"error": "데이터 없음"}), 503
+
+    ratio_col   = next((c for c in df.columns if "비중"    in c), None)
+    balance_col = next((c for c in df.columns if "잔고금액" in c or "금액" in c), None)
+    key_col     = ratio_col if sort_by == "ratio" else (balance_col or ratio_col)
+    if key_col is None:
+        return jsonify({"error": "공매도 컬럼 없음"}), 503
+
+    df_sorted = df.sort_values(key_col, ascending=False).head(30)
+    stocks = []
+    for code, row in df_sorted.iterrows():
+        stocks.append({
+            "code":    str(code),
+            "name":    row.get("종목명", ""),
+            "ratio":   float(row[ratio_col])   if ratio_col   else None,
+            "balance": int(row[balance_col])   if balance_col else None,
+        })
+
+    result = {"sort": sort_by, "stocks": stocks}
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/sectors")
+def api_sectors():
+    """
+    업종별 지수 — pykrx get_index_ohlcv_by_date 시도 (현재 대부분 실패).
+    실패 시 data.json 테마를 대안으로 반환한다 (custom sector 대체).
+    """
+    if not DATA_JSON.exists():
+        return jsonify({"error": "data.json 미수집"}), 503
+    try:
+        data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"error": "data.json 로드 실패"}), 500
+
+    # 현재는 테마맵 데이터를 그대로 반환 (pykrx 업종지수 API 부재)
+    themes = data.get("themes", [])
+    sectors = [{
+        "name":             t.get("name"),
+        "weighted_avg_pct": t.get("weighted_avg_pct", 0.0),
+        "stock_count":      t.get("stock_count", 0),
+        "active_count":     t.get("active_count", 0),
+        "volume_sum":       sum(s.get("volume_mn", 0) for s in t.get("stocks", [])),
+    } for t in themes]
+
+    return jsonify({
+        "source": "themes_fallback",
+        "note":   "KRX 공식 업종지수 API 미연동. 현재는 테마 데이터로 대체 표시.",
+        "sectors": sectors,
+    })
+
+
 @app.route("/api/compare")
 def api_compare():
     import re as _re
