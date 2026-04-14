@@ -81,6 +81,9 @@ body.market-us [data-page="flow"],
 body.market-us [data-page="short"] {
   display: none;
 }
+/* Phase 14: 상단 바 지수 pill — 시장에 따라 교체 */
+body:not(.market-us) .idx-pill.us { display: none; }
+body.market-us .idx-pill.kr { display: none; }
 .sidebar-menu { list-style: none; padding: 8px 0; margin: 0; flex: 1; }
 .sidebar-item {
   padding: 11px 16px;
@@ -937,6 +940,174 @@ select:focus { border-color: var(--accent); }
   display: none;
 }
 
+/* ── DISCOVER PAGE (Phase 15) ─────────────────────────────────── */
+.dc-stage-tag {
+  display: inline-block; margin-left: 8px;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 700;
+  background: #FFD70022; color: #FFD700; border: 1px solid #FFD70044;
+  vertical-align: middle;
+}
+.dc-market-toggle {
+  display: flex; gap: 6px; margin: 8px 0 12px;
+}
+.dc-market-btn {
+  background: var(--surface2); color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 6px 14px; border-radius: 16px; cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+.dc-market-btn:hover { color: var(--text); }
+.dc-market-btn.active {
+  background: #FF333322; color: #FF3333; border-color: #FF3333;
+}
+.dc-flag { font-size: 14px; margin-right: 2px; }
+.dc-actions { display: flex; align-items: center; gap: 12px; margin: 12px 0 16px; }
+.dc-scan-btn {
+  background: var(--accent); color: #fff; border: none;
+  padding: 9px 22px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; font-weight: 600;
+}
+.dc-scan-btn:hover { background: #CC0000; }
+.dc-scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.dc-status { color: var(--text-muted); font-size: 12px; }
+
+.dc-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+.dc-card:hover { border-color: var(--accent); }
+.dc-card-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+}
+.dc-card:hover .dc-card-row { background: #1C1C1E; border-radius: 10px; }
+
+.dc-details-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); font-size: 11px;
+  padding: 4px 10px; border-radius: 12px;
+  cursor: pointer; flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+.dc-details-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.dc-details-panel {
+  max-height: 0; overflow: hidden;
+  transition: max-height 0.2s ease, padding 0.2s ease;
+  border-top: 0 solid var(--border);
+  background: #151516;
+}
+.dc-details-panel.open {
+  max-height: 1000px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border);
+}
+.dc-dp-section { margin-bottom: 14px; }
+.dc-dp-section:last-child { margin-bottom: 0; }
+.dc-dp-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px; padding-bottom: 4px;
+  border-bottom: 1px solid #2C2C2E;
+}
+.dc-dp-dot { width: 8px; height: 8px; border-radius: 50%; }
+.dc-dp-title { color: var(--text); font-size: 12px; font-weight: 700; flex: 1; }
+.dc-dp-total { color: #FFD700; font-size: 12px; font-weight: 700; }
+.dc-dp-rows { display: flex; flex-direction: column; gap: 3px; }
+.dc-dp-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 48px;
+  gap: 10px; align-items: baseline;
+  font-size: 11px;
+}
+.dc-dp-label { color: var(--text-muted); }
+.dc-dp-detail { color: var(--text); }
+.dc-dp-pts { color: var(--text-sub); text-align: right; font-variant-numeric: tabular-nums; }
+.dc-dp-empty {
+  color: var(--text-muted); font-size: 11px; font-style: italic;
+  padding: 4px 0;
+}
+
+.dc-legend {
+  background: #1C1C1E; border: 1px solid var(--border); border-left: 3px solid #E066FF;
+  color: var(--text-sub); font-size: 11px; line-height: 1.6;
+  padding: 10px 14px; border-radius: 4px; margin-bottom: 12px;
+}
+.dc-legend b { color: #E066FF; }
+.dc-rank { color: #FFD700; font-size: 15px; font-weight: 700; width: 36px; text-align: center; }
+.dc-main { flex: 1; min-width: 0; }
+.dc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.dc-name { color: var(--text); font-size: 14px; font-weight: 600; }
+.dc-code { color: var(--text-muted); font-size: 11px; }
+.dc-sector {
+  color: #aaa; font-size: 10px;
+  background: #3C3C3E; padding: 1px 7px; border-radius: 8px;
+}
+.dc-price { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
+.dc-price-val { color: var(--text); font-weight: 500; }
+.dc-chg { font-weight: 700; }
+.dc-vol { color: var(--text-muted); }
+.dc-score { text-align: center; width: 68px; flex-shrink: 0; }
+.dc-score-val { color: #FFD700; font-size: 26px; font-weight: 800; line-height: 1; }
+.dc-score-label { color: var(--text-muted); font-size: 10px; margin-top: 2px; }
+.dc-bars { width: 220px; flex-shrink: 0; }
+.dc-bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.dc-bar-label { color: #888; font-size: 10px; width: 40px; }
+.dc-bar {
+  flex: 1; height: 6px; background: #1C1C1E;
+  border-radius: 3px; overflow: hidden;
+}
+.dc-bar-fill { height: 100%; border-radius: 3px; }
+.dc-bar-fill.momentum   { background: #FF6B6B; }
+.dc-bar-fill.flow       { background: #4488FF; }
+.dc-bar-fill.valuation  { background: #00CC66; }
+.dc-bar-fill.technical  { background: #FFD700; }
+.dc-bar-fill.sector     { background: #FF9500; }
+.dc-bar-fill.bonus      { background: #E066FF; }
+.dc-bar-val { color: #aaa; font-size: 10px; width: 24px; text-align: right; }
+.dc-bar-val.bonus { color: #E066FF; font-weight: 700; }
+.dc-bar-label.bonus { color: #E066FF; }
+
+.dc-refresh-btn {
+  background: transparent; color: var(--text-muted); border: 1px solid var(--border);
+  width: 32px; height: 32px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+.dc-refresh-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.dc-progress-wrap {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;
+}
+.dc-progress-msg { color: var(--text); font-size: 12px; margin-bottom: 6px; }
+.dc-progress-track {
+  height: 8px; background: #1C1C1E; border-radius: 4px;
+  overflow: hidden; margin-bottom: 4px;
+}
+.dc-progress-fill {
+  height: 100%; background: linear-gradient(90deg, #FF6B6B, #FFD700);
+  border-radius: 4px; width: 0%; transition: width 0.3s;
+}
+.dc-progress-meta { color: var(--text-muted); font-size: 10px; text-align: right; }
+
+.dc-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.dc-tag {
+  background: #3C3C3E; color: #aaa; padding: 1px 7px;
+  border-radius: 9px; font-size: 10px;
+}
+.dc-tag.bb    { border: 1px solid #6495ED55; color: #6495ED; }
+.dc-tag.trend { border: 1px solid #00CC6655; color: #00CC66; }
+.dc-tag.fib   { border: 1px solid #FFD70055; color: #FFD700; }
+.dc-tag.vol   { border: 1px solid #E066FF55; color: #E066FF; }
+
+.dc-disclaimer {
+  margin-top: 16px; padding: 10px 14px;
+  background: #2C2C2E; border-left: 3px solid #FFD700;
+  color: var(--text-muted); font-size: 11px; border-radius: 4px;
+}
+
 .watchlist-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1167,6 +1338,7 @@ select:focus { border-color: var(--accent); }
     <li class="sidebar-item"        data-page="flow"><span class="mi">💰</span>수급동향</li>
     <li class="sidebar-item"        data-page="short"><span class="mi">📉</span>공매도</li>
     <li class="sidebar-item"        data-page="sector"><span class="mi">🏭</span>업종별맵</li>
+    <li class="sidebar-item"        data-page="discover"><span class="mi">🔬</span>종목발굴</li>
   </ul>
   <div class="sidebar-bottom">
     <div class="sidebar-item" id="sidebar-settings"><span class="mi">⚙️</span>설정</div>
@@ -1215,15 +1387,25 @@ select:focus { border-color: var(--accent); }
       <span class="live-dot offline" id="live-dot"></span>
       <span id="live-label">장외</span>
     </span>
-    <div class="idx-pill">
+    <div class="idx-pill kr">
       <span class="idx-label">KOSPI</span>
       <span class="idx-val"  id="kospi-val">—</span>
       <span class="idx-chg"  id="kospi-chg">—</span>
     </div>
-    <div class="idx-pill">
+    <div class="idx-pill kr">
       <span class="idx-label">KOSDAQ</span>
       <span class="idx-val"  id="kosdaq-val">—</span>
       <span class="idx-chg"  id="kosdaq-chg">—</span>
+    </div>
+    <div class="idx-pill us">
+      <span class="idx-label">S&amp;P 500</span>
+      <span class="idx-val"  id="sp500-val">—</span>
+      <span class="idx-chg"  id="sp500-chg">—</span>
+    </div>
+    <div class="idx-pill us">
+      <span class="idx-label">NASDAQ</span>
+      <span class="idx-val"  id="nasdaq-val">—</span>
+      <span class="idx-chg"  id="nasdaq-chg">—</span>
     </div>
   </div>
 </header>
@@ -1319,6 +1501,11 @@ select:focus { border-color: var(--accent); }
   <!-- ========= PAGE: 관심종목 (Phase 12-2) ========= -->
   <div class="page" id="page-watchlist">
     <div id="watchlist-view"></div>
+  </div>
+
+  <!-- ========= PAGE: 종목발굴 (Phase 15 Stage 1) ========= -->
+  <div class="page" id="page-discover">
+    <div id="discover-view"></div>
   </div>
 
   <!-- SHARED: CHART PANEL (모든 페이지에서 종목 클릭 시 열림) -->
@@ -1692,16 +1879,27 @@ function getSortedThemes() {
 // INDICES
 // ─────────────────────────────────────────────────────────────────────────────
 function renderIndices() {
-  const { kospi, kosdaq, updated_at } = APP.data;
+  const { kospi, kosdaq, updated_at, market_overview } = APP.data;
   const set = (valId, chgId, info) => {
-    document.getElementById(valId).textContent =
-      info.value.toLocaleString('ko-KR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const el = document.getElementById(chgId);
-    el.textContent = fmtPct(info.change_pct);
-    el.className = 'idx-chg ' + (info.change_pct > 0 ? 'up' : info.change_pct < 0 ? 'dn' : 'flat');
+    const valEl = document.getElementById(valId);
+    const chgEl = document.getElementById(chgId);
+    if (!valEl || !chgEl) return;
+    if (!info || info.value == null) {
+      valEl.textContent = '—';
+      chgEl.textContent = '—';
+      chgEl.className = 'idx-chg flat';
+      return;
+    }
+    valEl.textContent =
+      info.value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    chgEl.textContent = fmtPct(info.change_pct);
+    chgEl.className = 'idx-chg ' + (info.change_pct > 0 ? 'up' : info.change_pct < 0 ? 'dn' : 'flat');
   };
   set('kospi-val', 'kospi-chg', kospi);
   set('kosdaq-val', 'kosdaq-chg', kosdaq);
+  const mo = market_overview || {};
+  set('sp500-val',  'sp500-chg',  mo.sp500);
+  set('nasdaq-val', 'nasdaq-chg', mo.nasdaq);
   document.getElementById('updated-at').textContent = '기준: ' + updated_at;
 }
 
@@ -2022,14 +2220,20 @@ function renderNewHighSectors() {
 let _chartRequestCode = null;
 let _chartAbortCtrl   = null;
 
-async function openChartPanel(code, hintName) {
+async function openChartPanel(code, hintName, marketOverride) {
+  // marketOverride: 종목 발굴(all 모드) 에서 KR/US 혼재 상태일 때 명시적 지정
+  const effectiveMarket = marketOverride || APP.market;
   console.log('[openChartPanel] ▶ entry', {
-    code, hintName, _chartRequestCode_prev: _chartRequestCode,
+    code, hintName, market: effectiveMarket, _chartRequestCode_prev: _chartRequestCode,
   });
 
   code = String(code || '').trim();
-  if (!/^\d{6}$/.test(code)) {
-    console.error('[openChartPanel] ❌ invalid code:', code);
+  const isUS = effectiveMarket === 'us';
+  const valid = isUS
+    ? /^[A-Z][A-Z0-9.\-]{0,6}$/.test(code)
+    : /^\d{6}$/.test(code);
+  if (!valid) {
+    console.error('[openChartPanel] ❌ invalid code:', code, 'market:', effectiveMarket);
     return;
   }
 
@@ -2058,8 +2262,8 @@ async function openChartPanel(code, hintName) {
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  // Phase 14: 시장별 엔드포인트
-  const fetchUrl = APP.market === 'us'
+  // Phase 14: 시장별 엔드포인트 (marketOverride 존중)
+  const fetchUrl = isUS
     ? `/api/us/chart/${code}`
     : `/api/chart/${code}`;
   console.log('[openChartPanel] 🌐 fetch', fetchUrl);
@@ -3518,6 +3722,7 @@ const PAGE_RENDERERS = {
   flow:      () => { renderFlowPage(); },
   short:     () => { renderShortPage(); },
   sector:    () => { renderSectorPage(); },
+  discover:  () => { renderDiscoverPage(); },
 };
 
 function navigateTo(page) {
@@ -3533,7 +3738,7 @@ function navigateTo(page) {
   });
 
   document.body.classList.remove('page-thememap','page-market','page-compare',
-                                  'page-screener','page-flow','page-short','page-sector');
+                                  'page-screener','page-flow','page-short','page-sector','page-discover');
   document.body.classList.add(`page-${page}`);
 
   try { PAGE_RENDERERS[page](); }
@@ -3595,7 +3800,8 @@ async function renderWatchlistPage() {
     let priceInfo = null;
     if (!stock) {
       try {
-        const r = await fetch(`/api/price/${item.code}`);
+        const base = (item.market || 'kr') === 'us' ? '/api/us' : '/api';
+        const r = await fetch(`${base}/price/${item.code}`);
         if (r.ok) {
           const p = await r.json();
           if (!p.error) priceInfo = p;
@@ -3656,21 +3862,28 @@ const SCR_STATE = { market: 'ALL', min_change: '', min_volume: '', max_per: '', 
 
 function renderScreener() {
   const root = document.getElementById('screener-view');
-  if (root.dataset.built) return;        // 폼은 한 번만 마크업. 결과만 재랜더링.
-  root.dataset.built = '1';
+  const isUS = APP.market === 'us';
+  // 시장 전환 시 재빌드 (드롭다운 옵션이 다르므로)
+  if (root.dataset.built === APP.market) return;
+  root.dataset.built = APP.market;
+
+  const marketOptions = isUS
+    ? `<option value="ALL">All</option>
+       <option value="SP500">S&amp;P 500</option>`
+    : `<option value="ALL">전체</option>
+       <option value="KOSPI">KOSPI</option>
+       <option value="KOSDAQ">KOSDAQ</option>`;
 
   root.innerHTML = `
     <div class="pg-wrap">
-      <div class="pg-title">종목 스크리너</div>
-      <div class="pg-sub">수집된 캐시 데이터에서 필터링 · API 호출 0회</div>
+      <div class="pg-title">${isUS ? 'Stock Screener' : '종목 스크리너'}</div>
+      <div class="pg-sub">${isUS ? 'Filter S&P 500 from cached data' : '수집된 캐시 데이터에서 필터링 · API 호출 0회'}</div>
 
       <div class="scr-form">
         <div class="scr-field">
-          <label>시장</label>
+          <label>${isUS ? 'Market' : '시장'}</label>
           <select id="scr-market">
-            <option value="ALL">전체</option>
-            <option value="KOSPI">KOSPI</option>
-            <option value="KOSDAQ">KOSDAQ</option>
+            ${marketOptions}
           </select>
         </div>
         <div class="scr-field">
@@ -4374,6 +4587,365 @@ function _renderSectorMembers(sector, stocks) {
     console.log('[sector member click]', { code: tr.dataset.code, name: tr.dataset.name });
     openChartPanel(tr.dataset.code, tr.dataset.name);
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISCOVER PAGE (Phase 15 — 국내 종목 발굴, Stage 1 + Stage 2)
+// ─────────────────────────────────────────────────────────────────────────────
+const DISCOVER_STATE = {
+  data: null,
+  loading: false,
+  pollTimer: null,
+  market: 'all',  // all | kr | us
+};
+
+async function renderDiscoverPage() {
+  const root = document.getElementById('discover-view');
+  if (!root.dataset.built) {
+    root.dataset.built = '1';
+    root.innerHTML = `
+      <div class="pg-wrap">
+        <div class="pg-title">종목 발굴 <span class="dc-stage-tag" id="dc-stage-tag">Stage 1</span></div>
+        <div class="pg-sub">모멘텀·수급·밸류·기술적 분석·섹터를 종합 스코어링</div>
+
+        <div class="dc-market-toggle" id="dc-market-toggle">
+          <button class="dc-market-btn active" data-market="all">🌏 전체</button>
+          <button class="dc-market-btn"        data-market="kr">🇰🇷 국내</button>
+          <button class="dc-market-btn"        data-market="us">🇺🇸 미국</button>
+        </div>
+
+        <div class="dc-actions">
+          <button class="dc-scan-btn" id="dc-scan-btn">🔬 Stage 2 상세 스캔</button>
+          <button class="dc-refresh-btn" id="dc-refresh-btn" title="재로딩">↻</button>
+          <span class="dc-status" id="dc-status">—</span>
+        </div>
+
+        <div class="dc-legend">
+          <b>덜오른 보너스</b>란? 같은 섹터의 다른 종목들은 많이 올랐는데
+          이 종목은 상대적으로 덜 올라, <b>따라잡기(catch-up) 가능성</b>이 있는
+          종목에 최대 +10점을 부여합니다. 섹터 20일 평균 대비 격차가 클수록 높은 점수.
+        </div>
+
+        <div id="dc-progress-wrap" class="dc-progress-wrap" style="display:none;">
+          <div class="dc-progress-msg" id="dc-progress-msg">시작 중…</div>
+          <div class="dc-progress-track"><div class="dc-progress-fill" id="dc-progress-fill"></div></div>
+          <div class="dc-progress-meta" id="dc-progress-meta">0 / 0</div>
+        </div>
+
+        <div id="dc-results"></div>
+
+        <div class="dc-disclaimer">
+          ※ 본 스코어링은 기술적 지표 기반 참고 자료이며 투자 추천이 아닙니다.
+          Stage 2 최초 스캔은 200종목 상세 수집으로 2~3분 소요되며, 이후 1시간 캐시됩니다.
+        </div>
+      </div>`;
+    document.getElementById('dc-scan-btn').addEventListener('click', _dcStartStage2);
+    document.getElementById('dc-refresh-btn').addEventListener('click', () => _dcFetch(true));
+
+    document.getElementById('dc-market-toggle').addEventListener('click', (e) => {
+      const btn = e.target.closest('.dc-market-btn');
+      if (!btn) return;
+      const newMarket = btn.dataset.market;
+      if (newMarket === DISCOVER_STATE.market) return;
+      DISCOVER_STATE.market = newMarket;
+      document.querySelectorAll('#dc-market-toggle .dc-market-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.market === newMarket);
+      });
+      DISCOVER_STATE.data = null;
+      _dcFetch(true);
+    });
+
+    document.getElementById('dc-results').addEventListener('click', (e) => {
+      // 상세 토글 버튼 먼저 처리 (openChartPanel 로 넘어가지 않도록 stop)
+      const detailsBtn = e.target.closest('.dc-details-btn');
+      if (detailsBtn) {
+        e.stopPropagation();
+        const card = detailsBtn.closest('.dc-card');
+        if (card) {
+          const panel = card.querySelector('.dc-details-panel');
+          const open = panel.classList.toggle('open');
+          detailsBtn.textContent = open ? '접기' : '상세';
+        }
+        return;
+      }
+      const card = e.target.closest('.dc-card');
+      if (!card) return;
+      // data-market 기반으로 차트 panel 시장 override (all 모드에서 KR/US 혼재)
+      openChartPanel(card.dataset.code, card.dataset.name, card.dataset.market);
+    });
+  }
+
+  // 진행 중인 스캔이 있는지 폴링 재개
+  _dcCheckProgressOnce();
+
+  if (DISCOVER_STATE.data) {
+    _dcRenderResults(DISCOVER_STATE.data);
+  } else {
+    _dcFetch(true);
+  }
+}
+
+async function _dcFetch(showLoading) {
+  if (DISCOVER_STATE.loading) return;
+  DISCOVER_STATE.loading = true;
+  const statusEl = document.getElementById('dc-status');
+  if (showLoading) statusEl.textContent = '로딩 중…';
+  try {
+    const r = await fetch(`/api/discover?market=${DISCOVER_STATE.market}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    DISCOVER_STATE.data = d;
+    _dcRenderResults(d);
+  } catch (err) {
+    document.getElementById('dc-results').innerHTML =
+      `<div class="pg-empty"><div class="pg-empty-title">로딩 실패</div>${_escHtml(err.message)}</div>`;
+    statusEl.textContent = '실패';
+  } finally {
+    DISCOVER_STATE.loading = false;
+  }
+}
+
+async function _dcStartStage2() {
+  const btn = document.getElementById('dc-scan-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/discover/scan?market=${DISCOVER_STATE.market}`, { method: 'POST' });
+    if (r.status === 404) {
+      throw new Error('Stage 2 엔드포인트 없음 — 서버 재시작이 필요합니다.');
+    }
+    const raw = await r.text();
+    let d;
+    try { d = JSON.parse(raw); }
+    catch { throw new Error(`서버 응답이 JSON 이 아님 (HTTP ${r.status})`); }
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    _dcShowProgress();
+    _dcStartPolling();
+  } catch (err) {
+    alert('Stage 2 스캔 시작 실패: ' + err.message);
+    btn.disabled = false;
+  }
+}
+
+function _dcCheckProgressOnce() {
+  // 페이지 재진입 시 이미 돌고 있는 스캔이 있으면 폴링 재개
+  fetch('/api/discover/progress').then(r => r.json()).then(s => {
+    if (s.status === 'running' || s.status === 'starting') {
+      _dcShowProgress();
+      _dcStartPolling();
+    }
+  }).catch(() => {});
+}
+
+function _dcStartPolling() {
+  if (DISCOVER_STATE.pollTimer) return;
+  DISCOVER_STATE.pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/discover/progress');
+      const s = await r.json();
+      _dcUpdateProgress(s);
+      if (s.status === 'done' || s.status === 'error' || s.status === 'idle') {
+        _dcStopPolling();
+        document.getElementById('dc-scan-btn').disabled = false;
+        if (s.status === 'done') {
+          // 완료 → 결과 재로딩
+          setTimeout(() => {
+            _dcHideProgress();
+            _dcFetch(false);
+          }, 400);
+        } else if (s.status === 'error') {
+          document.getElementById('dc-progress-msg').textContent =
+            '오류: ' + (s.error || '알 수 없는 오류');
+        }
+      }
+    } catch {}
+  }, 1000);
+}
+
+function _dcStopPolling() {
+  if (DISCOVER_STATE.pollTimer) {
+    clearInterval(DISCOVER_STATE.pollTimer);
+    DISCOVER_STATE.pollTimer = null;
+  }
+}
+
+function _dcShowProgress() {
+  document.getElementById('dc-progress-wrap').style.display = 'block';
+}
+function _dcHideProgress() {
+  document.getElementById('dc-progress-wrap').style.display = 'none';
+}
+
+function _dcUpdateProgress(s) {
+  const msg = document.getElementById('dc-progress-msg');
+  const fill = document.getElementById('dc-progress-fill');
+  const meta = document.getElementById('dc-progress-meta');
+  msg.textContent = s.message || s.status || '—';
+  const total = s.total || 0;
+  const prog = s.progress || 0;
+  const pct = total > 0 ? (prog / total) * 100 : (s.status === 'running' ? 5 : 0);
+  fill.style.width = pct + '%';
+  const phaseLabel = s.phase === 'fetch' ? '수집' : s.phase === 'scoring' ? '스코어링' : '';
+  meta.textContent = total ? `${phaseLabel} ${prog} / ${total}` : '—';
+}
+
+function _dcRenderResults(data) {
+  const statusEl = document.getElementById('dc-status');
+  const stage = data.stage || 1;
+  document.getElementById('dc-stage-tag').textContent = 'Stage ' + stage;
+  statusEl.textContent = `${data.updated_at} 기준 · ${data.total_scanned}종목 스캔 → 상위 ${data.items.length}`;
+
+  // Stage 2 가 이미 신선하면 버튼 비활성화(=재스캔 불필요)
+  const btn = document.getElementById('dc-scan-btn');
+  if (stage === 2) {
+    btn.textContent = '🔬 Stage 2 (캐시됨, 강제 재스캔)';
+  } else {
+    btn.textContent = '🔬 Stage 2 상세 스캔';
+  }
+  btn.disabled = false;
+
+  const box = document.getElementById('dc-results');
+  const items = data.items || [];
+  if (!items.length) {
+    box.innerHTML = '<div class="pg-empty">결과 없음</div>';
+    return;
+  }
+
+  const barW = (v, max) => `${Math.min(Math.max(v || 0, 0) / max * 100, 100)}%`;
+  const maxTotal = stage === 2 ? 105 : 35;
+
+  box.innerHTML = items.map((it, i) => {
+    const sc = _escHtml(it.code);
+    const sn = _escHtml(it.name || '');
+    const sect = _escHtml(it.sector || '');
+    const mk = (it.market || 'kr') === 'us' ? 'us' : 'kr';
+    const flag = mk === 'us' ? '🇺🇸' : '🇰🇷';
+    const chg = it.change_pct || 0;
+    const col = chg > 0 ? '#FF3333' : chg < 0 ? '#33AA33' : 'var(--text-muted)';
+    const sign = chg > 0 ? '+' : '';
+    const price = mk === 'us'
+      ? `$${Number(it.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : `₩${Number(it.price || 0).toLocaleString()}`;
+    const vol = mk === 'us'
+      ? `$${Number(it.volume_mn || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}M`
+      : `${Number(it.volume_mn || 0).toLocaleString()}M`;
+    const s = it.scores || {};
+    const d = it.details || {};
+
+    const bars = [];
+    bars.push(`<div class="dc-bar-row"><span class="dc-bar-label">모멘텀</span>
+      <div class="dc-bar"><div class="dc-bar-fill momentum" style="width:${barW(s.momentum, 20)}"></div></div>
+      <span class="dc-bar-val">${s.momentum || 0}</span></div>`);
+    if (stage === 2) {
+      bars.push(`<div class="dc-bar-row"><span class="dc-bar-label">수급</span>
+        <div class="dc-bar"><div class="dc-bar-fill flow" style="width:${barW(s.flow, 25)}"></div></div>
+        <span class="dc-bar-val">${s.flow || 0}</span></div>`);
+      bars.push(`<div class="dc-bar-row"><span class="dc-bar-label">밸류</span>
+        <div class="dc-bar"><div class="dc-bar-fill valuation" style="width:${barW(s.valuation, 20)}"></div></div>
+        <span class="dc-bar-val">${s.valuation || 0}</span></div>`);
+      bars.push(`<div class="dc-bar-row"><span class="dc-bar-label">기술</span>
+        <div class="dc-bar"><div class="dc-bar-fill technical" style="width:${barW(s.technical, 15)}"></div></div>
+        <span class="dc-bar-val">${s.technical || 0}</span></div>`);
+    }
+    bars.push(`<div class="dc-bar-row"><span class="dc-bar-label">섹터</span>
+      <div class="dc-bar"><div class="dc-bar-fill sector" style="width:${barW(s.sector, 15)}"></div></div>
+      <span class="dc-bar-val">${s.sector || 0}</span></div>`);
+    if (stage === 2 && (s.undervalued_bonus || 0) > 0) {
+      bars.push(`<div class="dc-bar-row"><span class="dc-bar-label bonus">덜오른</span>
+        <div class="dc-bar"><div class="dc-bar-fill bonus" style="width:${barW(s.undervalued_bonus, 10)}"></div></div>
+        <span class="dc-bar-val bonus">+${s.undervalued_bonus}</span></div>`);
+    }
+
+    const tags = [];
+    if (stage === 2) {
+      if (d.per != null)       tags.push(`<span class="dc-tag">PER ${d.per}</span>`);
+      if (d.pbr != null)       tags.push(`<span class="dc-tag">PBR ${d.pbr}</span>`);
+      if (d.bb_signal)         tags.push(`<span class="dc-tag bb">${_escHtml(d.bb_signal)}</span>`);
+      if (d.trend_signal)      tags.push(`<span class="dc-tag trend">${_escHtml(d.trend_signal)}</span>`);
+      if (d.fib_signal)        tags.push(`<span class="dc-tag fib">${_escHtml(d.fib_signal)}</span>`);
+      if (d.vol_signal)        tags.push(`<span class="dc-tag vol">${_escHtml(d.vol_signal)}</span>`);
+    }
+
+    const detailsPanelHtml = _dcBuildDetailsPanel(it, stage);
+
+    return `<div class="dc-card" data-code="${sc}" data-name="${sn}" data-market="${mk}">
+      <div class="dc-card-row">
+        <div class="dc-rank">#${i + 1}</div>
+        <div class="dc-main">
+          <div class="dc-head">
+            <span class="dc-flag">${flag}</span>
+            <span class="dc-name">${sn}</span>
+            <span class="dc-code">${sc}</span>
+            ${sect ? `<span class="dc-sector">${sect}</span>` : ''}
+          </div>
+          <div class="dc-price">
+            <span class="dc-price-val">${price}</span>
+            <span class="dc-chg" style="color:${col}">${sign}${chg.toFixed(2)}%</span>
+            <span class="dc-vol">${vol}</span>
+          </div>
+          ${tags.length ? `<div class="dc-tags">${tags.join('')}</div>` : ''}
+        </div>
+        <div class="dc-score">
+          <div class="dc-score-val">${it.total_score}</div>
+          <div class="dc-score-label">/ ${maxTotal}</div>
+        </div>
+        <div class="dc-bars">
+          ${bars.join('')}
+        </div>
+        <button class="dc-details-btn" title="점수 상세 설명">상세</button>
+      </div>
+      <div class="dc-details-panel">${detailsPanelHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+function _dcBuildDetailsPanel(it, stage) {
+  const expl = it.explanations || {};
+  const sc = it.scores || {};
+  const sections = [
+    { key: 'momentum',  label: '모멘텀',     max: 20, color: '#FF6B6B' },
+    { key: 'sector',    label: '섹터',       max: 15, color: '#FF9500' },
+  ];
+  if (stage === 2) {
+    sections.splice(1, 0,
+      { key: 'flow',       label: '수급',     max: 25, color: '#4488FF' },
+      { key: 'valuation',  label: '밸류',     max: 20, color: '#00CC66' },
+      { key: 'technical',  label: '기술',     max: 15, color: '#FFD700' },
+    );
+    sections.push({ key: 'bonus',  label: '덜오른 보너스', max: 10, color: '#E066FF',
+                    scoreKey: 'undervalued_bonus' });
+  }
+
+  let html = '';
+  for (const sec of sections) {
+    const rows = expl[sec.key];
+    const scoreKey = sec.scoreKey || sec.key;
+    const pts = sc[scoreKey] || 0;
+    html += `<div class="dc-dp-section">
+      <div class="dc-dp-header">
+        <span class="dc-dp-dot" style="background:${sec.color}"></span>
+        <span class="dc-dp-title">${sec.label}</span>
+        <span class="dc-dp-total">${pts} / ${sec.max}</span>
+      </div>`;
+    if (Array.isArray(rows) && rows.length) {
+      html += '<div class="dc-dp-rows">';
+      for (const r of rows) {
+        html += `<div class="dc-dp-row">
+          <span class="dc-dp-label">${_escHtml(r.label)}</span>
+          <span class="dc-dp-detail">${_escHtml(r.detail)}</span>
+          <span class="dc-dp-pts">${r.pts}/${r.max}</span>
+        </div>`;
+      }
+      html += '</div>';
+    } else {
+      html += `<div class="dc-dp-empty">${
+        stage === 2 && sec.key !== 'momentum' && sec.key !== 'sector'
+          ? 'Stage 2 재스캔을 실행하면 상세 내역이 표시됩니다.'
+          : '상세 정보 없음'
+      }</div>`;
+    }
+    html += '</div>';
+  }
+  return html;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

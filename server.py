@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from itertools import combinations as _comb
 from pathlib import Path
@@ -2891,6 +2892,1277 @@ def _startup():
         log.info("APScheduler 시작 — %d분 간격", interval)
     else:
         log.info("APScheduler 미설치 — 자동 갱신 비활성  (pip install apscheduler)")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 15 — 종목 발굴 스코어링 (Stage 1 MVP: 국내, 모멘텀 + 섹터)
+# ─────────────────────────────────────────────────────────────────────────
+def _load_ticker_sparklines_kr() -> dict:
+    """오늘자 ticker_data 캐시에서 sparklines 맵만 추출 ({code: [20 normalized prices]})."""
+    today = _get_trading_date()
+    f = BASE_DIR / "cache" / f"ticker_data_{today}.json"
+    if not f.exists():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        return data.get("sparklines") or {}
+    except Exception:
+        return {}
+
+
+def _load_naver_sector_aggregates() -> list:
+    """sectors_naver_landing.json 의 sectors 배열 반환 (stale 허용)."""
+    f = BASE_DIR / "cache" / "sectors_naver_landing.json"
+    if not f.exists():
+        return []
+    try:
+        return (json.loads(f.read_text(encoding="utf-8")) or {}).get("sectors", [])
+    except Exception:
+        return []
+
+
+def _calc_momentum_score_kr(stock: dict, rank_change: int, rank_vol: int,
+                            total: int, sparkline: list) -> tuple[int, dict, list]:
+    """
+    모멘텀 점수 (0~20). 반환: (score, sub_dict, explanation_list).
+    서브: 등락률 순위(5) + 5d(5) + 20d(5) + 거래대금 순위(5).
+    """
+    sub = {"chg_rank": 0, "ret_5d": 0, "ret_20d": 0, "vol_rank": 0}
+    expl: list = []
+
+    if total > 0:
+        pct = (rank_change / total) * 100
+        sub["chg_rank"] = max(0, 5 - int(pct / 10))
+        chg = stock.get("change_pct") or 0
+        expl.append({
+            "label":  "당일 등락률 순위",
+            "detail": f"{chg:+.2f}% · 전체 중 상위 {pct:.0f}%",
+            "pts":    sub["chg_rank"], "max": 5,
+        })
+    else:
+        expl.append({"label": "당일 등락률 순위", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    if sparkline and len(sparkline) >= 5 and sparkline[-5]:
+        r5 = (sparkline[-1] / sparkline[-5] - 1) * 100
+        if   r5 > 10: sub["ret_5d"] = 5
+        elif r5 >  5: sub["ret_5d"] = 4
+        elif r5 >  2: sub["ret_5d"] = 3
+        elif r5 >  0: sub["ret_5d"] = 2
+        elif r5 > -2: sub["ret_5d"] = 1
+        expl.append({
+            "label":  "5일 수익률",
+            "detail": f"{r5:+.2f}%",
+            "pts":    sub["ret_5d"], "max": 5,
+        })
+    else:
+        expl.append({"label": "5일 수익률", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    if sparkline and len(sparkline) >= 20 and sparkline[0]:
+        r20 = (sparkline[-1] / sparkline[0] - 1) * 100
+        if   r20 > 20: sub["ret_20d"] = 5
+        elif r20 > 10: sub["ret_20d"] = 4
+        elif r20 >  5: sub["ret_20d"] = 3
+        elif r20 >  0: sub["ret_20d"] = 2
+        elif r20 > -5: sub["ret_20d"] = 1
+        expl.append({
+            "label":  "20일 수익률",
+            "detail": f"{r20:+.2f}%",
+            "pts":    sub["ret_20d"], "max": 5,
+        })
+    else:
+        expl.append({"label": "20일 수익률", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    if total > 0:
+        vpct = (rank_vol / total) * 100
+        sub["vol_rank"] = max(0, 5 - int(vpct / 10))
+        expl.append({
+            "label":  "거래대금 순위",
+            "detail": f"상위 {vpct:.0f}% · {(stock.get('volume_mn') or 0):,}백만원",
+            "pts":    sub["vol_rank"], "max": 5,
+        })
+
+    return sum(sub.values()), sub, expl
+
+
+def _calc_sector_score_kr(stock: dict, sector_by_name: dict,
+                          sector_rank_by_name: dict, total_sectors: int) -> tuple[int, dict, list]:
+    """섹터 점수 (0~15): 섹터 등락률 순위(5) + 절대 수준(5) + up/total 비율(5)."""
+    sub = {"sect_rank": 0, "sect_level": 0, "sect_up_ratio": 0}
+    expl: list = []
+    names = stock.get("sectors") or []
+    if not names or not sector_by_name:
+        expl.append({"label": "섹터 정보", "detail": "섹터 집계 없음", "pts": 0, "max": 15})
+        return 0, sub, expl
+
+    best_score = -1
+    best_sub = sub
+    best_expl: list = []
+    for name in names:
+        info = sector_by_name.get(name)
+        if not info:
+            continue
+        s = {"sect_rank": 0, "sect_level": 0, "sect_up_ratio": 0}
+        e: list = []
+
+        if total_sectors:
+            rk = sector_rank_by_name.get(name, total_sectors)
+            pct = (rk / total_sectors) * 100
+            s["sect_rank"] = max(0, 5 - int(pct / 10))
+            e.append({
+                "label":  "섹터 등락률 순위",
+                "detail": f"{name} · 전체 {total_sectors}개 섹터 중 상위 {pct:.0f}%",
+                "pts":    s["sect_rank"], "max": 5,
+            })
+
+        chg = info.get("change_pct") or 0
+        if   chg >  3: s["sect_level"] = 5
+        elif chg >  2: s["sect_level"] = 4
+        elif chg >  1: s["sect_level"] = 3
+        elif chg >  0: s["sect_level"] = 2
+        elif chg > -1: s["sect_level"] = 1
+        e.append({
+            "label":  "섹터 당일 등락률",
+            "detail": f"{chg:+.2f}%",
+            "pts":    s["sect_level"], "max": 5,
+        })
+
+        up = info.get("up") or 0
+        tot = info.get("total") or 0
+        if tot:
+            ratio = up / tot
+            if   ratio > 0.8: s["sect_up_ratio"] = 5
+            elif ratio > 0.6: s["sect_up_ratio"] = 4
+            elif ratio > 0.5: s["sect_up_ratio"] = 3
+            elif ratio > 0.4: s["sect_up_ratio"] = 2
+            elif ratio > 0.3: s["sect_up_ratio"] = 1
+            e.append({
+                "label":  "섹터 내 상승 비율",
+                "detail": f"{up}/{tot} 종목 상승 ({ratio*100:.0f}%)",
+                "pts":    s["sect_up_ratio"], "max": 5,
+            })
+
+        total_s = sum(s.values())
+        if total_s > best_score:
+            best_score = total_s
+            best_sub = s
+            best_expl = e
+
+    if best_score < 0:
+        return 0, sub, [{"label": "섹터 정보", "detail": "매칭된 섹터 없음", "pts": 0, "max": 15}]
+    return best_score, best_sub, best_expl
+
+
+def _calc_momentum_score_us(stock: dict, rank_change: int, rank_vol: int,
+                            total: int) -> tuple[int, dict, list]:
+    """
+    US 모멘텀 (0~20). 이력 없이 당일 지표만으로 구성.
+    서브: 등락률 순위(5) + 거래대금 순위(5) + 등락률 절대 수준(5) + 거래대금 절대 수준(5).
+    """
+    sub = {"chg_rank": 0, "vol_rank": 0, "chg_level": 0, "vol_level": 0}
+    expl: list = []
+
+    if total > 0:
+        pct = (rank_change / total) * 100
+        sub["chg_rank"] = max(0, 5 - int(pct / 10))
+        chg = stock.get("change_pct") or 0
+        expl.append({
+            "label":  "당일 등락률 순위",
+            "detail": f"{chg:+.2f}% · S&P500 내 상위 {pct:.0f}%",
+            "pts":    sub["chg_rank"], "max": 5,
+        })
+
+    chg = stock.get("change_pct") or 0
+    if   chg >  5: sub["chg_level"] = 5
+    elif chg >  3: sub["chg_level"] = 4
+    elif chg >  2: sub["chg_level"] = 3
+    elif chg >  1: sub["chg_level"] = 2
+    elif chg >  0: sub["chg_level"] = 1
+    expl.append({
+        "label":  "등락률 절대 수준",
+        "detail": f"{chg:+.2f}%",
+        "pts":    sub["chg_level"], "max": 5,
+    })
+
+    if total > 0:
+        vpct = (rank_vol / total) * 100
+        sub["vol_rank"] = max(0, 5 - int(vpct / 10))
+        expl.append({
+            "label":  "거래대금 순위",
+            "detail": f"상위 {vpct:.0f}% · ${(stock.get('volume_mn') or 0):,.0f}M",
+            "pts":    sub["vol_rank"], "max": 5,
+        })
+
+    vol_mn = stock.get("volume_mn") or 0
+    if   vol_mn > 10_000: sub["vol_level"] = 5
+    elif vol_mn >  5_000: sub["vol_level"] = 4
+    elif vol_mn >  2_000: sub["vol_level"] = 3
+    elif vol_mn >  1_000: sub["vol_level"] = 2
+    elif vol_mn >    500: sub["vol_level"] = 1
+    expl.append({
+        "label":  "거래대금 절대 수준",
+        "detail": f"${vol_mn:,.0f}M",
+        "pts":    sub["vol_level"], "max": 5,
+    })
+
+    return sum(sub.values()), sub, expl
+
+
+def _calc_sector_score_us(stock: dict, sector_by_name: dict,
+                          sector_rank_by_name: dict, total_sectors: int) -> tuple[int, dict, list]:
+    """US 섹터 점수 (0~15). us_market.json 의 sectors 구조 기준."""
+    sub = {"sect_rank": 0, "sect_level": 0, "sect_up_ratio": 0}
+    expl: list = []
+    name = stock.get("sector") or ""
+    info = sector_by_name.get(name)
+    if not info:
+        expl.append({"label": "섹터", "detail": "섹터 미매칭", "pts": 0, "max": 15})
+        return 0, sub, expl
+
+    if total_sectors:
+        rk = sector_rank_by_name.get(name, total_sectors)
+        pct = (rk / total_sectors) * 100
+        sub["sect_rank"] = max(0, 5 - int(pct / 10))
+        expl.append({
+            "label":  "섹터 등락률 순위",
+            "detail": f"{name} · GICS {total_sectors}개 섹터 중 상위 {pct:.0f}%",
+            "pts":    sub["sect_rank"], "max": 5,
+        })
+
+    chg = info.get("weighted_avg_pct") or 0
+    if   chg >  3: sub["sect_level"] = 5
+    elif chg >  2: sub["sect_level"] = 4
+    elif chg >  1: sub["sect_level"] = 3
+    elif chg >  0: sub["sect_level"] = 2
+    elif chg > -1: sub["sect_level"] = 1
+    expl.append({
+        "label":  "섹터 당일 등락률",
+        "detail": f"{chg:+.2f}% (가중평균)",
+        "pts":    sub["sect_level"], "max": 5,
+    })
+
+    stocks_in = info.get("stocks") or []
+    if stocks_in:
+        up = sum(1 for s in stocks_in if (s.get("change_pct") or 0) > 0)
+        tot = len(stocks_in)
+        ratio = up / tot
+        if   ratio > 0.8: sub["sect_up_ratio"] = 5
+        elif ratio > 0.6: sub["sect_up_ratio"] = 4
+        elif ratio > 0.5: sub["sect_up_ratio"] = 3
+        elif ratio > 0.4: sub["sect_up_ratio"] = 2
+        elif ratio > 0.3: sub["sect_up_ratio"] = 1
+        expl.append({
+            "label":  "섹터 내 상승 비율",
+            "detail": f"{up}/{tot} 종목 상승 ({ratio*100:.0f}%)",
+            "pts":    sub["sect_up_ratio"], "max": 5,
+        })
+
+    return sum(sub.values()), sub, expl
+
+
+def _calc_flow_score_us(info: dict) -> tuple[int, dict, list]:
+    """US 수급 점수 (0~25): 기관 보유(10) + 내부자 보유(5) + 애널리스트 의견(10)."""
+    sub = {"institutions": 0, "insiders": 0, "analyst": 0}
+    expl: list = []
+    if not info:
+        expl.append({"label": "yfinance info", "detail": "데이터 없음", "pts": 0, "max": 25})
+        return 0, sub, expl
+
+    inst = info.get("heldPercentInstitutions")
+    if inst is not None:
+        if   inst >= 0.90: sub["institutions"] = 10
+        elif inst >= 0.80: sub["institutions"] = 8
+        elif inst >= 0.70: sub["institutions"] = 6
+        elif inst >= 0.50: sub["institutions"] = 4
+        elif inst >= 0.30: sub["institutions"] = 2
+        expl.append({
+            "label":  "기관 보유 비중",
+            "detail": f"{inst*100:.1f}%",
+            "pts":    sub["institutions"], "max": 10,
+        })
+    else:
+        expl.append({"label": "기관 보유 비중", "detail": "데이터 없음", "pts": 0, "max": 10})
+
+    ins = info.get("heldPercentInsiders")
+    if ins is not None:
+        if   ins >= 0.10: sub["insiders"] = 5
+        elif ins >= 0.05: sub["insiders"] = 3
+        elif ins >= 0.01: sub["insiders"] = 1
+        expl.append({
+            "label":  "내부자 보유 비중",
+            "detail": f"{ins*100:.2f}%",
+            "pts":    sub["insiders"], "max": 5,
+        })
+    else:
+        expl.append({"label": "내부자 보유 비중", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    rec = info.get("recommendationKey")
+    rec_map = {"strong_buy": 10, "buy": 8, "hold": 4, "sell": 0, "strong_sell": 0}
+    if rec:
+        sub["analyst"] = rec_map.get(str(rec).lower(), 0)
+        n_analysts = info.get("numberOfAnalystOpinions")
+        detail = str(rec).replace("_", " ").title()
+        if n_analysts:
+            detail += f" ({n_analysts}명)"
+        expl.append({
+            "label":  "애널리스트 의견",
+            "detail": detail,
+            "pts":    sub["analyst"], "max": 10,
+        })
+    else:
+        expl.append({"label": "애널리스트 의견", "detail": "데이터 없음", "pts": 0, "max": 10})
+
+    return sum(sub.values()), sub, expl
+
+
+def _calc_valuation_score_us(info: dict, high_52w: float | None,
+                             current_price: float | None) -> tuple[int, dict, list]:
+    """US 밸류 (0~20): Trailing PER(7) + fwd<trail 보너스(3) + PBR(5) + 52w 괴리(5)."""
+    sub = {"per": 0, "fwd_bonus": 0, "pbr": 0, "high_gap": 0}
+    expl: list = []
+    if not info:
+        expl.append({"label": "yfinance info", "detail": "데이터 없음", "pts": 0, "max": 20})
+        return 0, sub, expl
+
+    tpe = info.get("trailingPE")
+    fpe = info.get("forwardPE")
+
+    if tpe and tpe > 0:
+        if   tpe < 10: sub["per"] = 7
+        elif tpe < 15: sub["per"] = 5
+        elif tpe < 20: sub["per"] = 3
+        elif tpe < 25: sub["per"] = 1
+        expl.append({
+            "label":  "Trailing PER",
+            "detail": f"PER {tpe:.2f}",
+            "pts":    sub["per"], "max": 7,
+        })
+    else:
+        expl.append({"label": "Trailing PER", "detail": "미제공 또는 적자", "pts": 0, "max": 7})
+
+    if tpe and fpe and tpe > 0 and fpe > 0 and fpe < tpe:
+        sub["fwd_bonus"] = 3
+        expl.append({
+            "label":  "Forward vs Trailing",
+            "detail": f"Forward {fpe:.2f} < Trailing {tpe:.2f} (실적 개선 기대)",
+            "pts":    3, "max": 3,
+        })
+    else:
+        expl.append({
+            "label":  "Forward vs Trailing",
+            "detail": "개선 기대 없음 또는 데이터 부족",
+            "pts":    0, "max": 3,
+        })
+
+    pbr = info.get("priceToBook")
+    if pbr and pbr > 0:
+        if   pbr < 1: sub["pbr"] = 5
+        elif pbr < 2: sub["pbr"] = 3
+        elif pbr < 3: sub["pbr"] = 1
+        expl.append({
+            "label":  "PBR",
+            "detail": f"PBR {pbr:.2f}",
+            "pts":    sub["pbr"], "max": 5,
+        })
+    else:
+        expl.append({"label": "PBR", "detail": "미제공", "pts": 0, "max": 5})
+
+    if high_52w and current_price and high_52w > 0:
+        gap = (high_52w - current_price) / high_52w * 100
+        if   gap > 40: sub["high_gap"] = 5
+        elif gap > 30: sub["high_gap"] = 4
+        elif gap > 20: sub["high_gap"] = 3
+        elif gap > 10: sub["high_gap"] = 2
+        expl.append({
+            "label":  "52주 고점 대비",
+            "detail": f"-{gap:.1f}% · 고점 ${high_52w:.2f}",
+            "pts":    sub["high_gap"], "max": 5,
+        })
+    else:
+        expl.append({"label": "52주 고점 대비", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    return sum(sub.values()), sub, expl
+
+
+def _stage1_prefilter_us(min_volume_mn: float = 10, top_k: int = 100) -> dict:
+    """미국 S&P 500 에서 모멘텀+섹터 점수로 상위 top_k 추출 (캐시 데이터만 사용)."""
+    us_data = _fetch_us_market_data()
+    if "error" in us_data:
+        return {"error": us_data["error"], "items": [], "total_scanned": 0}
+
+    all_stocks = us_data.get("all_stocks") or []
+    sectors = us_data.get("sectors") or []
+    eligible = [s for s in all_stocks if (s.get("volume_mn") or 0) >= min_volume_mn]
+    total = len(eligible)
+    if not total:
+        return {"error": "US 조건 통과 종목 없음", "items": [], "total_scanned": 0}
+
+    # 랭킹
+    sorted_by_chg = sorted(eligible, key=lambda x: x.get("change_pct") or 0, reverse=True)
+    rank_change = {s["symbol"]: i for i, s in enumerate(sorted_by_chg)}
+    sorted_by_vol = sorted(eligible, key=lambda x: x.get("volume_mn") or 0, reverse=True)
+    rank_vol = {s["symbol"]: i for i, s in enumerate(sorted_by_vol)}
+
+    sector_by_name = {x["name"]: x for x in sectors}
+    sorted_sectors = sorted(sectors, key=lambda x: x.get("weighted_avg_pct") or 0, reverse=True)
+    sector_rank_by_name = {x["name"]: i for i, x in enumerate(sorted_sectors)}
+
+    results = []
+    for s in eligible:
+        sym = s["symbol"]
+        mom, mom_sub, mom_expl = _calc_momentum_score_us(
+            s, rank_change[sym], rank_vol[sym], total
+        )
+        sect, sect_sub, sect_expl = _calc_sector_score_us(
+            s, sector_by_name, sector_rank_by_name, len(sectors)
+        )
+        results.append({
+            "code":       sym,
+            "name":       s.get("name"),
+            "market":     "us",
+            "sector":     s.get("sector"),
+            "price":      s.get("price"),
+            "change_pct": s.get("change_pct"),
+            "volume_mn":  s.get("volume_mn"),
+            "total_score": mom + sect,
+            "scores": {
+                "momentum": mom,
+                "sector":   sect,
+                "flow":     None,
+                "valuation": None,
+                "technical": None,
+                "undervalued_bonus": 0,
+            },
+            "sub_scores":   {"momentum": mom_sub,  "sector": sect_sub},
+            "explanations": {"momentum": mom_expl, "sector": sect_expl},
+        })
+
+    results.sort(key=lambda x: x["total_score"], reverse=True)
+    return {
+        "updated_at":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":        "us",
+        "stage":         1,
+        "total_scanned": total,
+        "items":         results[:top_k],
+    }
+
+
+def _stage1_prefilter_kr(min_volume_mn: int = 100, top_k: int = 200) -> dict:
+    """국내 전 종목에서 모멘텀+섹터 점수로 상위 top_k 추출."""
+    universe = _load_naver_universe()
+    stocks_map = (universe or {}).get("stocks") or {}
+    if not stocks_map:
+        return {"error": "naver_universe 캐시 없음", "items": [], "total_scanned": 0}
+
+    sparklines = _load_ticker_sparklines_kr()
+    sectors = _load_naver_sector_aggregates()
+
+    # 거래대금 필터 적용 후 남은 종목만 랭킹
+    eligible = [s for s in stocks_map.values()
+                if (s.get("volume_mn") or 0) >= min_volume_mn]
+    total = len(eligible)
+    if not total:
+        return {"error": "조건 통과 종목 없음", "items": [], "total_scanned": 0}
+
+    sorted_by_chg = sorted(eligible, key=lambda x: x.get("change_pct") or 0, reverse=True)
+    rank_change = {s["code"]: i for i, s in enumerate(sorted_by_chg)}
+    sorted_by_vol = sorted(eligible, key=lambda x: x.get("volume_mn") or 0, reverse=True)
+    rank_vol = {s["code"]: i for i, s in enumerate(sorted_by_vol)}
+
+    # 섹터 랭킹 (|change_pct| 내림차순)
+    sector_by_name = {x["name"]: x for x in sectors}
+    sorted_sectors = sorted(sectors, key=lambda x: abs(x.get("change_pct") or 0), reverse=True)
+    sector_rank_by_name = {x["name"]: i for i, x in enumerate(sorted_sectors)}
+
+    results = []
+    for s in eligible:
+        code = s["code"]
+        spark = sparklines.get(code) or []
+        mom, mom_sub, mom_expl = _calc_momentum_score_kr(
+            s, rank_change[code], rank_vol[code], total, spark
+        )
+        sect, sect_sub, sect_expl = _calc_sector_score_kr(
+            s, sector_by_name, sector_rank_by_name, len(sectors)
+        )
+        results.append({
+            "code": code,
+            "name": s.get("name"),
+            "market": "kr",
+            "sector": (s.get("sectors") or [None])[0],
+            "price": s.get("close"),
+            "change_pct": s.get("change_pct"),
+            "volume_mn": s.get("volume_mn"),
+            "total_score": mom + sect,
+            "scores": {
+                "momentum": mom,
+                "sector": sect,
+                "flow": None,
+                "valuation": None,
+                "technical": None,
+                "undervalued_bonus": 0,
+            },
+            "sub_scores":   {"momentum": mom_sub,  "sector": sect_sub},
+            "explanations": {"momentum": mom_expl, "sector": sect_expl},
+        })
+
+    results.sort(key=lambda x: x["total_score"], reverse=True)
+    return {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market": "kr",
+        "stage": 1,
+        "total_scanned": total,
+        "items": results[:top_k],
+    }
+
+
+def _read_fresh_json(path, ttl_min: float) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        age_min = (now_kst().timestamp() - path.stat().st_mtime) / 60
+        if age_min < ttl_min:
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+@app.route("/api/discover")
+def api_discover():
+    """
+    Phase 15 종목 발굴. market ∈ {kr, us, all}.
+    Stage 2 결과 (1시간 캐시) 우선, 없으면 Stage 1 (15분 캐시) 폴백.
+    all: kr+us Stage 2 를 읽어 병합 (있는 쪽만이라도 반환).
+    """
+    market = (request.args.get("market") or "kr").lower()
+    if market not in ("kr", "us", "all"):
+        return jsonify({"error": "market 파라미터는 kr/us/all"}), 400
+
+    cache_dir = BASE_DIR / "cache"
+
+    if market == "kr":
+        d = (_read_fresh_json(cache_dir / "discover_kr_stage2.json", 60)
+             or _read_fresh_json(cache_dir / "discover_kr_stage1.json", 15))
+        if d:
+            return jsonify(d)
+        result = _stage1_prefilter_kr()
+        if "error" not in result:
+            try:
+                cache_dir.mkdir(exist_ok=True)
+                (cache_dir / "discover_kr_stage1.json").write_text(
+                    json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+        return jsonify(result)
+
+    if market == "us":
+        d = (_read_fresh_json(cache_dir / "discover_us_stage2.json", 60)
+             or _read_fresh_json(cache_dir / "discover_us_stage1.json", 15))
+        if d:
+            return jsonify(d)
+        result = _stage1_prefilter_us()
+        if "error" not in result:
+            try:
+                cache_dir.mkdir(exist_ok=True)
+                (cache_dir / "discover_us_stage1.json").write_text(
+                    json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+        return jsonify(result)
+
+    # market == "all" — 두 시장을 개별로 읽어 병합
+    all_fresh = _read_fresh_json(cache_dir / "discover_all_stage2.json", 60)
+    if all_fresh:
+        return jsonify(all_fresh)
+
+    kr_data = (_read_fresh_json(cache_dir / "discover_kr_stage2.json", 60)
+               or _read_fresh_json(cache_dir / "discover_kr_stage1.json", 15))
+    us_data = (_read_fresh_json(cache_dir / "discover_us_stage2.json", 60)
+               or _read_fresh_json(cache_dir / "discover_us_stage1.json", 15))
+
+    kr_items = (kr_data or {}).get("items", [])
+    us_items = (us_data or {}).get("items", [])
+    kr_total = (kr_data or {}).get("total_scanned", 0)
+    us_total = (us_data or {}).get("total_scanned", 0)
+    if not kr_items:
+        kr_result = _stage1_prefilter_kr()
+        if "error" not in kr_result:
+            kr_items = kr_result["items"]
+            kr_total = kr_result["total_scanned"]
+            try:
+                (cache_dir / "discover_kr_stage1.json").write_text(
+                    json.dumps(kr_result, ensure_ascii=False), encoding="utf-8")
+            except Exception: pass
+    if not us_items:
+        us_result = _stage1_prefilter_us()
+        if "error" not in us_result:
+            us_items = us_result["items"]
+            us_total = us_result["total_scanned"]
+            try:
+                (cache_dir / "discover_us_stage1.json").write_text(
+                    json.dumps(us_result, ensure_ascii=False), encoding="utf-8")
+            except Exception: pass
+
+    merged = sorted(kr_items + us_items,
+                    key=lambda x: x.get("total_score", 0), reverse=True)
+    kr_stage = (kr_data or {}).get("stage", 1)
+    us_stage = (us_data or {}).get("stage", 1)
+    return jsonify({
+        "updated_at":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":        "all",
+        "stage":         min(kr_stage, us_stage) if (kr_items and us_items) else max(kr_stage, us_stage),
+        "total_scanned": kr_total + us_total,
+        "items":         merged,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 15 Stage 2 — 상위 200종목 상세 스코어링 (수급/밸류/기술 + 보너스)
+# ─────────────────────────────────────────────────────────────────────────
+_discover_lock = threading.Lock()
+_discover_state: dict = {
+    "status":      "idle",    # idle | starting | running | done | error
+    "phase":       None,      # stage1 | fetch | scoring
+    "market":      None,
+    "progress":    0,
+    "total":       0,
+    "started_at":  None,
+    "finished_at": None,
+    "error":       None,
+    "message":     None,
+}
+
+
+def _discover_get_state() -> dict:
+    with _discover_lock:
+        return dict(_discover_state)
+
+
+def _discover_set(**kw):
+    with _discover_lock:
+        _discover_state.update(kw)
+
+
+def _call_api_internal(path: str) -> dict | None:
+    """Flask test_client 로 in-process route 호출. worker thread 안전."""
+    try:
+        with app.test_client() as c:
+            r = c.get(path)
+            if r.status_code == 200:
+                return r.get_json()
+    except Exception as exc:
+        log.debug("internal call %s failed: %s", path, exc)
+    return None
+
+
+def _fmt_eok(won: float) -> str:
+    """원 → 억 단위 표기."""
+    if won is None:
+        return "—"
+    eok = won / 1e8
+    sign = "+" if eok > 0 else ""
+    return f"{sign}{eok:,.0f}억원"
+
+
+def _calc_flow_score_kr(flow: dict) -> tuple[int, dict, list]:
+    """수급 점수 (0~25). foreign_value/inst_value 단위는 원(KRW)."""
+    sub = {"today": 0, "cum5d": 0, "inst": 0, "streak": 0}
+    expl: list = []
+    if not flow or "error" in flow:
+        expl.append({"label": "수급 데이터", "detail": "데이터 없음", "pts": 0, "max": 25})
+        return 0, sub, expl
+
+    fv = flow.get("foreign_value") or []
+    iv = flow.get("inst_value") or []
+    if not fv:
+        expl.append({"label": "수급 데이터", "detail": "시계열 없음", "pts": 0, "max": 25})
+        return 0, sub, expl
+
+    today = fv[-1]
+    if   today > 10_000_000_000: sub["today"] = 8
+    elif today >  5_000_000_000: sub["today"] = 6
+    elif today >  1_000_000_000: sub["today"] = 4
+    elif today >  0:             sub["today"] = 2
+    expl.append({
+        "label":  "외국인 당일 순매수",
+        "detail": _fmt_eok(today),
+        "pts":    sub["today"], "max": 8,
+    })
+
+    cum5 = sum(fv[-5:])
+    if   cum5 > 30_000_000_000: sub["cum5d"] = 8
+    elif cum5 > 10_000_000_000: sub["cum5d"] = 6
+    elif cum5 >  0:             sub["cum5d"] = 4
+    elif cum5 > -5_000_000_000: sub["cum5d"] = 1
+    expl.append({
+        "label":  "외국인 5일 누적",
+        "detail": _fmt_eok(cum5),
+        "pts":    sub["cum5d"], "max": 8,
+    })
+
+    if iv:
+        inst_today = iv[-1]
+        if   inst_today > 5_000_000_000: sub["inst"] = 5
+        elif inst_today > 1_000_000_000: sub["inst"] = 3
+        elif inst_today > 0:             sub["inst"] = 1
+        expl.append({
+            "label":  "기관 당일 순매수",
+            "detail": _fmt_eok(inst_today),
+            "pts":    sub["inst"], "max": 5,
+        })
+    else:
+        expl.append({"label": "기관 당일 순매수", "detail": "데이터 없음", "pts": 0, "max": 5})
+
+    streak = 0
+    for v in reversed(fv):
+        if v > 0: streak += 1
+        else: break
+    if   streak >= 5: sub["streak"] = 4
+    elif streak >= 3: sub["streak"] = 3
+    elif streak >= 2: sub["streak"] = 2
+    elif streak >= 1: sub["streak"] = 1
+    expl.append({
+        "label":  "외국인 연속 순매수",
+        "detail": f"{streak}일 연속" if streak > 0 else "순매도 전환",
+        "pts":    sub["streak"], "max": 4,
+    })
+
+    return sum(sub.values()), sub, expl
+
+
+def _calc_valuation_score_kr(fin: dict, current_price: float | None,
+                             high_180d: float | None,
+                             sector_per_rank_pct: float | None) -> tuple[int, dict, list]:
+    """밸류 점수 (0~20). per/pbr 음수/None 은 0점."""
+    sub = {"per_vs_ind": 0, "pbr": 0, "high_gap": 0, "sector_rank": 0}
+    expl: list = []
+    if not fin or "error" in fin:
+        expl.append({"label": "재무 데이터", "detail": "데이터 없음", "pts": 0, "max": 20})
+        return 0, sub, expl
+
+    per = fin.get("per")
+    pbr = fin.get("pbr")
+    ind = fin.get("industry_per")
+
+    if per and per > 0 and ind and ind > 0:
+        r = per / ind
+        if   r < 0.3: sub["per_vs_ind"] = 7
+        elif r < 0.5: sub["per_vs_ind"] = 6
+        elif r < 0.7: sub["per_vs_ind"] = 5
+        elif r < 0.9: sub["per_vs_ind"] = 3
+        elif r < 1.0: sub["per_vs_ind"] = 1
+        expl.append({
+            "label":  "PER 업종 대비",
+            "detail": f"PER {per} · 업종평균 {ind} · 비율 {r*100:.0f}%",
+            "pts":    sub["per_vs_ind"], "max": 7,
+        })
+    elif per and per > 0:
+        if   per <  5: sub["per_vs_ind"] = 7
+        elif per < 10: sub["per_vs_ind"] = 5
+        elif per < 15: sub["per_vs_ind"] = 3
+        elif per < 20: sub["per_vs_ind"] = 1
+        expl.append({
+            "label":  "PER 업종 대비",
+            "detail": f"PER {per} · 업종평균 없음 (절대 기준 적용)",
+            "pts":    sub["per_vs_ind"], "max": 7,
+        })
+    else:
+        expl.append({
+            "label":  "PER 업종 대비",
+            "detail": "PER 미제공 또는 적자",
+            "pts":    0, "max": 7,
+        })
+
+    if pbr and pbr > 0:
+        if   pbr < 0.5: sub["pbr"] = 5
+        elif pbr < 0.8: sub["pbr"] = 4
+        elif pbr < 1.0: sub["pbr"] = 3
+        elif pbr < 1.5: sub["pbr"] = 2
+        elif pbr < 2.0: sub["pbr"] = 1
+        expl.append({
+            "label":  "PBR",
+            "detail": f"PBR {pbr}",
+            "pts":    sub["pbr"], "max": 5,
+        })
+    else:
+        expl.append({"label": "PBR", "detail": "PBR 미제공", "pts": 0, "max": 5})
+
+    if high_180d and current_price and high_180d > 0:
+        gap = (high_180d - current_price) / high_180d * 100
+        if   gap > 40: sub["high_gap"] = 4
+        elif gap > 30: sub["high_gap"] = 3
+        elif gap > 20: sub["high_gap"] = 2
+        elif gap > 10: sub["high_gap"] = 1
+        expl.append({
+            "label":  "180일 고점 대비",
+            "detail": f"-{gap:.1f}% · 고점 {int(high_180d):,}원",
+            "pts":    sub["high_gap"], "max": 4,
+        })
+    else:
+        expl.append({"label": "180일 고점 대비", "detail": "차트 데이터 없음", "pts": 0, "max": 4})
+
+    if sector_per_rank_pct is not None:
+        pct = sector_per_rank_pct * 100
+        if   sector_per_rank_pct < 0.10: sub["sector_rank"] = 4
+        elif sector_per_rank_pct < 0.25: sub["sector_rank"] = 3
+        elif sector_per_rank_pct < 0.40: sub["sector_rank"] = 2
+        elif sector_per_rank_pct < 0.50: sub["sector_rank"] = 1
+        expl.append({
+            "label":  "섹터 내 PER 랭크",
+            "detail": f"섹터 내 하위 {pct:.0f}% (저평가일수록 높은 점수)",
+            "pts":    sub["sector_rank"], "max": 4,
+        })
+    else:
+        expl.append({"label": "섹터 내 PER 랭크", "detail": "비교 가능 데이터 없음", "pts": 0, "max": 4})
+
+    return sum(sub.values()), sub, expl
+
+
+# _generate_analysis 의 실제 signal 문자열 기준 (server.py L279-376)
+_TECH_BB    = {"과매도": 4, "중립 상향": 3, "스퀴즈": 2, "중립 하향": 1,
+               "밴드 확장": 0, "과매수": 0}
+_TECH_TREND = {"저항선 돌파": 4, "지지선 위": 3, "저항선 하": 1, "지지선 이탈": 0}
+_TECH_FIB   = {"깊은 조정": 4, "중간 조정": 3, "일반 조정": 3,
+               "약조정 구간": 2, "신고가 근접": 1, "추세 전환": 0}
+_TECH_VOL   = {"거래량 급증": 3, "거래량 급감": 0}
+
+
+def _calc_technical_score_kr(analysis: dict | None) -> tuple[int, dict, list]:
+    """기술 점수 (0~15). comments 배열에서 type별 최고 점수 합산."""
+    sub = {"bb": 0, "trend": 0, "fib": 0, "volume": 0}
+    expl: list = []
+    if not analysis:
+        expl.append({"label": "차트 분석", "detail": "차트 데이터 없음", "pts": 0, "max": 15})
+        return 0, sub, expl
+
+    sigs = {"bollinger": None, "trendline": None, "fibonacci": None, "volume": None}
+    for c in analysis.get("comments") or []:
+        t = c.get("type")
+        sig = c.get("signal", "") or ""
+        if   t == "bollinger":
+            pts = _TECH_BB.get(sig, 0)
+            if pts >= sub["bb"]: sub["bb"] = pts; sigs["bollinger"] = sig
+        elif t == "trendline":
+            pts = _TECH_TREND.get(sig, 0)
+            if pts >= sub["trend"]: sub["trend"] = pts; sigs["trendline"] = sig
+        elif t == "fibonacci":
+            pts = _TECH_FIB.get(sig, 0)
+            if pts >= sub["fib"]: sub["fib"] = pts; sigs["fibonacci"] = sig
+        elif t == "volume":
+            pts = _TECH_VOL.get(sig, 0)
+            if pts >= sub["volume"]: sub["volume"] = pts; sigs["volume"] = sig
+
+    expl.append({"label": "볼린저밴드", "detail": sigs["bollinger"] or "신호 없음",
+                 "pts": sub["bb"],     "max": 4})
+    expl.append({"label": "추세선",     "detail": sigs["trendline"] or "신호 없음",
+                 "pts": sub["trend"],  "max": 4})
+    expl.append({"label": "피보나치",   "detail": sigs["fibonacci"] or "신호 없음",
+                 "pts": sub["fib"],    "max": 4})
+    expl.append({"label": "거래량",     "detail": sigs["volume"] or "신호 없음",
+                 "pts": sub["volume"], "max": 3})
+    return sum(sub.values()), sub, expl
+
+
+def _calc_undervalued_bonus(stock_ret_20d: float | None,
+                            sector_avg_ret_20d: float | None) -> tuple[int, list]:
+    """섹터가 올랐는데 본인은 덜 오른 경우 가산 (0~10). 반환: (점수, 설명 리스트)."""
+    if sector_avg_ret_20d is None or stock_ret_20d is None:
+        return 0, [{"label": "덜오른 보너스",
+                    "detail": "20일 수익률 데이터 없음",
+                    "pts": 0, "max": 10}]
+    if sector_avg_ret_20d > 5 and stock_ret_20d < sector_avg_ret_20d * 0.5:
+        gap = sector_avg_ret_20d - stock_ret_20d
+        pts = (10 if gap > 15 else 7 if gap > 10 else
+               5  if gap >  5 else 3 if gap >  3 else 0)
+        return pts, [{
+            "label":  "덜오른 보너스",
+            "detail": (f"섹터 20일 평균 {sector_avg_ret_20d:+.1f}%인데 "
+                       f"이 종목은 {stock_ret_20d:+.1f}%. 차이 {gap:.1f}%p"),
+            "pts":    pts, "max": 10,
+        }]
+    return 0, [{
+        "label":  "덜오른 보너스",
+        "detail": ("섹터 평균과 비슷하거나 더 많이 올라 가산점 없음"
+                   if sector_avg_ret_20d is not None else "섹터 평균 계산 불가"),
+        "pts":    0, "max": 10,
+    }]
+
+
+def _find_signal(comments: list, ctype: str) -> str | None:
+    for c in comments or []:
+        if c.get("type") == ctype:
+            return c.get("signal")
+    return None
+
+
+def _stage2_scoring_worker(market: str):
+    """백그라운드 진입점. market ∈ {kr, us, all}. all: KR → US 순차 실행 후 병합."""
+    try:
+        _discover_set(
+            status="running", phase="stage1", market=market,
+            progress=0, total=0, error=None,
+            started_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            finished_at=None, message="시작 중…",
+        )
+
+        kr_items = None
+        us_items = None
+
+        if market in ("kr", "all"):
+            kr_items = _run_stage2_kr()
+            if kr_items is None:
+                return  # 에러 상태 내부에서 설정됨
+        if market in ("us", "all"):
+            us_items = _run_stage2_us()
+            if us_items is None:
+                return
+
+        if market == "all":
+            merged = sorted(
+                (kr_items or []) + (us_items or []),
+                key=lambda x: x["total_score"], reverse=True,
+            )
+            out = {
+                "updated_at":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                "market":        "all",
+                "stage":         2,
+                "total_scanned": len(kr_items or []) + len(us_items or []),
+                "items":         merged,
+            }
+            (BASE_DIR / "cache" / "discover_all_stage2.json").write_text(
+                json.dumps(out, ensure_ascii=False), encoding="utf-8"
+            )
+
+        kr_n = len(kr_items or [])
+        us_n = len(us_items or [])
+        total_msg = (f"완료 · 국내 {kr_n} + 미국 {us_n}종목"
+                     if market == "all" else f"완료 · {kr_n or us_n}종목")
+        _discover_set(
+            status="done", phase=None,
+            finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            message=total_msg,
+        )
+        log.info("✓  Stage 2 스코어링 완료: market=%s kr=%d us=%d",
+                 market, kr_n, us_n)
+    except Exception as exc:
+        log.exception("stage2 worker failed")
+        _discover_set(
+            status="error", phase=None, error=str(exc),
+            finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+
+def _run_stage2_kr() -> list | None:
+    """KR Stage 2 실행. 성공 시 items 리스트, 실패 시 None (state error 설정)."""
+    _discover_set(phase="kr_stage1", message="🇰🇷 Stage 1 프리필터 실행 중…")
+    stage1 = _stage1_prefilter_kr()
+    if "error" in stage1:
+        _discover_set(status="error", error=stage1["error"],
+                      finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"))
+        return None
+
+    candidates = stage1["items"]
+    total = len(candidates)
+    if not total:
+        _discover_set(status="error", error="KR Stage 1 결과 없음",
+                      finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"))
+        return None
+
+    sparklines = _load_ticker_sparklines_kr()
+
+    # 섹터별 20일 평균 수익률 (덜 오른 종목 보너스용)
+    sector_rets: dict[str, list[float]] = {}
+    for it in candidates:
+        sp = sparklines.get(it["code"]) or []
+        if len(sp) >= 20 and sp[0]:
+            sector_rets.setdefault(it["sector"] or "_", []).append(
+                (sp[-1] / sp[0] - 1) * 100
+            )
+    sector_avg_ret = {k: sum(v) / len(v) for k, v in sector_rets.items() if v}
+
+    # ── Phase A: 상세 데이터 수집 (200 × 3 fetch) ──
+    _discover_set(phase="kr_fetch", progress=0, total=total,
+                  message=f"🇰🇷 상세 데이터 수집 중 (0/{total})")
+    financials: dict[str, dict] = {}
+    flows:      dict[str, dict] = {}
+    charts:     dict[str, dict] = {}
+
+    for i, it in enumerate(candidates):
+        code = it["code"]
+        try:
+            financials[code] = _call_api_internal(f"/api/financial/{code}") or {}
+            flows[code]      = _call_api_internal(f"/api/flow/{code}") or {}
+            charts[code]     = _call_api_internal(f"/api/chart/{code}") or {}
+        except Exception as exc:
+            log.debug("stage2 kr fetch fail %s: %s", code, exc)
+        _discover_set(progress=i + 1,
+                      message=f"🇰🇷 상세 데이터 수집 중 ({i+1}/{total})")
+        time.sleep(0.04)
+
+    # 섹터별 PER 랭크 (오름차순 = 저평가 상위)
+    sector_pers: dict[str, list[tuple[str, float]]] = {}
+    sector_by_code = {it["code"]: (it["sector"] or "_") for it in candidates}
+    for code, fin in financials.items():
+        per = fin.get("per")
+        if per and per > 0:
+            sector_pers.setdefault(sector_by_code[code], []).append((code, per))
+    sector_per_rank_pct: dict[str, float] = {}
+    for sect, lst in sector_pers.items():
+        lst.sort(key=lambda x: x[1])
+        n = len(lst)
+        for idx, (code, _) in enumerate(lst):
+            sector_per_rank_pct[code] = (idx / n) if n > 0 else 0.5
+
+    # ── Phase B: 스코어링 ──
+    _discover_set(phase="kr_scoring", progress=0, message="🇰🇷 스코어링 중…")
+    for idx, it in enumerate(candidates):
+        code = it["code"]
+        fin = financials.get(code) or {}
+        flow = flows.get(code) or {}
+        chart = charts.get(code) or {}
+        analysis = chart.get("analysis") if isinstance(chart, dict) else None
+        highs = (chart.get("high") if isinstance(chart, dict) else None) or []
+        high_180d = max(highs) if highs else None
+
+        flow_score, flow_sub, flow_expl = _calc_flow_score_kr(flow)
+        val_score,  val_sub,  val_expl  = _calc_valuation_score_kr(
+            fin, it.get("price"), high_180d, sector_per_rank_pct.get(code)
+        )
+        tech_score, tech_sub, tech_expl = _calc_technical_score_kr(analysis)
+
+        sp = sparklines.get(code) or []
+        stock_ret_20d = ((sp[-1] / sp[0] - 1) * 100) if (len(sp) >= 20 and sp[0]) else None
+        bonus, bonus_expl = _calc_undervalued_bonus(
+            stock_ret_20d, sector_avg_ret.get(it.get("sector") or "_")
+        )
+
+        it["scores"]["flow"] = flow_score
+        it["scores"]["valuation"] = val_score
+        it["scores"]["technical"] = tech_score
+        it["scores"]["undervalued_bonus"] = bonus
+        it["sub_scores"]["flow"] = flow_sub
+        it["sub_scores"]["valuation"] = val_sub
+        it["sub_scores"]["technical"] = tech_sub
+        it.setdefault("explanations", {})
+        it["explanations"]["flow"] = flow_expl
+        it["explanations"]["valuation"] = val_expl
+        it["explanations"]["technical"] = tech_expl
+        it["explanations"]["bonus"] = bonus_expl
+
+        comments = (analysis or {}).get("comments", []) if analysis else []
+        it["details"] = {
+            "per":          fin.get("per"),
+            "pbr":          fin.get("pbr"),
+            "industry_per": fin.get("industry_per"),
+            "bb_signal":    _find_signal(comments, "bollinger"),
+            "trend_signal": _find_signal(comments, "trendline"),
+            "fib_signal":   _find_signal(comments, "fibonacci"),
+            "vol_signal":   _find_signal(comments, "volume"),
+            "foreign_5d":   sum((flow.get("foreign_value") or [])[-5:]) if flow else None,
+        }
+        it["total_score"] = (
+            it["scores"]["momentum"] + it["scores"]["sector"] +
+            flow_score + val_score + tech_score + bonus
+        )
+        _discover_set(progress=idx + 1)
+
+    candidates.sort(key=lambda x: x["total_score"], reverse=True)
+
+    result = {
+        "updated_at":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":        "kr",
+        "stage":         2,
+        "total_scanned": stage1["total_scanned"],
+        "items":         candidates,
+    }
+
+    out = BASE_DIR / "cache" / "discover_kr_stage2.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return candidates
+
+
+def _run_stage2_us() -> list | None:
+    """US Stage 2: S&P500 에서 상위 100종목 yfinance 상세 스코어링."""
+    _discover_set(phase="us_stage1", message="🇺🇸 Stage 1 프리필터 실행 중…")
+    stage1 = _stage1_prefilter_us()
+    if "error" in stage1:
+        _discover_set(status="error", error=f"US: {stage1['error']}",
+                      finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"))
+        return None
+
+    candidates = stage1["items"]
+    total = len(candidates)
+    if not total:
+        _discover_set(status="error", error="US Stage 1 결과 없음",
+                      finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"))
+        return None
+
+    # 섹터 데이터 (us_market) — stocks 배열 포함
+    us_data = _fetch_us_market_data()
+    sector_by_name = {x["name"]: x for x in (us_data.get("sectors") or [])}
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        _discover_set(status="error", error="yfinance 미설치",
+                      finished_at=now_kst().strftime("%Y-%m-%d %H:%M:%S"))
+        return None
+
+    _discover_set(phase="us_fetch", progress=0, total=total,
+                  message=f"🇺🇸 yfinance 상세 수집 중 (0/{total})")
+
+    infos:  dict[str, dict] = {}
+    charts: dict[str, dict] = {}
+    ret_20d: dict[str, float] = {}
+
+    for i, it in enumerate(candidates):
+        sym = it["code"]
+        # 24h 캐시: cache/us_yinfo_{sym}.json
+        info_cache = BASE_DIR / "cache" / f"us_yinfo_{sym}.json"
+        info = None
+        if info_cache.exists():
+            try:
+                age_hr = (now_kst().timestamp() - info_cache.stat().st_mtime) / 3600
+                if age_hr < 24:
+                    info = json.loads(info_cache.read_text(encoding="utf-8"))
+            except Exception:
+                info = None
+        if info is None:
+            try:
+                raw = _yf.Ticker(sym).info or {}
+                # JSON-직렬화 가능한 값만 선별
+                info = {k: v for k, v in raw.items()
+                        if isinstance(v, (int, float, str, bool, type(None)))}
+                info_cache.parent.mkdir(exist_ok=True)
+                info_cache.write_text(json.dumps(info, ensure_ascii=False),
+                                      encoding="utf-8")
+            except Exception as exc:
+                log.debug("us yfinance info fail %s: %s", sym, exc)
+                info = {}
+        infos[sym] = info
+
+        # 차트: /api/us/chart/<symbol> 재사용 (bollinger/fib/trend/analysis 포함)
+        chart = _call_api_internal(f"/api/us/chart/{sym}") or {}
+        charts[sym] = chart
+
+        closes = (chart.get("close") if isinstance(chart, dict) else None) or []
+        if len(closes) >= 20 and closes[-20]:
+            ret_20d[sym] = (closes[-1] / closes[-20] - 1) * 100
+
+        _discover_set(progress=i + 1,
+                      message=f"🇺🇸 yfinance 상세 수집 중 ({i+1}/{total})")
+        time.sleep(0.1)
+
+    # 섹터별 20일 평균 수익률
+    sector_rets: dict[str, list[float]] = {}
+    for it in candidates:
+        r = ret_20d.get(it["code"])
+        if r is not None:
+            sector_rets.setdefault(it.get("sector") or "_", []).append(r)
+    sector_avg_ret = {k: sum(v) / len(v) for k, v in sector_rets.items() if v}
+
+    # ── 스코어링 ──
+    _discover_set(phase="us_scoring", progress=0, message="🇺🇸 스코어링 중…")
+    for idx, it in enumerate(candidates):
+        sym = it["code"]
+        info = infos.get(sym) or {}
+        chart = charts.get(sym) or {}
+        analysis = chart.get("analysis") if isinstance(chart, dict) else None
+        high_52w = info.get("fiftyTwoWeekHigh")
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or it.get("price")
+
+        flow_score, flow_sub, flow_expl = _calc_flow_score_us(info)
+        val_score,  val_sub,  val_expl  = _calc_valuation_score_us(
+            info, high_52w, current_price
+        )
+        tech_score, tech_sub, tech_expl = _calc_technical_score_kr(analysis)
+
+        bonus, bonus_expl = _calc_undervalued_bonus(
+            ret_20d.get(sym), sector_avg_ret.get(it.get("sector") or "_")
+        )
+
+        it["scores"]["flow"] = flow_score
+        it["scores"]["valuation"] = val_score
+        it["scores"]["technical"] = tech_score
+        it["scores"]["undervalued_bonus"] = bonus
+        it["sub_scores"]["flow"] = flow_sub
+        it["sub_scores"]["valuation"] = val_sub
+        it["sub_scores"]["technical"] = tech_sub
+        it.setdefault("explanations", {})
+        it["explanations"]["flow"] = flow_expl
+        it["explanations"]["valuation"] = val_expl
+        it["explanations"]["technical"] = tech_expl
+        it["explanations"]["bonus"] = bonus_expl
+
+        comments = (analysis or {}).get("comments", []) if analysis else []
+        it["details"] = {
+            "per":          info.get("trailingPE"),
+            "pbr":          info.get("priceToBook"),
+            "forward_per":  info.get("forwardPE"),
+            "recommendation": info.get("recommendationKey"),
+            "inst_pct":     info.get("heldPercentInstitutions"),
+            "insider_pct":  info.get("heldPercentInsiders"),
+            "bb_signal":    _find_signal(comments, "bollinger"),
+            "trend_signal": _find_signal(comments, "trendline"),
+            "fib_signal":   _find_signal(comments, "fibonacci"),
+            "vol_signal":   _find_signal(comments, "volume"),
+        }
+        it["total_score"] = (
+            it["scores"]["momentum"] + it["scores"]["sector"] +
+            flow_score + val_score + tech_score + bonus
+        )
+        _discover_set(progress=idx + 1)
+
+    candidates.sort(key=lambda x: x["total_score"], reverse=True)
+
+    result = {
+        "updated_at":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":        "us",
+        "stage":         2,
+        "total_scanned": stage1["total_scanned"],
+        "items":         candidates,
+    }
+
+    out = BASE_DIR / "cache" / "discover_us_stage2.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return candidates
+
+
+@app.route("/api/discover/scan", methods=["POST"])
+def api_discover_scan():
+    """Stage 2 백그라운드 스캔 시작. market ∈ {kr, us, all}."""
+    market = (request.args.get("market") or "kr").lower()
+    if market not in ("kr", "us", "all"):
+        return jsonify({"error": "market 파라미터는 kr/us/all"}), 400
+
+    with _discover_lock:
+        if _discover_state["status"] in ("starting", "running"):
+            return jsonify({
+                "status": "already_running",
+                "state":  dict(_discover_state),
+            })
+        _discover_state.update({
+            "status":     "starting",
+            "phase":      None,
+            "market":     market,
+            "progress":   0,
+            "total":      0,
+            "error":      None,
+            "message":    "시작 중…",
+            "started_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None,
+        })
+
+    threading.Thread(target=_stage2_scoring_worker, args=(market,),
+                     daemon=True, name="discover-stage2").start()
+    return jsonify({"status": "started", "state": _discover_get_state()})
+
+
+@app.route("/api/discover/progress")
+def api_discover_progress():
+    """현재 Stage 2 스캔 진행 상태."""
+    return jsonify(_discover_get_state())
 
 
 # gunicorn 이 모듈을 import 하는 시점에 자동 실행
