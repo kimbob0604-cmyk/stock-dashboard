@@ -652,6 +652,582 @@ def _strip_html(s: str) -> str:
     return _re.sub(r"<[^>]+>", "", s or "")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# US MARKET (Phase 14)  —  S&P 500 via yfinance + Wikipedia
+# ─────────────────────────────────────────────────────────────────────────────
+def _sp500_tickers() -> list[dict]:
+    """
+    S&P 500 구성 종목 리스트 (Wikipedia).
+    캐시: cache/sp500_tickers.json, TTL 7일.
+    Returns: [{symbol, name, sector, sub_industry}, ...]
+    """
+    cache_file = BASE_DIR / "cache" / "sp500_tickers.json"
+    if cache_file.exists():
+        try:
+            age_days = (now_kst().timestamp() - cache_file.stat().st_mtime) / 86400
+            if age_days < 7:
+                return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    try:
+        import pandas as _pd
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        tables = _pd.read_html(url, storage_options={"User-Agent": "Mozilla/5.0"})
+    except Exception as exc:
+        print(f"[S&P500] Wikipedia 파싱 실패: {exc}")
+        return []
+
+    if not tables:
+        return []
+
+    df = tables[0]
+    out: list[dict] = []
+    for _, row in df.iterrows():
+        try:
+            sym = str(row.get("Symbol", "")).replace(".", "-")  # BRK.B → BRK-B
+            if not sym or sym == "nan":
+                continue
+            out.append({
+                "symbol":       sym,
+                "name":         str(row.get("Security", sym)),
+                "sector":       str(row.get("GICS Sector", "")),
+                "sub_industry": str(row.get("GICS Sub-Industry", "")),
+            })
+        except Exception:
+            continue
+
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(out, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    print(f"[S&P500] Wikipedia 에서 {len(out)} 종목 로드")
+    return out
+
+
+def _is_us_market_hours() -> bool:
+    """미국 장중 여부 (대략 KST 22:30~06:00)."""
+    now = now_kst()
+    if now.weekday() >= 5 and now.weekday() != 0:  # 월~금의 장이 KST 기준 토요일까지 걸침
+        pass
+    t = now.hour * 100 + now.minute
+    return (t >= 2230) or (t <= 600)
+
+
+def _format_usd_cap(value) -> str:
+    """시가총액 $ 단위 포맷."""
+    if not value:
+        return "—"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 1e12: return f"${v/1e12:.2f}T"
+    if v >= 1e9:  return f"${v/1e9:.1f}B"
+    if v >= 1e6:  return f"${v/1e6:.0f}M"
+    return f"${v:,.0f}"
+
+
+def _fetch_us_market_data(force: bool = False) -> dict:
+    """
+    S&P 500 전 종목 당일 시세 batch 수집 + 섹터별 집계.
+    캐시: cache/us_market_{YYYYMMDD_KST}.json
+    TTL: 미국 장중 15분 / 장외 24시간.
+    """
+    today = now_kst().strftime("%Y%m%d")
+    cache_file = BASE_DIR / "cache" / f"us_market_{today}.json"
+    if cache_file.exists() and not force:
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            ttl = 15 if _is_us_market_hours() else 1440
+            if age_min < ttl:
+                return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return {"error": "yfinance 미설치", "sectors": [], "all_stocks": []}
+
+    tickers = _sp500_tickers()
+    if not tickers:
+        return {"error": "S&P 500 리스트 없음", "sectors": [], "all_stocks": []}
+
+    symbols = [t["symbol"] for t in tickers]
+    by_sym = {t["symbol"]: t for t in tickers}
+
+    stocks: list[dict] = []
+    print(f"[US] yfinance batch download, {len(symbols)} 종목…")
+
+    # 100 종목씩 청크로 나누어 실패 격리
+    chunk_size = 100
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i + chunk_size]
+        try:
+            df = _yf.download(
+                " ".join(chunk),
+                period="5d",
+                interval="1d",
+                group_by="ticker",
+                threads=True,
+                progress=False,
+                auto_adjust=True,
+            )
+        except Exception as exc:
+            print(f"[US chunk {i}] fail: {exc}")
+            continue
+
+        for sym in chunk:
+            try:
+                if sym not in df.columns.get_level_values(0):
+                    continue
+                t_df = df[sym].dropna(how="all")
+                if len(t_df) < 1:
+                    continue
+                cur = float(t_df["Close"].iloc[-1])
+                prev = float(t_df["Close"].iloc[-2]) if len(t_df) >= 2 else cur
+                chg_pct = round((cur / prev - 1) * 100, 2) if prev else 0.0
+                vol = int(t_df["Volume"].iloc[-1] or 0)
+                info = by_sym[sym]
+                stocks.append({
+                    "symbol":     sym,
+                    "name":       info["name"],
+                    "sector":     info["sector"],
+                    "price":      round(cur, 2),
+                    "prev_close": round(prev, 2),
+                    "change_pct": chg_pct,
+                    "volume":     vol,
+                    "volume_mn":  round(vol * cur / 1_000_000, 1),    # $M traded
+                })
+            except Exception:
+                continue
+
+    if not stocks:
+        return {"error": "yfinance 응답 없음", "sectors": [], "all_stocks": []}
+
+    # 섹터별 그룹
+    sectors_map: dict = {}
+    for s in stocks:
+        sec = s["sector"] or "Unknown"
+        bucket = sectors_map.setdefault(sec, {
+            "name":             sec,
+            "stocks":           [],
+            "weighted_avg_pct": 0.0,
+            "stock_count":      0,
+        })
+        bucket["stocks"].append(s)
+
+    for bucket in sectors_map.values():
+        tot = sum(s["volume_mn"] for s in bucket["stocks"]) or 1
+        bucket["weighted_avg_pct"] = round(
+            sum(s["change_pct"] * s["volume_mn"] for s in bucket["stocks"]) / tot, 2
+        )
+        bucket["stock_count"] = len(bucket["stocks"])
+        bucket["stocks"].sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+
+    # 섹터 리스트 (등락률 내림차순)
+    sector_list = sorted(
+        sectors_map.values(),
+        key=lambda b: abs(b["weighted_avg_pct"]),
+        reverse=True,
+    )
+
+    result = {
+        "updated_at":  now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":      "US",
+        "total_stocks": len(stocks),
+        "sectors":     sector_list,
+        "all_stocks":  stocks,
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False),
+                          encoding="utf-8")
+    print(f"[US] 완료: {len(stocks)} stocks, {len(sector_list)} sectors")
+    return result
+
+
+def _build_us_market_background():
+    """
+    서버 부팅 시 백그라운드로 S&P 500 전 종목 batch 를 돌린다.
+    초회 빌드 ~180s 소요 (yfinance). 캐시 존재 시 즉시 return.
+    """
+    today = now_kst().strftime("%Y%m%d")
+    out_file = BASE_DIR / "cache" / f"us_market_{today}.json"
+    if out_file.exists():
+        log.info("us_market 캐시 이미 존재 — 스킵 (%s)", out_file.name)
+        return
+    lock = out_file.with_suffix(".lock")
+    if lock.exists():
+        return
+    try:
+        lock.touch()
+        log.info("▶  S&P 500 market 백그라운드 빌드 시작 (~3분)")
+        _fetch_us_market_data(force=True)
+        log.info("✓  S&P 500 market 빌드 완료")
+    except Exception as exc:
+        log.error("S&P 500 빌드 실패: %s", exc)
+    finally:
+        try: lock.unlink()
+        except Exception: pass
+
+
+@app.route("/api/us/market")
+def api_us_market():
+    """
+    S&P 500 전 종목 시세 + 섹터 집계. 캐시 우선. 캐시 없으면 빌드 중 표시
+    (프론트가 polling 으로 재시도).
+    """
+    today = now_kst().strftime("%Y%m%d")
+    out_file = BASE_DIR / "cache" / f"us_market_{today}.json"
+    if out_file.exists():
+        try:
+            return Response(
+                out_file.read_text(encoding="utf-8"),
+                content_type="application/json; charset=utf-8",
+            )
+        except Exception:
+            pass
+    # 캐시 없음 → 백그라운드 빌드 킥
+    threading.Thread(target=_build_us_market_background,
+                     daemon=True, name="us-market-build").start()
+    return jsonify({
+        "building":    True,
+        "message":     "S&P 500 batch 빌드 중입니다. 약 2~3분 후 다시 시도하세요.",
+        "sectors":     [],
+        "all_stocks":  [],
+        "total_stocks": 0,
+    }), 202
+
+
+@app.route("/api/us/search")
+def api_us_search():
+    """S&P 500 종목 검색 (심볼/이름 부분 일치)."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 1:
+        return jsonify([])
+    tickers = _sp500_tickers()
+    q_up = q.upper()
+    q_lo = q.lower()
+    results = []
+    for t in tickers:
+        if q_up in t["symbol"].upper() or q_lo in t["name"].lower():
+            results.append({
+                "code":   t["symbol"],
+                "name":   t["name"],
+                "sector": t["sector"],
+            })
+        if len(results) >= 10:
+            break
+    return jsonify(results)
+
+
+@app.route("/api/us/chart/<symbol>")
+def api_us_chart(symbol: str):
+    """
+    미국 종목 차트 (yfinance history).
+    응답 스키마는 /api/chart 와 호환 → 프론트의 _drawCandles 등 무수정 재사용.
+    """
+    import re as _re
+    if not _re.fullmatch(r"[A-Z][A-Z0-9\-\.]{0,9}", symbol.upper()):
+        return jsonify({"error": "잘못된 심볼"}), 400
+    symbol = symbol.upper()
+
+    try:
+        days = int(request.args.get("days", "180"))
+    except ValueError:
+        days = 180
+    days = max(7, min(3650, days))
+
+    today_kst = now_kst().strftime("%Y%m%d")
+    cache_file = BASE_DIR / "cache" / f"us_chart_{symbol}_{days}d_{today_kst}.json"
+    if cache_file.exists():
+        try:
+            return Response(
+                cache_file.read_text(encoding="utf-8"),
+                content_type="application/json; charset=utf-8",
+            )
+        except Exception:
+            pass
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return jsonify({"error": "yfinance 미설치"}), 500
+
+    period_map = {30: "1mo", 90: "3mo", 180: "6mo",
+                  365: "1y", 730: "2y", 1095: "5y", 1825: "5y", 3650: "10y"}
+    period = "6mo"
+    for d in sorted(period_map):
+        if days <= d:
+            period = period_map[d]; break
+
+    try:
+        t = _yf.Ticker(symbol)
+        df = t.history(period=period, auto_adjust=True)
+    except Exception as exc:
+        return jsonify({"error": f"yfinance 실패: {exc}"}), 502
+
+    if df is None or df.empty:
+        return jsonify({"error": "데이터 없음"}), 404
+
+    dates   = [d.strftime("%Y-%m-%d") for d in df.index]
+    opens   = [round(float(v), 2) for v in df["Open"].tolist()]
+    highs   = [round(float(v), 2) for v in df["High"].tolist()]
+    lows    = [round(float(v), 2) for v in df["Low"].tolist()]
+    closes  = [round(float(v), 2) for v in df["Close"].tolist()]
+    volumes = [int(v) for v in df["Volume"].tolist()]
+
+    bollinger  = _calc_bollinger(closes)
+    fibonacci  = _calc_fibonacci(highs, lows)
+    trendlines = _calc_trendlines(highs, lows, closes)
+    analysis   = _generate_analysis(closes, volumes, bollinger, fibonacci, trendlines)
+
+    name = symbol
+    try:
+        info = t.info or {}
+        name = info.get("shortName") or info.get("longName") or symbol
+    except Exception:
+        pass
+
+    result = {
+        "code":       symbol,
+        "name":       name,
+        "market":     "US",
+        "currency":   "USD",
+        "days":       days,
+        "dates":      dates,
+        "open":       opens, "high": highs, "low": lows, "close": closes,
+        "volume":     volumes,
+        "bollinger":  bollinger,
+        "fibonacci":  fibonacci,
+        "trendlines": trendlines,
+        "analysis":   analysis,
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False),
+                          encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/us/news/<symbol>")
+def api_us_news(symbol: str):
+    """미국 종목 뉴스 (yfinance Ticker.news, 영어 원문). 30분 캐시."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Z][A-Z0-9\-\.]{0,9}", symbol.upper()):
+        return jsonify({"error": "잘못된 심볼"}), 400
+    symbol = symbol.upper()
+
+    cache_file = BASE_DIR / "cache" / f"us_news_{symbol}.json"
+    if cache_file.exists():
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            if age_min < 30:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return jsonify({"error": "yfinance 미설치"}), 500
+
+    try:
+        news = _yf.Ticker(symbol).news or []
+    except Exception as exc:
+        return jsonify({"error": f"yfinance 뉴스 실패: {exc}", "items": []}), 502
+
+    def _time_ago_utc(ts: int) -> str:
+        if not ts:
+            return ""
+        from datetime import timezone as _tz
+        dt = datetime.fromtimestamp(ts, tz=_tz.utc)
+        delta = datetime.now(_tz.utc) - dt
+        mins = int(delta.total_seconds() / 60)
+        if mins < 1:  return "방금"
+        if mins < 60: return f"{mins}분 전"
+        hrs = mins // 60
+        if hrs < 24:  return f"{hrs}시간 전"
+        return f"{hrs // 24}일 전"
+
+    items = []
+    for a in news[:15]:
+        # yfinance 뉴스 스키마가 최근 버전에서 {content: {...}} 로 감싸짐
+        c = a.get("content") or a
+        title = c.get("title") or ""
+        link  = (c.get("clickThroughUrl") or {}).get("url") if isinstance(c.get("clickThroughUrl"), dict) else c.get("link", "")
+        if not link:
+            link = (c.get("canonicalUrl") or {}).get("url", "") if isinstance(c.get("canonicalUrl"), dict) else ""
+        provider = c.get("provider") or {}
+        source = provider.get("displayName") if isinstance(provider, dict) else c.get("publisher", "")
+        pub_date = c.get("pubDate") or ""
+        # providerPublishTime (legacy) 또는 pubDate (new ISO)
+        time_ago = ""
+        if c.get("providerPublishTime"):
+            time_ago = _time_ago_utc(c["providerPublishTime"])
+        elif pub_date:
+            try:
+                from datetime import timezone as _tz
+                dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+                delta = datetime.now(_tz.utc) - dt
+                mins = int(delta.total_seconds() / 60)
+                if mins < 60: time_ago = f"{mins}분 전"
+                elif mins < 1440: time_ago = f"{mins // 60}시간 전"
+                else: time_ago = f"{mins // 1440}일 전"
+            except Exception:
+                pass
+
+        thumbnail = ""
+        thumb = c.get("thumbnail")
+        if isinstance(thumb, dict):
+            res = thumb.get("resolutions") or []
+            if res and isinstance(res, list):
+                thumbnail = res[0].get("url", "")
+            elif thumb.get("originalUrl"):
+                thumbnail = thumb["originalUrl"]
+
+        if title and link:
+            items.append({
+                "title":     title,
+                "link":      link,
+                "source":    source or "",
+                "thumbnail": thumbnail,
+                "pubDate":   pub_date,
+                "timeAgo":   time_ago,
+            })
+
+    result = {"symbol": symbol, "count": len(items), "items": items}
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/us/financial/<symbol>")
+def api_us_financial(symbol: str):
+    """미국 종목 재무 요약 (yfinance Ticker.info). 24시간 캐시."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Z][A-Z0-9\-\.]{0,9}", symbol.upper()):
+        return jsonify({"error": "잘못된 심볼"}), 400
+    symbol = symbol.upper()
+
+    cache_file = BASE_DIR / "cache" / f"us_fin_{symbol}.json"
+    if cache_file.exists():
+        try:
+            age_hr = (now_kst().timestamp() - cache_file.stat().st_mtime) / 3600
+            if age_hr < 24:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return jsonify({"error": "yfinance 미설치"}), 500
+
+    try:
+        info = _yf.Ticker(symbol).info or {}
+    except Exception as exc:
+        return jsonify({"error": f"yfinance info 실패: {exc}"}), 502
+
+    def _pct(v):
+        if v is None: return None
+        try: return round(float(v) * 100, 2)
+        except (TypeError, ValueError): return None
+
+    result = {
+        "symbol":         symbol,
+        "name":           info.get("shortName") or info.get("longName") or symbol,
+        "sector":         info.get("sector"),
+        "industry":       info.get("industry"),
+        "per":            info.get("trailingPE"),
+        "forward_per":    info.get("forwardPE"),
+        "pbr":            info.get("priceToBook"),
+        "roe":            _pct(info.get("returnOnEquity")),
+        "profit_margin":  _pct(info.get("profitMargins")),
+        "dividend_yield": info.get("dividendYield"),  # yfinance returns percent already
+        "market_cap":     info.get("marketCap"),
+        "market_cap_str": _format_usd_cap(info.get("marketCap")),
+        "revenue":        info.get("totalRevenue"),
+        "revenue_str":    _format_usd_cap(info.get("totalRevenue")),
+        "target_price":   info.get("targetMeanPrice"),
+        "recommendation": info.get("recommendationKey"),
+        "beta":           info.get("beta"),
+        "w52_high":       info.get("fiftyTwoWeekHigh"),
+        "w52_low":        info.get("fiftyTwoWeekLow"),
+        "current_price":  info.get("currentPrice") or info.get("regularMarketPrice"),
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return jsonify(result)
+
+
+@app.route("/api/us/screener")
+def api_us_screener():
+    """미국 스크리너 — _fetch_us_market_data 결과에서 서버-사이드 필터."""
+    args = request.args
+    min_change = float(args.get("min_change", "-100") or -100)
+    max_change = float(args.get("max_change", "100")  or 100)
+    min_volume = float(args.get("min_volume", "0")    or 0)   # $M
+    sector     = (args.get("sector") or "").strip()
+    q          = (args.get("q") or "").strip()
+
+    data = _fetch_us_market_data()
+    if "error" in data:
+        return jsonify({"error": data["error"], "count": 0, "stocks": []}), 503
+
+    results = []
+    q_up = q.upper()
+    q_lo = q.lower()
+    for s in data.get("all_stocks", []):
+        if s["change_pct"] < min_change or s["change_pct"] > max_change: continue
+        if s["volume_mn"] < min_volume: continue
+        if sector and s.get("sector") != sector: continue
+        if q and (q_up not in s["symbol"].upper() and q_lo not in s["name"].lower()):
+            continue
+        results.append(s)
+
+    results.sort(key=lambda r: r["volume_mn"], reverse=True)
+    return jsonify({
+        "count":           len(results),
+        "stocks":          results[:200],
+        "universe_source": "sp500_yfinance",
+        "universe_size":   data.get("total_stocks", 0),
+        "fetched_at":      data.get("updated_at"),
+    })
+
+
+@app.route("/api/us/price/<symbol>")
+def api_us_price(symbol: str):
+    """미국 종목 현재가 — us_market 캐시에서 조회."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Z][A-Z0-9\-\.]{0,9}", symbol.upper()):
+        return jsonify({"error": "잘못된 심볼"}), 400
+    symbol = symbol.upper()
+    data = _fetch_us_market_data()
+    for s in data.get("all_stocks", []):
+        if s["symbol"] == symbol:
+            chg = (s["price"] - s["prev_close"]) if s.get("prev_close") else None
+            return jsonify({
+                "code":       symbol,
+                "name":       s["name"],
+                "price":      s["price"],
+                "prev_close": s.get("prev_close"),
+                "change":     round(chg, 2) if chg is not None else None,
+                "change_pct": s["change_pct"],
+                "volume_mn":  s["volume_mn"],
+                "source":     "us_market_cache",
+                "fetched_at": data.get("updated_at"),
+            })
+    return jsonify({"error": "종목 없음"}), 404
+
+
 @app.route("/api/news/<code>")
 def api_news(code: str):
     """
@@ -2290,6 +2866,11 @@ def _startup():
     #   일 1회, 약 79 섹터 × 0.25s ≈ 20 초 소요.
     threading.Thread(target=_build_naver_universe_background,
                      daemon=True, name="naver-universe").start()
+
+    # Phase 14: S&P 500 market 백그라운드 빌드
+    #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
+    threading.Thread(target=_build_us_market_background,
+                     daemon=True, name="us-market-build").start()
 
     # APScheduler: 장중 자동 갱신
     if _SCHEDULER_OK:

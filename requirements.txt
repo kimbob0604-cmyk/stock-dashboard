@@ -6,3 +6,4 @@ gunicorn>=21.2
 yfinance>=0.2.40
 requests>=2.31
 beautifulsoup4>=4.12
+lxml>=5.0

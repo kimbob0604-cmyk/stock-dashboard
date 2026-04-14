@@ -53,6 +53,34 @@ body { display: flex; }
   font-size: 14px; font-weight: 800; letter-spacing: 0.5px;
   border-bottom: 1px solid #2C2C2E;
 }
+
+/* Phase 14: 시장 전환 토글 */
+.market-toggle {
+  display: flex; gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #2C2C2E;
+}
+.market-btn {
+  flex: 1;
+  background: var(--surface2); color: var(--text-sub);
+  border: 1px solid var(--border);
+  padding: 7px 4px; border-radius: 7px;
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  font-family: inherit; text-align: center;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.market-btn:hover:not(.active) { background: var(--border); color: var(--text); }
+.market-btn.active {
+  background: rgba(255,51,51,0.15);
+  color: #FF3333;
+  border-color: #FF3333;
+}
+/* 미국 모드일 때 테마맵·수급동향·공매도 메뉴는 숨김 (의미 없음) */
+body.market-us [data-page="thememap"],
+body.market-us [data-page="flow"],
+body.market-us [data-page="short"] {
+  display: none;
+}
 .sidebar-menu { list-style: none; padding: 8px 0; margin: 0; flex: 1; }
 .sidebar-item {
   padding: 11px 16px;
@@ -1027,6 +1055,13 @@ select:focus { border-color: var(--accent); }
   border-radius: 6px;
 }
 .news-item:hover { background: var(--surface2); }
+/* Phase 14: US 뉴스는 썸네일 + 본문 가로 배치 */
+.news-item-row { display: flex; gap: 12px; align-items: flex-start; }
+.news-thumb {
+  width: 96px; height: 60px; border-radius: 5px;
+  object-fit: cover; flex-shrink: 0; background: var(--surface2);
+}
+.news-item-content { flex: 1; min-width: 0; }
 .news-title  { color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.4; }
 .news-desc   { color: var(--text-sub); font-size: 12px; margin-top: 5px; line-height: 1.5; }
 .news-meta   { margin-top: 6px; }
@@ -1118,6 +1153,11 @@ select:focus { border-color: var(--accent); }
 <!-- SIDEBAR NAV (Phase 9) -->
 <nav id="sidebar">
   <div class="sidebar-logo">📊 DASHBOARD</div>
+  <!-- Phase 14: 시장 전환 토글 -->
+  <div class="market-toggle" id="market-toggle">
+    <button class="market-btn active" data-market="kr">🇰🇷 국내</button>
+    <button class="market-btn"        data-market="us">🇺🇸 미국</button>
+  </div>
   <ul class="sidebar-menu" id="sidebar-menu">
     <li class="sidebar-item active" data-page="thememap"><span class="mi">🗺️</span>테마맵</li>
     <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
@@ -1553,8 +1593,42 @@ let APP = {
   sort:          'weighted_avg_pct',
   stockSort:     'change_pct',
   count:         20,
-  selectedTheme: null
+  selectedTheme: null,
+  market:        'kr',   // Phase 14: 'kr' | 'us'
 };
+
+// Phase 14: 시장별 엔드포인트 prefix 와 통화 포맷
+function _marketBase() { return APP.market === 'us' ? '/api/us' : '/api'; }
+function _marketCurrency() { return APP.market === 'us' ? '$' : '₩'; }
+function _fmtPrice(v, market) {
+  const cur = (market || APP.market) === 'us' ? '$' : '₩';
+  if (v == null) return '—';
+  if (cur === '$') {
+    return '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return '₩' + Number(v).toLocaleString('ko-KR');
+}
+
+function switchMarket(market) {
+  if (market !== 'kr' && market !== 'us') return;
+  if (APP.market === market) return;
+  APP.market = market;
+  document.body.classList.toggle('market-us', market === 'us');
+  document.querySelectorAll('#market-toggle .market-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.market === market);
+  });
+  console.log('[market] switched to', market);
+
+  // 페이지 리다이렉트: 미국은 테마맵 없이 섹터맵이 기본
+  if (market === 'us' && (APP.page === 'thememap' || APP.page === 'flow' || APP.page === 'short')) {
+    navigateTo('sector');
+  } else {
+    // 현재 페이지를 다시 렌더 (데이터 소스가 바뀌므로)
+    navigateTo(APP.page);
+  }
+  // 열려있는 차트 패널은 초기화 (다른 시장 종목이 그대로 남지 않게)
+  closeChartPanel();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WATCHLIST (Phase 12-2) — localStorage 기반, 서버 불필요
@@ -1569,19 +1643,24 @@ function _saveWatchlist(list) {
   try { localStorage.setItem(_WATCHLIST_KEY, JSON.stringify(list)); }
   catch (e) { console.warn('[watchlist] save failed', e); }
 }
-function isInWatchlist(code) {
-  return getWatchlist().some(i => i.code === code);
-}
 function toggleWatchlist(code, name) {
   let list = getWatchlist();
-  const idx = list.findIndex(i => i.code === code);
+  // 같은 code 라도 다른 시장이면 별도 엔트리 (예: AAPL vs 가상의 KR 코드)
+  const idx = list.findIndex(i => i.code === code && (i.market || 'kr') === APP.market);
   const added = idx < 0;
-  if (added) list.push({ code, name, addedAt: new Date().toISOString() });
-  else       list.splice(idx, 1);
+  if (added) list.push({
+    code, name,
+    market:  APP.market,
+    addedAt: new Date().toISOString(),
+  });
+  else list.splice(idx, 1);
   _saveWatchlist(list);
   updateWatchlistBadge();
-  console.log('[watchlist]', added ? '+' : '-', code, name, 'total=', list.length);
+  console.log('[watchlist]', added ? '+' : '-', code, name, APP.market, 'total=', list.length);
   return added;
+}
+function isInWatchlist(code) {
+  return getWatchlist().some(i => i.code === code && (i.market || 'kr') === APP.market);
 }
 function updateWatchlistBadge() {
   const el = document.getElementById('sidebar-watchlist-badge');
@@ -1979,7 +2058,10 @@ async function openChartPanel(code, hintName) {
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  const fetchUrl = `/api/chart/${code}`;
+  // Phase 14: 시장별 엔드포인트
+  const fetchUrl = APP.market === 'us'
+    ? `/api/us/chart/${code}`
+    : `/api/chart/${code}`;
   console.log('[openChartPanel] 🌐 fetch', fetchUrl);
 
   let data;
@@ -2058,9 +2140,9 @@ async function openChartPanel(code, hintName) {
           <span class="chart-title">${displayName} (${safeCode})</span>
         </div>
         <div class="chart-live-price" id="chart-live-price">
-          <span class="live-price-value">₩${curPrice.toLocaleString()}</span>
+          <span class="live-price-value">${_fmtPrice(curPrice)}</span>
           <span class="live-price-change" style="color:${dayCol}">
-            ${daySign}${dayChg.toLocaleString()} (${daySign}${dayChgPct.toFixed(2)}%)
+            ${daySign}${dayChg.toLocaleString(APP.market === 'us' ? 'en-US' : 'ko-KR', { maximumFractionDigits: 2 })} (${daySign}${dayChgPct.toFixed(2)}%)
           </span>
           <span class="live-price-time" id="chart-price-time">기준: ${_escHtml(lastDate)}</span>
         </div>
@@ -2070,6 +2152,7 @@ async function openChartPanel(code, hintName) {
 
     <!-- Phase 13: 봉 타입 + Phase 12-1: 기간 + 12-3: 오버레이 토글 -->
     <div class="chart-controls-row">
+      ${APP.market === 'us' ? '' : `
       <div class="chart-type-bar" id="chart-type-bar">
         <button class="chart-type-btn" data-type="1">1분</button>
         <button class="chart-type-btn" data-type="5">5분</button>
@@ -2078,7 +2161,7 @@ async function openChartPanel(code, hintName) {
         <button class="chart-type-btn" data-type="60">60분</button>
         <button class="chart-type-btn active" data-type="day">일봉</button>
       </div>
-      <span class="chart-divider">|</span>
+      <span class="chart-divider">|</span>`}
       <div class="chart-period-bar" id="chart-period-bar-daily">
         <button class="chart-period-btn" data-days="30">1M</button>
         <button class="chart-period-btn" data-days="90">3M</button>
@@ -2092,9 +2175,10 @@ async function openChartPanel(code, hintName) {
         <button class="chart-period-btn" data-idays="5">5일</button>
         <button class="chart-period-btn" data-idays="10">10일</button>
       </div>
+      ${APP.market === 'us' ? '' : `
       <div class="chart-overlay-toggles">
         <button class="overlay-toggle" id="toggle-flow">수급 OFF</button>
-      </div>
+      </div>`}
     </div>
 
     <div class="chart-canvas-wrap chart-cv-wrap">
@@ -2119,10 +2203,10 @@ async function openChartPanel(code, hintName) {
     </div>
 
     <div class="chart-tab-bar" id="chart-tab-bar">
-      <button class="chart-tab-btn active" data-ctab="analysis">기술적 분석</button>
-      <button class="chart-tab-btn"        data-ctab="reports">리포트</button>
-      <button class="chart-tab-btn"        data-ctab="news">뉴스</button>
-      <button class="chart-tab-btn"        data-ctab="financial">재무</button>
+      <button class="chart-tab-btn active" data-ctab="analysis">${APP.market === 'us' ? 'Analysis' : '기술적 분석'}</button>
+      ${APP.market === 'us' ? '' : '<button class="chart-tab-btn" data-ctab="reports">리포트</button>'}
+      <button class="chart-tab-btn"        data-ctab="news">${APP.market === 'us' ? 'News' : '뉴스'}</button>
+      <button class="chart-tab-btn"        data-ctab="financial">${APP.market === 'us' ? 'Financial' : '재무'}</button>
     </div>
     <div id="chart-tab-content"></div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
@@ -2149,10 +2233,12 @@ async function openChartPanel(code, hintName) {
   CHART_STATE.intradayDays = 1;
 
   document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
-  document.getElementById('chart-type-bar').addEventListener('click', _chartTypeClick);
+  const typeBar = document.getElementById('chart-type-bar');
+  if (typeBar) typeBar.addEventListener('click', _chartTypeClick);
   document.getElementById('chart-period-bar-daily').addEventListener('click', _chartPeriodClick);
   document.getElementById('chart-period-bar-intraday').addEventListener('click', _chartIntradayPeriodClick);
-  document.getElementById('toggle-flow').addEventListener('click', _toggleFlowOverlay);
+  const flowBtn = document.getElementById('toggle-flow');
+  if (flowBtn) flowBtn.addEventListener('click', _toggleFlowOverlay);
 
   _setupCrosshair(data, W, HC, HV);
   _startChartPricePolling(code);
@@ -2172,7 +2258,8 @@ async function _chartPeriodClick(e) {
   });
 
   try {
-    const r = await fetch(`/api/chart/${code}?days=${days}`, { cache: 'no-store' });
+    const base = APP.market === 'us' ? '/api/us/chart' : '/api/chart';
+    const r = await fetch(`${base}/${code}?days=${days}`, { cache: 'no-store' });
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
     if (CHART_STATE.code !== code) return;
@@ -2239,7 +2326,8 @@ async function _loadDailyForCurrent() {
   if (!code) return;
   const days = CHART_STATE.days || 180;
   try {
-    const r = await fetch(`/api/chart/${code}?days=${days}`, { cache: 'no-store' });
+    const base = APP.market === 'us' ? '/api/us/chart' : '/api/chart';
+    const r = await fetch(`${base}/${code}?days=${days}`, { cache: 'no-store' });
     const d = await r.json();
     if (CHART_STATE.code !== code) return;
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
@@ -2400,7 +2488,8 @@ function _chartTabClick(e) {
 async function _loadNews(code, container) {
   container.innerHTML = '<div class="chart-loading"><div class="spin"></div>뉴스 로딩 중…</div>';
   try {
-    const r = await fetch(`/api/news/${code}`);
+    const base = APP.market === 'us' ? '/api/us/news' : '/api/news';
+    const r = await fetch(`${base}/${code}`);
     const d = await r.json();
     if (CHART_STATE.tab !== 'news' || CHART_STATE.code !== code) return;
     if (!r.ok || d.error) {
@@ -2415,18 +2504,32 @@ async function _loadNews(code, container) {
       container.innerHTML = '<div class="chart-empty">관련 뉴스가 없습니다.</div>';
       return;
     }
-    const rows = d.items.map(it => `
-      <a class="news-item" href="${it.link}" target="_blank" rel="noopener">
-        <div class="news-title">${it.title}</div>
-        <div class="news-desc">${it.description}</div>
-        <div class="news-meta">
-          <span class="news-source">${it.source}</span>
-          <span class="news-time">${it.timeAgo}</span>
+    // US 뉴스는 description 이 없고 thumbnail 이 있음. KR 뉴스는 그 반대.
+    const rows = d.items.map(it => {
+      const thumb = it.thumbnail
+        ? `<img class="news-thumb" src="${_escHtml(it.thumbnail)}" alt="" loading="lazy">`
+        : '';
+      const desc = it.description
+        ? `<div class="news-desc">${_escHtml(it.description)}</div>`
+        : '';
+      return `<a class="news-item" href="${_escHtml(it.link)}" target="_blank" rel="noopener">
+        <div class="news-item-row">
+          ${thumb}
+          <div class="news-item-content">
+            <div class="news-title">${_escHtml(it.title)}</div>
+            ${desc}
+            <div class="news-meta">
+              <span class="news-source">${_escHtml(it.source || '')}</span>
+              <span class="news-time">${_escHtml(it.timeAgo || '')}</span>
+            </div>
+          </div>
         </div>
-      </a>`).join('');
+      </a>`;
+    }).join('');
+    const headerName = d.name || d.symbol || code;
     container.innerHTML = `
       <div class="news-list">
-        <div class="news-header">${d.name} 관련 뉴스 (${d.count}건)</div>
+        <div class="news-header">${_escHtml(headerName)} ${APP.market === 'us' ? 'News' : '관련 뉴스'} (${d.count}건)</div>
         ${rows}
       </div>`;
   } catch (err) {
@@ -2531,7 +2634,8 @@ async function _loadReports(code, container) {
 async function _loadFinancial(code, container) {
   container.innerHTML = '<div class="chart-loading"><div class="spin"></div>재무 데이터 로딩 중…</div>';
   try {
-    const r = await fetch(`/api/financial/${code}`);
+    const base = APP.market === 'us' ? '/api/us/financial' : '/api/financial';
+    const r = await fetch(`${base}/${code}`);
     const d = await r.json();
     if (CHART_STATE.tab !== 'financial' || CHART_STATE.code !== code) return;
     if (!r.ok || d.error) {
@@ -2544,19 +2648,31 @@ async function _loadFinancial(code, container) {
     const fmt = (v, suf) => v == null ? '—' : (Math.round(v * 100) / 100).toLocaleString() + (suf || '');
     const fmtBign = (v) => {
       if (v == null) return '—';
-      // 입력 단위: 억원
       if (Math.abs(v) >= 10000) return (v / 10000).toFixed(1) + '조';
       return v.toLocaleString() + '억';
     };
 
-    const cards = [
-      { label: 'PER',         value: fmt(d.per, '배'),         desc: d.eps != null ? `EPS ${d.eps.toLocaleString()}원` : '주가수익비율' },
-      { label: '추정 PER',    value: fmt(d.estimate_per, '배'), desc: d.estimate_eps != null ? `추정 EPS ${d.estimate_eps.toLocaleString()}원` : '컨센서스 추정' },
-      { label: 'PBR',         value: fmt(d.pbr, '배'),         desc: d.bps != null ? `BPS ${d.bps.toLocaleString()}원` : '주가순자산비율' },
-      { label: '동일업종 PER', value: fmt(d.industry_per, '배'), desc: '업종 평균 비교' },
-      { label: '시가총액',    value: d.market_cap || '—',      desc: d.market_cap_rank || '' },
-      { label: '배당수익률',  value: fmt(d.dividend_yield, '%'), desc: '연 환산 시가배당률' },
-    ];
+    // Phase 14: 시장별 다른 카드 구성
+    let cards;
+    if (APP.market === 'us') {
+      cards = [
+        { label: 'PER',         value: fmt(d.per, 'x'),         desc: d.forward_per != null ? `Forward ${d.forward_per.toFixed(1)}x` : 'Trailing P/E' },
+        { label: 'PBR',         value: fmt(d.pbr, 'x'),         desc: 'Price / Book' },
+        { label: 'ROE',         value: fmt(d.roe, '%'),         desc: d.profit_margin != null ? `Margin ${d.profit_margin}%` : '' },
+        { label: 'Market Cap',  value: d.market_cap_str || '—', desc: d.sector || '' },
+        { label: '52W Range',   value: (d.w52_low != null && d.w52_high != null) ? `$${d.w52_low}–$${d.w52_high}` : '—', desc: d.beta != null ? `β ${d.beta.toFixed(2)}` : '' },
+        { label: 'Analyst Tgt', value: d.target_price != null ? `$${Number(d.target_price).toFixed(2)}` : '—', desc: (d.recommendation || '').toUpperCase() },
+      ];
+    } else {
+      cards = [
+        { label: 'PER',         value: fmt(d.per, '배'),         desc: d.eps != null ? `EPS ${d.eps.toLocaleString()}원` : '주가수익비율' },
+        { label: '추정 PER',    value: fmt(d.estimate_per, '배'), desc: d.estimate_eps != null ? `추정 EPS ${d.estimate_eps.toLocaleString()}원` : '컨센서스 추정' },
+        { label: 'PBR',         value: fmt(d.pbr, '배'),         desc: d.bps != null ? `BPS ${d.bps.toLocaleString()}원` : '주가순자산비율' },
+        { label: '동일업종 PER', value: fmt(d.industry_per, '배'), desc: '업종 평균 비교' },
+        { label: '시가총액',    value: d.market_cap || '—',      desc: d.market_cap_rank || '' },
+        { label: '배당수익률',  value: fmt(d.dividend_yield, '%'), desc: '연 환산 시가배당률' },
+      ];
+    }
 
     const cardHTML = cards.map(c => `
       <div class="financial-card">
@@ -2566,7 +2682,7 @@ async function _loadFinancial(code, container) {
       </div>`).join('');
 
     let annualHTML = '';
-    if (d.annual && d.annual.length) {
+    if (APP.market !== 'us' && d.annual && d.annual.length) {
       const headers = d.annual.map(a => `<th class="r">${_escHtml(a.period)}</th>`).join('');
       const rev    = d.annual.map(a => `<td class="r">${fmtBign(a.revenue)}</td>`).join('');
       const op     = d.annual.map(a => `<td class="r">${fmtBign(a.op_profit)}</td>`).join('');
@@ -2585,11 +2701,14 @@ async function _loadFinancial(code, container) {
         </table>`;
     }
 
+    const sourceText = APP.market === 'us'
+      ? 'Source: Yahoo Finance (24h cache)'
+      : '출처: 네이버 금융 (24시간 캐시)';
     container.innerHTML = `
       <div class="financial-wrap">
         <div class="financial-grid">${cardHTML}</div>
         ${annualHTML}
-        <div class="financial-source">출처: 네이버 금융 (24시간 캐시)</div>
+        <div class="financial-source">${sourceText}</div>
       </div>`;
   } catch (err) {
     container.innerHTML = `<div class="chart-empty">로드 실패: ${_escHtml(err.message)}</div>`;
@@ -2778,7 +2897,8 @@ function _stopChartPricePolling() {
 
 async function _fetchAndApplyLivePrice(code) {
   try {
-    const r = await fetch(`/api/price/${code}`, { cache: 'no-store' });
+    const base = APP.market === 'us' ? '/api/us/price' : '/api/price';
+    const r = await fetch(`${base}/${code}`, { cache: 'no-store' });
     if (!r.ok) return;
     const p = await r.json();
     if (p.error || p.price == null) return;
@@ -2791,7 +2911,7 @@ async function _fetchAndApplyLivePrice(code) {
     if (!valEl || !chgEl) return;
 
     const prev = parseInt((valEl.textContent || '').replace(/[^\d]/g, ''), 10) || 0;
-    valEl.textContent = '₩' + Number(p.price).toLocaleString();
+    valEl.textContent = _fmtPrice(p.price);
 
     const chg = p.change != null ? p.change : 0;
     const pct = p.change_pct != null ? p.change_pct : 0;
@@ -3230,7 +3350,7 @@ function _bindCompareSearch(inputId, ddId, slot) {
     if (q.length < 2) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
     timer = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/stock_search?q=${encodeURIComponent(q)}`);
+        const r = await fetch(`${APP.market === "us" ? "/api/us/search" : "/api/stock_search"}?q=${encodeURIComponent(q)}`);
         const res = await r.json();
         if (!res.length) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
         dd.innerHTML = res.map(it =>
@@ -3430,6 +3550,13 @@ document.getElementById('sidebar-settings').addEventListener('click', () => {
   openSettingsModal();
 });
 
+// Phase 14: 시장 전환 토글
+document.getElementById('market-toggle').addEventListener('click', (e) => {
+  const btn = e.target.closest('.market-btn');
+  if (!btn) return;
+  switchMarket(btn.dataset.market);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WATCHLIST PAGE (Phase 12-2)  —  localStorage 기반, 사이드바에서 진입
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3445,16 +3572,18 @@ function _findStockInThemes(code) {
 
 async function renderWatchlistPage() {
   const root = document.getElementById('watchlist-view');
-  const list = getWatchlist();
+  // Phase 14: 현재 시장의 관심종목만 표시
+  const list = getWatchlist().filter(i => (i.market || 'kr') === APP.market);
 
   if (!list.length) {
+    const isUS = APP.market === 'us';
     root.innerHTML = `
       <div class="pg-wrap">
-        <div class="pg-title">관심종목</div>
-        <div class="pg-sub">자주 보는 종목을 모아보세요</div>
+        <div class="pg-title">${isUS ? 'Watchlist' : '관심종목'}</div>
+        <div class="pg-sub">${isUS ? 'Your favorite US stocks' : '자주 보는 종목을 모아보세요'}</div>
         <div class="pg-empty">
-          <div class="pg-empty-title">관심종목이 없습니다</div>
-          종목 카드의 ☆ 버튼을 눌러 추가하세요.
+          <div class="pg-empty-title">${isUS ? 'No watchlist items' : '관심종목이 없습니다'}</div>
+          ${isUS ? 'Click the ☆ button on any stock card to add it.' : '종목 카드의 ☆ 버튼을 눌러 추가하세요.'}
         </div>
       </div>`;
     return;
@@ -3603,7 +3732,8 @@ async function _scrFetch() {
   results.innerHTML = '<div class="pg-empty">조회 중…</div>';
 
   try {
-    const r = await fetch(`/api/screener?${params}`);
+    const base = APP.market === 'us' ? '/api/us/screener' : '/api/screener';
+    const r = await fetch(`${base}?${params}`);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
 
@@ -3756,7 +3886,7 @@ function _bindFlowSearch() {
     if (q.length < 2) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
     timer = setTimeout(async () => {
       try {
-        const r   = await fetch(`/api/stock_search?q=${encodeURIComponent(q)}`);
+        const r   = await fetch(`${APP.market === "us" ? "/api/us/search" : "/api/stock_search"}?q=${encodeURIComponent(q)}`);
         const res = await r.json();
         if (!res.length) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
         dd.innerHTML = res.map(it =>
@@ -4037,16 +4167,30 @@ async function _shortFetch() {
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTOR MAP PAGE (Phase 10) — Naver KRX 업종 실시간 스크랩
 // ─────────────────────────────────────────────────────────────────────────────
-const SECTOR_STATE = { sectors: null, selected: null };
+const SECTOR_STATE = { sectors: null, selected: null, market: 'kr' };
 
 async function renderSectorPage() {
   const root = document.getElementById('sector-view');
+  const isUS = APP.market === 'us';
+
+  // 시장 전환 시 캐시 무효화
+  if (SECTOR_STATE.market !== APP.market) {
+    SECTOR_STATE.sectors = null;
+    SECTOR_STATE.selected = null;
+    SECTOR_STATE.market = APP.market;
+    root.dataset.built = '';
+  }
+
   if (!root.dataset.built) {
     root.dataset.built = '1';
+    const title = isUS ? 'S&P 500 Sector Map' : '업종별 히트맵';
+    const sub   = isUS
+      ? 'GICS 11 sectors · yfinance · 박스 크기 = 소속 종목수 · 색 = 섹터 가중평균 등락률'
+      : 'KRX 79 업종 · 네이버 금융 실시간 · 박스 크기 = 소속 종목수 · 색 = 등락률';
     root.innerHTML = `
       <div class="pg-wrap">
-        <div class="pg-title">업종별 히트맵</div>
-        <div class="pg-sub">KRX 79 업종 · 네이버 금융 실시간 · 박스 크기 = 소속 종목수 · 색 = 등락률</div>
+        <div class="pg-title">${title}</div>
+        <div class="pg-sub">${sub}</div>
         <div id="sector-canvas"
              style="background:var(--surface2);border-radius:10px;padding:6px;min-height:520px;">
           <svg id="sector-svg"></svg>
@@ -4055,26 +4199,45 @@ async function renderSectorPage() {
       </div>`;
   }
 
-  const svg = document.getElementById('sector-svg');
   if (!SECTOR_STATE.sectors) {
-    svg.outerHTML = '<svg id="sector-svg"></svg>';
     document.getElementById('sector-members').innerHTML =
-      '<div class="pg-empty">업종 데이터 로딩 중…</div>';
+      isUS ? '<div class="pg-empty">S&P 500 섹터 데이터 로딩 중… (최초 부팅 후 약 3분 소요)</div>'
+           : '<div class="pg-empty">업종 데이터 로딩 중…</div>';
     try {
-      const r = await fetch('/api/sectors');
+      const url = isUS ? '/api/us/market' : '/api/sectors';
+      const r = await fetch(url);
       const d = await r.json();
+      if (r.status === 202 && d.building) {
+        document.getElementById('sector-members').innerHTML =
+          `<div class="pg-empty"><div class="pg-empty-title">S&P 500 데이터 빌드 중</div>${_escHtml(d.message)}<br><br><span style="color:var(--text-sub)">잠시 후 이 페이지를 다시 열어주세요.</span></div>`;
+        return;
+      }
       if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
-      SECTOR_STATE.sectors = d.sectors || [];
+
+      if (isUS) {
+        // US: /api/us/market 의 sectors 를 트리맵용으로 매핑
+        SECTOR_STATE.sectors = (d.sectors || []).map(s => ({
+          name:       s.name,
+          total:      s.stock_count,
+          change_pct: s.weighted_avg_pct,
+          stocks:     s.stocks,   // members 를 같이 끌고감 (클릭 시 재요청 불필요)
+          up:   s.stocks.filter(x => x.change_pct > 0).length,
+          flat: s.stocks.filter(x => x.change_pct === 0).length,
+          down: s.stocks.filter(x => x.change_pct < 0).length,
+        }));
+      } else {
+        SECTOR_STATE.sectors = d.sectors || [];
+      }
     } catch (err) {
       document.getElementById('sector-members').innerHTML =
-        `<div class="pg-empty"><div class="pg-empty-title">업종 데이터 로딩 실패</div>${err.message}</div>`;
+        `<div class="pg-empty"><div class="pg-empty-title">섹터 데이터 로딩 실패</div>${_escHtml(err.message)}</div>`;
       return;
     }
   }
   _drawSectorTreemap(SECTOR_STATE.sectors);
   if (!SECTOR_STATE.selected) {
     document.getElementById('sector-members').innerHTML =
-      '<div class="pg-empty" style="padding:16px;">업종 박스를 클릭하면 소속 종목이 표시됩니다.</div>';
+      `<div class="pg-empty" style="padding:16px;">${isUS ? 'Click a sector to see its constituents.' : '업종 박스를 클릭하면 소속 종목이 표시됩니다.'}</div>`;
   }
 }
 
@@ -4133,11 +4296,24 @@ async function _selectSector(sector) {
   box.innerHTML = `<div class="pg-empty">${_escHtml(sector.name)} 소속 종목 로딩 중…</div>`;
 
   try {
-    const r = await fetch(`/api/sector/${sector.no}`);
-    const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
-    if (SECTOR_STATE.selected !== sector) return;   // stale 클릭 버림
-    _renderSectorMembers(sector, d.stocks || []);
+    let stocks;
+    if (APP.market === 'us') {
+      // US 는 이미 랜딩 fetch 에서 members 를 함께 가져와 sector.stocks 에 박혀 있음.
+      stocks = (sector.stocks || []).map(s => ({
+        code:       s.symbol,
+        name:       s.name,
+        close:      s.price,
+        change_pct: s.change_pct,
+        volume_mn:  s.volume_mn,
+      }));
+    } else {
+      const r = await fetch(`/api/sector/${sector.no}`);
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+      if (SECTOR_STATE.selected !== sector) return;
+      stocks = d.stocks || [];
+    }
+    _renderSectorMembers(sector, stocks);
   } catch (err) {
     box.innerHTML = `<div class="pg-empty"><div class="pg-empty-title">로드 실패</div>${err.message}</div>`;
   }
@@ -4149,22 +4325,32 @@ function _renderSectorMembers(sector, stocks) {
     box.innerHTML = '<div class="pg-empty">소속 종목이 없습니다.</div>';
     return;
   }
+  const isUS = APP.market === 'us';
   const rows = stocks.map((s, i) => {
     const sc = _escHtml(s.code);
     const sn = _escHtml(s.name);
     const col = s.change_pct > 0 ? '#FF3333' : s.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
     const sign = s.change_pct > 0 ? '+' : '';
+    const priceStr = isUS
+      ? '$' + Number(s.close || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : (s.close || 0).toLocaleString();
+    const volStr = isUS
+      ? '$' + (s.volume_mn || 0).toLocaleString('en-US', { maximumFractionDigits: 0 }) + 'M'
+      : (s.volume_mn || 0).toLocaleString() + 'M';
     return `<tr data-code="${sc}" data-name="${sn}">
       <td><span class="rank">${i + 1}</span></td>
       <td style="color:var(--text-muted);font-size:11px">${sc}</td>
       <td style="font-weight:600">${sn}</td>
-      <td class="r">${(s.close || 0).toLocaleString()}</td>
+      <td class="r">${priceStr}</td>
       <td class="r" style="color:${col};font-weight:700">${sign}${(s.change_pct || 0).toFixed(2)}%</td>
-      <td class="r" style="color:var(--text-sub)">${(s.volume_mn || 0).toLocaleString()}M</td>
+      <td class="r" style="color:var(--text-sub)">${volStr}</td>
     </tr>`;
   }).join('');
 
   const headColor = sector.change_pct > 0 ? '#FF3333' : sector.change_pct < 0 ? '#33AA33' : 'var(--text-muted)';
+  const breakdown = (sector.up != null)
+    ? `${stocks.length}${isUS ? ' stocks' : '종목'} · ${isUS ? 'up' : '상승'} ${sector.up} / ${isUS ? 'flat' : '보합'} ${sector.flat} / ${isUS ? 'down' : '하락'} ${sector.down}`
+    : `${stocks.length}${isUS ? ' stocks' : '종목'}`;
   box.innerHTML = `
     <div class="pg-wrap" style="margin-top:0;">
       <div class="pg-title" style="font-size:16px;">
@@ -4172,14 +4358,12 @@ function _renderSectorMembers(sector, stocks) {
         <span style="color:${headColor};font-size:14px;margin-left:12px">
           ${sector.change_pct > 0 ? '+' : ''}${(sector.change_pct || 0).toFixed(2)}%
         </span>
-        <span style="color:var(--text-muted);font-size:12px;margin-left:8px">
-          ${stocks.length}종목 · 상승 ${sector.up} / 보합 ${sector.flat} / 하락 ${sector.down}
-        </span>
+        <span style="color:var(--text-muted);font-size:12px;margin-left:8px">${breakdown}</span>
       </div>
       <table class="pg-table">
         <thead><tr>
-          <th style="width:42px">#</th><th>코드</th><th>종목명</th>
-          <th class="r">현재가</th><th class="r">등락률</th><th class="r">거래대금</th>
+          <th style="width:42px">#</th><th>${isUS ? 'Symbol' : '코드'}</th><th>${isUS ? 'Name' : '종목명'}</th>
+          <th class="r">${isUS ? 'Price' : '현재가'}</th><th class="r">${isUS ? 'Change' : '등락률'}</th><th class="r">${isUS ? 'Volume' : '거래대금'}</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -4335,7 +4519,7 @@ document.getElementById('mt-list').addEventListener('input', e => {
 
   inp._timer = setTimeout(async () => {
     try {
-      const r   = await fetch(`/api/stock_search?q=${encodeURIComponent(q)}`);
+      const r   = await fetch(`${APP.market === "us" ? "/api/us/search" : "/api/stock_search"}?q=${encodeURIComponent(q)}`);
       const res = await r.json();
       if (!res.length) { dd.innerHTML = ''; dd.style.display = 'none'; return; }
       dd.innerHTML = res.map(item =>
