@@ -789,133 +789,18 @@ def _crawl_naver_research(code: str) -> list[dict]:
     return out
 
 
-def _tabula_extract_financial_tables(pdf_bytes: bytes) -> list[dict]:
+def _extract_report_html(report_info: dict) -> dict:
     """
-    tabula-py 로 PDF 앞 3페이지에서 '매출/영업이익/순이익/EPS' 키워드가 포함된
-    행을 뽑아 연도별(또는 분기별) 구조화된 테이블로 반환.
+    네이버 금융 리서치 *상세 페이지* (company_read.naver?nid=XXX) 를 BeautifulSoup
+    으로 직접 파싱해 목표주가/투자의견/본문 요약을 추출.
+    PDF 다운로드/PyPDF2 사용 안 함.
 
-    Returns:
-      [{
-        "headers":  ["1Q25","2Q25","3Q25",...,"2025P","2026E","2027E"],
-        "rows":    [
-          {"label": "매출액", "values": ["79,141","74,566",...]},
-          {"label": "영업이익", "values": [...]},
-          ...
-        ]
-      }]
-      (여러 서로 다른 테이블이 있을 수 있어 list 로 반환)
-
-    Java 미설치 / tabula 미설치 / 파싱 실패 시 빈 리스트 반환 (graceful).
+    응답 스키마는 기존 _extract_report_pdf 와 동일하게 유지 (프론트 무수정).
+    PDF 파싱이 사라졌으므로 financial_tables 는 항상 [], current_price 도 None.
     """
-    try:
-        import tabula
-    except ImportError:
-        return []
-
-    # 로컬 dev 에서 brew openjdk 가 PATH 에 없을 수 있어 선제적으로 추가
-    import os as _os
-    brew_openjdk = "/opt/homebrew/opt/openjdk/bin"
-    if _os.path.exists(brew_openjdk) and brew_openjdk not in _os.environ.get("PATH", ""):
-        _os.environ["PATH"] = brew_openjdk + ":" + _os.environ.get("PATH", "")
-
-    import tempfile
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-            tf.write(pdf_bytes)
-            tmp_path = tf.name
-        dfs = tabula.read_pdf(
-            tmp_path,
-            pages="1-3",
-            stream=True,
-            multiple_tables=True,
-            pandas_options={"dtype": str},
-        )
-    except Exception as exc:
-        print(f"[tabula] read_pdf 실패: {exc!r}")
-        return []
-    finally:
-        if tmp_path:
-            try:
-                import os as _os2; _os2.unlink(tmp_path)
-            except Exception:
-                pass
-
-    if not dfs:
-        return []
-
-    import re as _re
-    # "2025","1Q25","2026E","FY25","2024.12","24.12(E)" 등 연/분기 헤더로 보이는 셀 탐지
-    HDR_PAT = _re.compile(r"^\s*(?:\d{4}|\d{1,2}[A-Z0-9\.]{1,6})[A-Z()P]*\s*$", _re.IGNORECASE)
-    KEYWORDS = ["매출", "영업이익", "순이익", "EPS", "DRAM"]   # DRAM 행은 섹터 예시용
-
-    out: list[dict] = []
-    for df in dfs:
-        if df is None or df.empty or df.shape[1] < 2:
-            continue
-        # 헤더 후보: DataFrame 컬럼명 자체가 연/분기 형태인 경우
-        col_headers = [str(c) for c in df.columns]
-        header_cols = [
-            c for c in col_headers
-            if c and not c.startswith("Unnamed") and HDR_PAT.match(c.strip())
-        ]
-        # 또는 첫 행이 헤더인 경우 (tabula 가 헤더를 데이터로 잡아놓음)
-        header_from_row0: list[str] | None = None
-        if len(header_cols) < 2 and len(df) > 0:
-            row0 = [str(v).strip() if v is not None else "" for v in df.iloc[0].tolist()]
-            hdr_hits = [v for v in row0 if HDR_PAT.match(v)]
-            if len(hdr_hits) >= 2:
-                header_from_row0 = row0
-
-        # 라벨/값 후보 행 추출
-        rows: list[dict] = []
-        data_iter = df.iloc[1:].iterrows() if header_from_row0 else df.iterrows()
-        for _, row in data_iter:
-            cells = [("" if v is None else str(v).strip()) for v in row.tolist()]
-            # 라벨은 보통 맨 앞 non-empty 셀
-            label = None
-            value_start = 0
-            for j, c in enumerate(cells):
-                if c:
-                    label = c
-                    value_start = j + 1
-                    break
-            if not label:
-                continue
-            if not any(k in label for k in KEYWORDS):
-                continue
-            values = [c for c in cells[value_start:] if c]
-            # 최소 2개 이상의 숫자형 값이 있어야 의미 있는 재무 행
-            numeric_ct = sum(1 for v in values if _re.fullmatch(r"[-+]?[\d,\.]+", v))
-            if numeric_ct < 2:
-                continue
-            rows.append({"label": label, "values": values})
-
-        if not rows:
-            continue
-
-        headers = header_from_row0 or header_cols
-        # 헤더가 없으면 값 길이에 맞춰 가짜 컬럼 이름 생성
-        if not headers:
-            max_len = max(len(r["values"]) for r in rows)
-            headers = [f"col{i+1}" for i in range(max_len)]
-
-        # 헤더/값 길이 정규화
-        max_cols = max(len(headers), max(len(r["values"]) for r in rows))
-        headers = (headers + [""] * max_cols)[:max_cols]
-        for r in rows:
-            r["values"] = (r["values"] + [""] * max_cols)[:max_cols]
-
-        out.append({"headers": headers, "rows": rows})
-
-    return out
-
-
-def _extract_report_pdf(report_info: dict) -> dict:
-    """리포트 PDF 텍스트 추출 + 정규식 규칙 기반 핵심 수치 추출 + tabula 재무 테이블."""
     import re as _re
     import requests as _rq
-    from io import BytesIO
+    from bs4 import BeautifulSoup
 
     result = {
         "title":            report_info.get("title", ""),
@@ -931,137 +816,123 @@ def _extract_report_pdf(report_info: dict) -> dict:
         "op_estimate":      None,
         "eps_estimate":     None,
         "financial_tables": [],
+        "summary":          "",
     }
-    pdf_url = result["pdf_url"]
-    if not pdf_url:
+
+    detail_link = (report_info.get("detail_link") or "").strip()
+    if not detail_link:
         return result
+
+    # nid 추출 → 정규 URL 재구성 (detail_link 가 상대경로/쿼리 변형 어느 쪽이든 안전)
+    m = _re.search(r"nid=(\d+)", detail_link)
+    if not m:
+        return result
+    nid = m.group(1)
 
     try:
-        pdf_res = _rq.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if pdf_res.status_code != 200:
-            return result
-        pdf_bytes = pdf_res.content
-        from PyPDF2 import PdfReader
-        reader = PdfReader(BytesIO(pdf_bytes))
-        text = ""
-        for i, page in enumerate(reader.pages):
-            if i >= 3:
-                break
-            t = page.extract_text() or ""
-            text += t + "\n"
+        res = _rq.get(
+            "https://finance.naver.com/research/company_read.naver",
+            params={"nid": nid},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        res.encoding = "euc-kr"
+        soup = BeautifulSoup(res.text, "html.parser")
     except Exception as exc:
-        print(f"[리포트 PDF 추출 실패] {report_info.get('title','')}: {exc}")
+        print(f"[리포트 상세 요청 실패] nid={nid}: {exc}")
         return result
 
-    # tabula 테이블 추출 (Java 없으면 빈 리스트, 나머지 처리는 계속)
-    try:
-        result["financial_tables"] = _tabula_extract_financial_tables(pdf_bytes)
-    except Exception as exc:
-        print(f"[tabula 추출 실패] {report_info.get('title','')}: {exc}")
-
-    if not text:
+    table = soup.select_one("table.type_1")
+    if table is None:
         return result
 
-    # ── 목표주가 ──
-    for pat in (
-        r"목표주가[:\s]*([0-9,]+)\s*원",
-        r"목표가[:\s]*([0-9,]+)\s*원",
-        r"Target\s*Price[:\s]*([0-9,]+)",
-        r"TP[:\s]*([0-9,]+)\s*원",
-        r"목표주가\s*\(원\)[:\s]*([0-9,]+)",
-        r"([0-9,]+)\s*원\s*\(목표주가\)",
-    ):
-        m = _re.search(pat, text)
-        if m:
-            try:
-                result["target_price"] = int(m.group(1).replace(",", ""))
-                break
-            except ValueError:
-                continue
+    # ── 헤더 셀 (th.view_sbj): 종목명·제목·증권사·날짜·조회수가 한 줄로 ──
+    sbj = table.select_one("th.view_sbj")
+    if sbj:
+        # 종목명 em 은 list 페이지에 이미 있으므로 무시. 나머지 텍스트를 ' | ' 로 분할해
+        # title / broker / date 를 보강. list 페이지에서 받은 값이 비어있을 때만 채움.
+        full_txt = " ".join(sbj.get_text(" ", strip=True).split())
+        # '삼성전자 심각한 숏티지, ... 한화투자증권 | 2026.04.08 | 조회 25559'
+        parts = [p.strip() for p in full_txt.split("|")]
+        # parts[0] = '종목명 제목 ... 증권사', parts[1] = 날짜, parts[2] = 조회
+        if len(parts) >= 2 and not result["date"]:
+            result["date"] = parts[1]
+        if parts and not result["broker"]:
+            # 종목명 em 텍스트 제거 → 제목 + 증권사
+            stock_em = sbj.select_one("em")
+            stock_name = stock_em.get_text(strip=True) if stock_em else ""
+            head = parts[0]
+            if stock_name and head.startswith(stock_name):
+                head = head[len(stock_name):].strip()
+            # 마지막 단어를 증권사로 가정 (정확하진 않지만 list 가 비었을 때만 fallback)
+            tokens = head.rsplit(" ", 1)
+            if len(tokens) == 2:
+                if not result["title"]:
+                    result["title"] = tokens[0]
+                result["broker"] = tokens[1]
 
-    # ── 투자의견 ──
-    opinion_map = {
-        "buy": "매수", "strong buy": "매수", "outperform": "매수", "비중확대": "매수",
-        "trading buy": "Trading Buy",
-        "neutral": "중립", "hold": "중립", "시장수익률": "중립",
-        "sell": "매도",  "underperform": "매도",  "비중축소": "매도",
-        "매수": "매수", "중립": "중립", "매도": "매도",
-    }
-    for pat in (
-        r"투자의견[:\s]*(매수|Buy|Strong Buy|Outperform|비중확대|중립|Neutral|Hold|시장수익률|매도|Sell|Underperform|비중축소|Trading Buy|Not Rated)",
-        r"Rating[:\s]*(Buy|Strong Buy|Outperform|Neutral|Hold|Sell|Underperform)",
-        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(유지\)",
-        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(상향\)",
-        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(하향\)",
-        r"(매수|중립|매도|비중확대|비중축소|Trading Buy)\s*\(신규\)",
-    ):
-        m = _re.search(pat, text, _re.IGNORECASE)
-        if m:
-            raw = m.group(1).strip()
+    # ── 목표가/투자의견 셀: <em class="money"><strong> + <em class="coment"> ──
+    money_strong = table.select_one('em.money strong, td em.money strong')
+    if money_strong:
+        try:
+            result["target_price"] = int(money_strong.get_text(strip=True).replace(",", ""))
+        except ValueError:
+            pass
+
+    coment = table.select_one('em.coment')
+    if coment:
+        opinion_map = {
+            "buy": "매수", "strong buy": "매수", "outperform": "매수", "비중확대": "매수",
+            "trading buy": "Trading Buy",
+            "neutral": "중립", "hold": "중립", "시장수익률": "중립",
+            "sell": "매도", "underperform": "매도", "비중축소": "매도",
+            "매수": "매수", "중립": "중립", "매도": "매도",
+            "not rated": "Not Rated",
+        }
+        raw = coment.get_text(strip=True)
+        # 의견 없음 / N/A → None 처리
+        if raw and raw not in ("없음", "-", "N/A", "n/a", "NR"):
             result["opinion"] = opinion_map.get(raw.lower(), raw)
-            break
 
-    # ── 상승여력 ──
-    for pat in (
-        r"상승여력[:\s]*([0-9.]+)\s*%",
-        r"Upside[:\s]*([0-9.]+)\s*%",
-        r"괴리율[:\s]*([0-9.]+)\s*%",
-    ):
-        m = _re.search(pat, text)
-        if m:
-            try:
-                result["upside"] = float(m.group(1))
-                break
-            except ValueError:
-                continue
+    # ── 본문 요약 (td.view_cnt) ──
+    view_cnt = table.select_one("td.view_cnt")
+    if view_cnt:
+        # img 노드(다운로드 아이콘)는 빼고 텍스트만 추출
+        for img in view_cnt.find_all("img"):
+            img.decompose()
+        # '리포트원문보기' / 'PDF 다운로드' 등의 버튼 텍스트 제거
+        body = view_cnt.get_text(" ", strip=True)
+        body = " ".join(body.split())
+        # 본문 끝에 종종 붙는 '...2025030587.pdf' 같은 잔여 파일명 제거
+        body = _re.sub(r"\s*\d{6,}\.pdf\s*$", "", body)
+        # '투자 포인트' 머리말 제거
+        body = _re.sub(r"^투자\s*포인트\s*", "", body)
+        result["summary"] = body
 
-    # 목표주가 - 현재가 로 상승여력 역산
-    if result["upside"] is None and result["target_price"]:
-        for pat in (
-            r"현재주가[:\s]*([0-9,]+)\s*원",
-            r"현재가[:\s]*([0-9,]+)\s*원",
-            r"주가[:\s]*([0-9,]+)\s*원",
-        ):
-            m = _re.search(pat, text)
-            if m:
-                try:
-                    cur = int(m.group(1).replace(",", ""))
-                    result["current_price"] = cur
-                    if cur > 0:
-                        result["upside"] = round((result["target_price"] / cur - 1) * 100, 1)
-                    break
-                except ValueError:
-                    continue
-
-    # ── 매출·영업이익·EPS 추정 ──
-    m = _re.search(r"매출(?:액)?[:\s]*([0-9,.]+)\s*(조|억|백만)?", text)
-    if m:
-        result["revenue_estimate"] = m.group(1) + (m.group(2) or "")
-    m = _re.search(r"영업이익[:\s]*([0-9,.]+)\s*(조|억|백만)?", text)
-    if m:
-        result["op_estimate"] = m.group(1) + (m.group(2) or "")
-    m = _re.search(r"(?:EPS|주당순이익)[:\s]*([0-9,]+)\s*원?", text)
-    if m:
-        result["eps_estimate"] = m.group(1) + "원"
-
-    # ── 핵심 포인트 (글머리 기호) ──
-    bullets: list[str] = []
-    for pat in (
-        r"[•·▶►■□○●➜➤\-]\s*(.{15,80})",
-        r"\d\)\s*(.{15,80})",
-        r"\d\.\s*(.{15,80})",
-    ):
-        for m in _re.findall(pat, text):
-            cleaned = m.strip()
-            if len(cleaned) > 15 and _re.search(r"[가-힣]", cleaned):
-                if cleaned not in bullets:
-                    bullets.append(cleaned)
+        # ── 핵심 포인트: 본문을 문장 단위로 쪼개 의미 있는 5개 추출 ──
+        sentences = _re.split(r"(?<=[.!?다요음])\s+(?=[가-힣A-Z0-9])", body)
+        bullets: list[str] = []
+        for s in sentences:
+            s = s.strip()
+            if 15 <= len(s) <= 200 and _re.search(r"[가-힣]", s):
+                bullets.append(s)
             if len(bullets) >= 5:
                 break
-        if len(bullets) >= 5:
-            break
-    result["key_points"] = bullets[:5]
+        result["key_points"] = bullets
+
+        # ── 본문에서 매출/영업이익/EPS 추정 패턴 빠르게 스캔 ──
+        m = _re.search(r"매출액?\s*(?:은|이|는|를|=|:)?\s*([0-9,.]+)\s*(조|억|백만)?", body)
+        if m: result["revenue_estimate"] = m.group(1) + (m.group(2) or "")
+        m = _re.search(r"영업이익\s*(?:은|이|는|를|=|:)?\s*([0-9,.]+)\s*(조|억|백만)?", body)
+        if m: result["op_estimate"] = m.group(1) + (m.group(2) or "")
+        m = _re.search(r"(?:EPS|주당순이익)\s*(?:은|이|는|=|:)?\s*([0-9,]+)\s*원?", body)
+        if m: result["eps_estimate"] = m.group(1) + "원"
+
     return result
+
+
+# 하위 호환: 기존 함수명을 호출하는 경로가 남아있을 수 있어 alias 유지
+_extract_report_pdf = _extract_report_html
 
 
 @app.route("/api/reports/<code>")
@@ -1098,7 +969,7 @@ def api_reports(code: str):
     reports: list[dict] = []
     for info in report_list[:5]:
         try:
-            extracted = _extract_report_pdf(info)
+            extracted = _extract_report_html(info)
             if extracted:
                 reports.append(extracted)
         except Exception as exc:
