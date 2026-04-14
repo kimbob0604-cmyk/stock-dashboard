@@ -1060,6 +1060,41 @@ select:focus { border-color: var(--accent); }
   color: #6495ED; font-size: 12px; text-decoration: none;
 }
 .report-pdf-link:hover { text-decoration: underline; }
+
+/* Phase 13: tabula 로 추출한 재무 추정 테이블 */
+.report-fin-table-wrap { margin-top: 12px; }
+.report-fin-table-title {
+  color: var(--text-muted); font-size: 11px; margin-bottom: 6px;
+}
+.report-fin-table-scroll {
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.report-fin-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 11px; font-family: 'Noto Sans KR', monospace;
+}
+.report-fin-table thead th {
+  background: var(--surface); color: var(--text-muted);
+  padding: 7px 10px; font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  text-align: right; white-space: nowrap;
+}
+.report-fin-table tbody tr { border-bottom: 1px solid var(--border); }
+.report-fin-table tbody tr:last-child { border-bottom: none; }
+.report-fin-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+.report-fin-table th.lbl {
+  text-align: left; color: var(--text); font-weight: 600;
+  padding: 6px 10px; background: var(--surface);
+  position: sticky; left: 0; z-index: 1;
+  border-right: 1px solid var(--border);
+}
+.report-fin-table td {
+  padding: 6px 10px; color: var(--text);
+  text-align: right; white-space: nowrap;
+}
 </style>
 </head>
 <body class="page-thememap">
@@ -2262,20 +2297,39 @@ async function _loadReports(code, container) {
         item.op_estimate      ? `<span class="estimate-tag">영업이익 ${item.op_estimate}</span>`   : '',
         item.eps_estimate     ? `<span class="estimate-tag">EPS ${item.eps_estimate}</span>`       : '',
       ].filter(Boolean).join('');
-      const keyPts = (item.key_points || []).map(p => `<div class="keypoint">• ${p}</div>`).join('');
+      const keyPts = (item.key_points || []).map(p => `<div class="keypoint">• ${_escHtml(p)}</div>`).join('');
+
+      // Phase 13: tabula 가 추출한 재무 테이블 (financial_tables: [{headers, rows}])
+      const finTables = (item.financial_tables || []).map((t, ti) => {
+        const headHTML = t.headers.map(h => `<th class="r">${_escHtml(h || '')}</th>`).join('');
+        const bodyHTML = t.rows.map(r => {
+          const vals = r.values.map(v => `<td class="r">${_escHtml(v || '')}</td>`).join('');
+          return `<tr><th class="lbl">${_escHtml(r.label)}</th>${vals}</tr>`;
+        }).join('');
+        return `<div class="report-fin-table-wrap">
+          <div class="report-fin-table-title">재무 추정 테이블 #${ti + 1} · ${t.rows.length}개 항목 · ${t.headers.length}개 기간</div>
+          <div class="report-fin-table-scroll">
+            <table class="report-fin-table">
+              <thead><tr><th></th>${headHTML}</tr></thead>
+              <tbody>${bodyHTML}</tbody>
+            </table>
+          </div>
+        </div>`;
+      }).join('');
+
       return `
         <div class="report-item">
           <div class="report-top">
             <div class="report-title-row">
-              <span class="report-broker">${item.broker || '—'}</span>
-              <span class="report-date">${item.date || ''}</span>
+              <span class="report-broker">${_escHtml(item.broker || '—')}</span>
+              <span class="report-date">${_escHtml(item.date || '')}</span>
             </div>
-            <div class="report-title">${item.title}</div>
+            <div class="report-title">${_escHtml(item.title)}</div>
           </div>
           <div class="report-metrics">
             <div class="report-metric">
               <span class="metric-label">투자의견</span>
-              <span class="metric-value" style="color:${opinionColor(item.opinion)}">${item.opinion || '—'}</span>
+              <span class="metric-value" style="color:${opinionColor(item.opinion)}">${_escHtml(item.opinion || '—')}</span>
             </div>
             <div class="report-metric">
               <span class="metric-label">목표주가</span>
@@ -2288,6 +2342,7 @@ async function _loadReports(code, container) {
           </div>
           ${keyPts ? `<div class="report-keypoints"><div class="keypoints-label">핵심 포인트</div>${keyPts}</div>` : ''}
           ${estimates ? `<div class="report-estimates">${estimates}</div>` : ''}
+          ${finTables}
           ${item.pdf_url ? `<a class="report-pdf-link" href="${item.pdf_url}" target="_blank" rel="noopener">📄 PDF 원문 보기</a>` : ''}
         </div>`;
     }).join('');

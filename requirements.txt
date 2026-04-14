@@ -7,3 +7,8 @@ yfinance>=0.2.40
 requests>=2.31
 beautifulsoup4>=4.12
 PyPDF2>=3.0
+# tabula-py: 리포트 PDF 재무 테이블 추출용.
+# Java JRE 필요 — Render 배포 시 JDK apt 패키지 설치 필요 (render.yaml 참고).
+# Java 없으면 _tabula_extract_financial_tables() 가 빈 리스트 반환하고
+# 나머지 리포트 추출(정규식 기반)은 계속 동작.
+tabula-py>=2.9

@@ -789,8 +789,130 @@ def _crawl_naver_research(code: str) -> list[dict]:
     return out
 
 
+def _tabula_extract_financial_tables(pdf_bytes: bytes) -> list[dict]:
+    """
+    tabula-py 로 PDF 앞 3페이지에서 '매출/영업이익/순이익/EPS' 키워드가 포함된
+    행을 뽑아 연도별(또는 분기별) 구조화된 테이블로 반환.
+
+    Returns:
+      [{
+        "headers":  ["1Q25","2Q25","3Q25",...,"2025P","2026E","2027E"],
+        "rows":    [
+          {"label": "매출액", "values": ["79,141","74,566",...]},
+          {"label": "영업이익", "values": [...]},
+          ...
+        ]
+      }]
+      (여러 서로 다른 테이블이 있을 수 있어 list 로 반환)
+
+    Java 미설치 / tabula 미설치 / 파싱 실패 시 빈 리스트 반환 (graceful).
+    """
+    try:
+        import tabula
+    except ImportError:
+        return []
+
+    # 로컬 dev 에서 brew openjdk 가 PATH 에 없을 수 있어 선제적으로 추가
+    import os as _os
+    brew_openjdk = "/opt/homebrew/opt/openjdk/bin"
+    if _os.path.exists(brew_openjdk) and brew_openjdk not in _os.environ.get("PATH", ""):
+        _os.environ["PATH"] = brew_openjdk + ":" + _os.environ.get("PATH", "")
+
+    import tempfile
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+            tf.write(pdf_bytes)
+            tmp_path = tf.name
+        dfs = tabula.read_pdf(
+            tmp_path,
+            pages="1-3",
+            stream=True,
+            multiple_tables=True,
+            pandas_options={"dtype": str},
+        )
+    except Exception as exc:
+        print(f"[tabula] read_pdf 실패: {exc!r}")
+        return []
+    finally:
+        if tmp_path:
+            try:
+                import os as _os2; _os2.unlink(tmp_path)
+            except Exception:
+                pass
+
+    if not dfs:
+        return []
+
+    import re as _re
+    # "2025","1Q25","2026E","FY25","2024.12","24.12(E)" 등 연/분기 헤더로 보이는 셀 탐지
+    HDR_PAT = _re.compile(r"^\s*(?:\d{4}|\d{1,2}[A-Z0-9\.]{1,6})[A-Z()P]*\s*$", _re.IGNORECASE)
+    KEYWORDS = ["매출", "영업이익", "순이익", "EPS", "DRAM"]   # DRAM 행은 섹터 예시용
+
+    out: list[dict] = []
+    for df in dfs:
+        if df is None or df.empty or df.shape[1] < 2:
+            continue
+        # 헤더 후보: DataFrame 컬럼명 자체가 연/분기 형태인 경우
+        col_headers = [str(c) for c in df.columns]
+        header_cols = [
+            c for c in col_headers
+            if c and not c.startswith("Unnamed") and HDR_PAT.match(c.strip())
+        ]
+        # 또는 첫 행이 헤더인 경우 (tabula 가 헤더를 데이터로 잡아놓음)
+        header_from_row0: list[str] | None = None
+        if len(header_cols) < 2 and len(df) > 0:
+            row0 = [str(v).strip() if v is not None else "" for v in df.iloc[0].tolist()]
+            hdr_hits = [v for v in row0 if HDR_PAT.match(v)]
+            if len(hdr_hits) >= 2:
+                header_from_row0 = row0
+
+        # 라벨/값 후보 행 추출
+        rows: list[dict] = []
+        data_iter = df.iloc[1:].iterrows() if header_from_row0 else df.iterrows()
+        for _, row in data_iter:
+            cells = [("" if v is None else str(v).strip()) for v in row.tolist()]
+            # 라벨은 보통 맨 앞 non-empty 셀
+            label = None
+            value_start = 0
+            for j, c in enumerate(cells):
+                if c:
+                    label = c
+                    value_start = j + 1
+                    break
+            if not label:
+                continue
+            if not any(k in label for k in KEYWORDS):
+                continue
+            values = [c for c in cells[value_start:] if c]
+            # 최소 2개 이상의 숫자형 값이 있어야 의미 있는 재무 행
+            numeric_ct = sum(1 for v in values if _re.fullmatch(r"[-+]?[\d,\.]+", v))
+            if numeric_ct < 2:
+                continue
+            rows.append({"label": label, "values": values})
+
+        if not rows:
+            continue
+
+        headers = header_from_row0 or header_cols
+        # 헤더가 없으면 값 길이에 맞춰 가짜 컬럼 이름 생성
+        if not headers:
+            max_len = max(len(r["values"]) for r in rows)
+            headers = [f"col{i+1}" for i in range(max_len)]
+
+        # 헤더/값 길이 정규화
+        max_cols = max(len(headers), max(len(r["values"]) for r in rows))
+        headers = (headers + [""] * max_cols)[:max_cols]
+        for r in rows:
+            r["values"] = (r["values"] + [""] * max_cols)[:max_cols]
+
+        out.append({"headers": headers, "rows": rows})
+
+    return out
+
+
 def _extract_report_pdf(report_info: dict) -> dict:
-    """리포트 PDF 텍스트 추출 + 정규식 규칙 기반 핵심 수치 추출."""
+    """리포트 PDF 텍스트 추출 + 정규식 규칙 기반 핵심 수치 추출 + tabula 재무 테이블."""
     import re as _re
     import requests as _rq
     from io import BytesIO
@@ -808,6 +930,7 @@ def _extract_report_pdf(report_info: dict) -> dict:
         "revenue_estimate": None,
         "op_estimate":      None,
         "eps_estimate":     None,
+        "financial_tables": [],
     }
     pdf_url = result["pdf_url"]
     if not pdf_url:
@@ -817,8 +940,9 @@ def _extract_report_pdf(report_info: dict) -> dict:
         pdf_res = _rq.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         if pdf_res.status_code != 200:
             return result
+        pdf_bytes = pdf_res.content
         from PyPDF2 import PdfReader
-        reader = PdfReader(BytesIO(pdf_res.content))
+        reader = PdfReader(BytesIO(pdf_bytes))
         text = ""
         for i, page in enumerate(reader.pages):
             if i >= 3:
@@ -828,6 +952,12 @@ def _extract_report_pdf(report_info: dict) -> dict:
     except Exception as exc:
         print(f"[리포트 PDF 추출 실패] {report_info.get('title','')}: {exc}")
         return result
+
+    # tabula 테이블 추출 (Java 없으면 빈 리스트, 나머지 처리는 계속)
+    try:
+        result["financial_tables"] = _tabula_extract_financial_tables(pdf_bytes)
+    except Exception as exc:
+        print(f"[tabula 추출 실패] {report_info.get('title','')}: {exc}")
 
     if not text:
         return result
