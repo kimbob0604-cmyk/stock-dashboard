@@ -2117,6 +2117,193 @@ def api_price(code: str):
     return jsonify({"error": "종목 없음"}), 404
 
 
+def _fetch_naver_minute_candles(code: str, start_date: str, end_date: str) -> list[dict] | None:
+    """
+    네이버 금융 분봉 API 호출 — 1분봉 raw 데이터 반환.
+    URL: https://api.stock.naver.com/chart/domestic/item/{code}/minute
+         ?startDateTime=YYYYMMDD&endDateTime=YYYYMMDD
+    Returns: [{localDateTime, openPrice, highPrice, lowPrice, currentPrice,
+               accumulatedTradingVolume}, ...] or None on failure
+    """
+    import urllib.request, urllib.error
+    url = (f"https://api.stock.naver.com/chart/domestic/item/{code}/minute"
+           f"?startDateTime={start_date}&endDateTime={end_date}")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+        data = json.loads(body)
+        return data if isinstance(data, list) else None
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        print(f"[Naver 분봉 실패] {code}: {exc!r}")
+        return None
+
+
+def _aggregate_minute_candles(raw: list[dict], interval: int) -> dict:
+    """
+    1분봉 raw 리스트를 N분봉으로 집계.
+    interval: 1, 5, 15, 30, 60
+    Returns: {dates, open, high, low, close, volume} (분봉 차트용)
+
+    버킷팅: (HHMM 분 // interval) * interval 로 분 단위 바닥.
+    날짜+버킷분 조합이 키. 같은 키 안에서 open=첫, high=max, low=min, close=마지막,
+    volume=합.
+    """
+    if not raw or interval < 1:
+        return {"dates": [], "open": [], "high": [], "low": [], "close": [], "volume": []}
+
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
+    for c in raw:
+        dt = c.get("localDateTime", "")
+        if len(dt) < 12:
+            continue
+        # YYYYMMDDHHMMSS → date YYYYMMDD, HH, MM
+        date  = dt[:8]
+        hour  = int(dt[8:10])
+        minu  = int(dt[10:12])
+        bucket_min = (hour * 60 + minu) // interval * interval
+        bh = bucket_min // 60
+        bm = bucket_min % 60
+        key = f"{date}{bh:02d}{bm:02d}"
+
+        try:
+            o = float(c.get("openPrice", 0))
+            h = float(c.get("highPrice", 0))
+            l = float(c.get("lowPrice", 0))
+            cl = float(c.get("currentPrice", 0) or c.get("closePrice", 0))
+            v = float(c.get("accumulatedTradingVolume", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+        b = buckets.get(key)
+        if b is None:
+            buckets[key] = {"o": o, "h": h, "l": l, "c": cl, "v": v}
+            order.append(key)
+        else:
+            if h > b["h"]: b["h"] = h
+            if l < b["l"]: b["l"] = l
+            b["c"] = cl     # raw 가 시간 순이라 마지막이 close
+            b["v"] += v
+
+    dates, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+    for key in order:
+        b = buckets[key]
+        # key = YYYYMMDDHHMM → 'MM-DD HH:MM' 표시
+        label = f"{key[4:6]}-{key[6:8]} {key[8:10]}:{key[10:12]}"
+        dates.append(label)
+        opens.append(int(b["o"]))
+        highs.append(int(b["h"]))
+        lows.append(int(b["l"]))
+        closes.append(int(b["c"]))
+        volumes.append(int(b["v"]))
+
+    return {"dates": dates, "open": opens, "high": highs, "low": lows,
+            "close": closes, "volume": volumes}
+
+
+@app.route("/api/chart_intraday/<code>")
+def api_chart_intraday(code: str):
+    """
+    분봉 차트 — 네이버 금융 분봉 API 에서 1분봉을 받아 N분봉으로 집계.
+    Query params:
+      - timeframe: 1, 5, 15, 30, 60  (default 5)
+      - days:      1 (당일), 3, 5, 10  (default 1)
+    캐시: cache/intraday_{code}_{tf}m_{days}d_{date}.json
+      장중 5분 / 장외 24h TTL
+    응답 스키마는 /api/chart 와 동일하므로 프론트의 _drawCandles 등 재사용 가능.
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    try:
+        timeframe = int(request.args.get("timeframe", "5"))
+    except ValueError:
+        timeframe = 5
+    if timeframe not in (1, 5, 15, 30, 60):
+        timeframe = 5
+
+    try:
+        days = int(request.args.get("days", "1"))
+    except ValueError:
+        days = 1
+    days = max(1, min(10, days))
+
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"intraday_{code}_{timeframe}m_{days}d_{today}.json"
+    if cache_file.exists():
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            ttl = 5 if is_market_hours() else 1440
+            if age_min < ttl:
+                return Response(
+                    cache_file.read_text(encoding="utf-8"),
+                    content_type="application/json; charset=utf-8",
+                )
+        except Exception:
+            pass
+
+    # 시작일 — 거래일 기준 N일을 캘린더 기준 약 1.6배로 여유 잡음 (주말/공휴일)
+    start_dt = datetime.strptime(today, "%Y%m%d").replace(tzinfo=KST) \
+               - timedelta(days=int(days * 1.6) + 2)
+    start_str = start_dt.strftime("%Y%m%d")
+
+    raw = _fetch_naver_minute_candles(code, start_str, today)
+    if not raw:
+        return jsonify({"error": "분봉 데이터 없음", "source": "naver_finance"}), 502
+
+    bars = _aggregate_minute_candles(raw, timeframe)
+    if not bars["close"]:
+        return jsonify({"error": "집계 결과 비어있음"}), 502
+
+    # 요청한 days 만큼만 trim (raw 가 더 많은 날을 줄 수 있음)
+    distinct_dates = []
+    for d in bars["dates"]:
+        ymd = d[:5]   # 'MM-DD'
+        if ymd not in distinct_dates:
+            distinct_dates.append(ymd)
+    if len(distinct_dates) > days:
+        keep_dates = set(distinct_dates[-days:])
+        keep_idx = [i for i, d in enumerate(bars["dates"]) if d[:5] in keep_dates]
+        for k in ("dates", "open", "high", "low", "close", "volume"):
+            bars[k] = [bars[k][i] for i in keep_idx]
+
+    closes  = bars["close"]
+    highs   = bars["high"]
+    lows    = bars["low"]
+    volumes = bars["volume"]
+
+    # 보조지표 — 일봉과 동일한 헬퍼 재사용
+    bollinger  = _calc_bollinger(closes)
+    fibonacci  = _calc_fibonacci(highs, lows)
+    trendlines = _calc_trendlines(highs, lows, closes)
+    analysis   = _generate_analysis(closes, volumes, bollinger, fibonacci, trendlines)
+
+    result = {
+        "code":        code,
+        "name":        _get_stock_name(code) or code,
+        "chart_type":  "intraday",
+        "timeframe":   timeframe,
+        "days":        days,
+        "dates":       bars["dates"],
+        "open":        bars["open"],
+        "high":        highs,
+        "low":         lows,
+        "close":       closes,
+        "volume":      volumes,
+        "bollinger":   bollinger,
+        "fibonacci":   fibonacci,
+        "trendlines":  trendlines,
+        "analysis":    analysis,
+        "source":      "naver_finance",
+        "fetched_at":  now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    cache_file.parent.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return jsonify(result)
+
+
 @app.route("/api/chart/<code>")
 def api_chart(code: str):
     import re as _re

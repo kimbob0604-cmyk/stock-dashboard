@@ -835,10 +835,11 @@ select:focus { border-color: var(--accent); }
   100%    { color: var(--text); }
 }
 
-/* ── Phase 12-1: 기간 버튼 ──────────────────────────────────────── */
+/* ── Phase 12-1 / 13: 봉 타입 + 기간 버튼 ────────────────────── */
 .chart-controls-row {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 10px;
   margin: 8px 0 6px;
+  flex-wrap: wrap;
 }
 .chart-period-bar { display: flex; gap: 6px; }
 .chart-period-btn {
@@ -852,6 +853,21 @@ select:focus { border-color: var(--accent); }
 .chart-period-btn.active {
   background: #FF3333; color: #fff; border-color: #FF3333;
 }
+
+/* Phase 13: 봉 타입 (1분/5분/.../일봉) */
+.chart-type-bar { display: flex; gap: 4px; }
+.chart-type-btn {
+  background: var(--surface2); color: var(--text-sub);
+  border: 1px solid var(--border);
+  padding: 4px 11px; border-radius: 14px; cursor: pointer;
+  font-size: 11px; font-weight: 600; font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.chart-type-btn:hover { background: var(--border); color: var(--text); }
+.chart-type-btn.active {
+  background: #6495ED; color: #fff; border-color: #6495ED;
+}
+.chart-divider { color: var(--border); font-size: 14px; user-select: none; }
 
 /* ── Phase 12-3: 오버레이 토글 ────────────────────────────────── */
 .chart-overlay-toggles { display: flex; gap: 6px; }
@@ -2052,14 +2068,29 @@ async function openChartPanel(code, hintName) {
       <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
     </div>
 
-    <!-- Phase 12-1: 기간 + 12-3: 오버레이 토글 -->
+    <!-- Phase 13: 봉 타입 + Phase 12-1: 기간 + 12-3: 오버레이 토글 -->
     <div class="chart-controls-row">
-      <div class="chart-period-bar" id="chart-period-bar">
+      <div class="chart-type-bar" id="chart-type-bar">
+        <button class="chart-type-btn" data-type="1">1분</button>
+        <button class="chart-type-btn" data-type="5">5분</button>
+        <button class="chart-type-btn" data-type="15">15분</button>
+        <button class="chart-type-btn" data-type="30">30분</button>
+        <button class="chart-type-btn" data-type="60">60분</button>
+        <button class="chart-type-btn active" data-type="day">일봉</button>
+      </div>
+      <span class="chart-divider">|</span>
+      <div class="chart-period-bar" id="chart-period-bar-daily">
         <button class="chart-period-btn" data-days="30">1M</button>
         <button class="chart-period-btn" data-days="90">3M</button>
         <button class="chart-period-btn active" data-days="180">6M</button>
         <button class="chart-period-btn" data-days="365">1Y</button>
         <button class="chart-period-btn" data-days="1095">3Y</button>
+      </div>
+      <div class="chart-period-bar" id="chart-period-bar-intraday" style="display:none;">
+        <button class="chart-period-btn active" data-idays="1">당일</button>
+        <button class="chart-period-btn" data-idays="3">3일</button>
+        <button class="chart-period-btn" data-idays="5">5일</button>
+        <button class="chart-period-btn" data-idays="10">10일</button>
       </div>
       <div class="chart-overlay-toggles">
         <button class="overlay-toggle" id="toggle-flow">수급 OFF</button>
@@ -2110,19 +2141,24 @@ async function openChartPanel(code, hintName) {
   _renderAnalysis(document.getElementById('chart-tab-content'), data.analysis);
 
   // 기본 선택된 기간 버튼 하이라이트
-  document.querySelectorAll('#chart-period-bar .chart-period-btn').forEach(b => {
+  document.querySelectorAll('#chart-period-bar-daily .chart-period-btn').forEach(b => {
     b.classList.toggle('active', parseInt(b.dataset.days) === CHART_STATE.days);
   });
+  // Phase 13: 봉 타입 초기화
+  CHART_STATE.chartType    = 'day';
+  CHART_STATE.intradayDays = 1;
 
   document.getElementById('chart-tab-bar').addEventListener('click', _chartTabClick);
-  document.getElementById('chart-period-bar').addEventListener('click', _chartPeriodClick);
+  document.getElementById('chart-type-bar').addEventListener('click', _chartTypeClick);
+  document.getElementById('chart-period-bar-daily').addEventListener('click', _chartPeriodClick);
+  document.getElementById('chart-period-bar-intraday').addEventListener('click', _chartIntradayPeriodClick);
   document.getElementById('toggle-flow').addEventListener('click', _toggleFlowOverlay);
 
   _setupCrosshair(data, W, HC, HV);
   _startChartPricePolling(code);
 }
 
-// Phase 12-1: 기간 버튼 클릭 → 서버에 ?days=N 재요청 → 차트 재렌더링
+// Phase 12-1: 일봉 기간 버튼 클릭
 async function _chartPeriodClick(e) {
   const btn = e.target.closest('.chart-period-btn');
   if (!btn) return;
@@ -2131,7 +2167,7 @@ async function _chartPeriodClick(e) {
   const code = CHART_STATE.code;
   if (!code) return;
 
-  document.querySelectorAll('#chart-period-bar .chart-period-btn').forEach(b => {
+  document.querySelectorAll('#chart-period-bar-daily .chart-period-btn').forEach(b => {
     b.classList.toggle('active', b === btn);
   });
 
@@ -2139,11 +2175,10 @@ async function _chartPeriodClick(e) {
     const r = await fetch(`/api/chart/${code}?days=${days}`, { cache: 'no-store' });
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
-    if (CHART_STATE.code !== code) return;   // 다른 종목으로 전환됨
+    if (CHART_STATE.code !== code) return;
 
     CHART_STATE.data = d;
     CHART_STATE.days = days;
-    // flow 캐시는 유지하되 오버레이는 재계산 필요
     const W = 1152, HC = 400, HV = 80;
     _drawCandles(document.getElementById('cv-candle'), d, W, HC);
     _drawVolume(document.getElementById('cv-volume'), d, W, HV,
@@ -2152,9 +2187,146 @@ async function _chartPeriodClick(e) {
     if (CHART_STATE.tab === 'analysis') {
       _renderAnalysis(document.getElementById('chart-tab-content'), d.analysis);
     }
-    console.log('[period]', code, days, 'days → candles=', d.close.length);
+    console.log('[period:day]', code, days, '→', d.close.length);
   } catch (err) {
-    console.error('[period] fetch failed', err);
+    console.error('[period:day] fetch failed', err);
+  }
+}
+
+// Phase 13: 봉 타입 (일봉/분봉) 전환
+async function _chartTypeClick(e) {
+  const btn = e.target.closest('.chart-type-btn');
+  if (!btn) return;
+  const type = btn.dataset.type;
+  if (type === CHART_STATE.chartType) return;
+
+  document.querySelectorAll('#chart-type-bar .chart-type-btn').forEach(b => {
+    b.classList.toggle('active', b === btn);
+  });
+  CHART_STATE.chartType = type;
+
+  // 기간 바 토글
+  const dailyBar    = document.getElementById('chart-period-bar-daily');
+  const intradayBar = document.getElementById('chart-period-bar-intraday');
+  if (type === 'day') {
+    dailyBar.style.display    = 'flex';
+    intradayBar.style.display = 'none';
+    _stopIntradayRefresh();
+    await _loadDailyForCurrent();
+  } else {
+    dailyBar.style.display    = 'none';
+    intradayBar.style.display = 'flex';
+    await _loadIntradayForCurrent();
+    _startIntradayRefresh();
+  }
+}
+
+// Phase 13: 분봉 기간 버튼 (당일/3일/5일/10일)
+async function _chartIntradayPeriodClick(e) {
+  const btn = e.target.closest('.chart-period-btn');
+  if (!btn) return;
+  const idays = parseInt(btn.dataset.idays);
+  if (!idays || idays === CHART_STATE.intradayDays) return;
+  document.querySelectorAll('#chart-period-bar-intraday .chart-period-btn').forEach(b => {
+    b.classList.toggle('active', b === btn);
+  });
+  CHART_STATE.intradayDays = idays;
+  await _loadIntradayForCurrent();
+}
+
+async function _loadDailyForCurrent() {
+  const code = CHART_STATE.code;
+  if (!code) return;
+  const days = CHART_STATE.days || 180;
+  try {
+    const r = await fetch(`/api/chart/${code}?days=${days}`, { cache: 'no-store' });
+    const d = await r.json();
+    if (CHART_STATE.code !== code) return;
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    CHART_STATE.data = d;
+    const W = 1152, HC = 400, HV = 80;
+    _drawCandles(document.getElementById('cv-candle'), d, W, HC);
+    _drawVolume(document.getElementById('cv-volume'), d, W, HV,
+                CHART_STATE.flowVisible ? CHART_STATE.flowData : null);
+    _setupCrosshair(d, W, HC, HV);
+    if (CHART_STATE.tab === 'analysis') {
+      _renderAnalysis(document.getElementById('chart-tab-content'), d.analysis);
+    }
+  } catch (err) { console.error('[load:day]', err); }
+}
+
+async function _loadIntradayForCurrent() {
+  const code = CHART_STATE.code;
+  if (!code) return;
+  const tf    = CHART_STATE.chartType;     // '1' | '5' | '15' | '30' | '60'
+  const idays = CHART_STATE.intradayDays || 1;
+
+  // 로딩 표시
+  const cvc = document.getElementById('cv-candle');
+  const ctx = cvc.getContext('2d');
+  ctx.clearRect(0, 0, cvc.width, cvc.height);
+  ctx.fillStyle = '#1C1C1E'; ctx.fillRect(0, 0, cvc.width, cvc.height);
+  ctx.fillStyle = '#AEAEB2'; ctx.font = '14px Noto Sans KR, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${tf}분봉 데이터 로딩 중…`, cvc.width / 2, cvc.height / 2);
+
+  try {
+    const r = await fetch(`/api/chart_intraday/${code}?timeframe=${tf}&days=${idays}`,
+                          { cache: 'no-store' });
+    const d = await r.json();
+    if (CHART_STATE.code !== code || CHART_STATE.chartType !== tf) return;   // stale
+    if (!r.ok || d.error) {
+      ctx.clearRect(0, 0, cvc.width, cvc.height);
+      ctx.fillStyle = '#1C1C1E'; ctx.fillRect(0, 0, cvc.width, cvc.height);
+      ctx.fillStyle = '#FF6B6B';
+      ctx.fillText(d.error || ('HTTP ' + r.status), cvc.width / 2, cvc.height / 2);
+      return;
+    }
+    CHART_STATE.data = d;
+    const W = 1152, HC = 400, HV = 80;
+    _drawCandles(document.getElementById('cv-candle'), d, W, HC);
+    _drawVolume(document.getElementById('cv-volume'), d, W, HV, null);
+    _setupCrosshair(d, W, HC, HV);
+    if (CHART_STATE.tab === 'analysis') {
+      _renderAnalysis(document.getElementById('chart-tab-content'), d.analysis);
+    }
+    console.log('[load:intraday]', code, `${tf}분`, `${idays}d`, '→', d.close.length, 'candles');
+  } catch (err) {
+    console.error('[load:intraday]', err);
+  }
+}
+
+// Phase 13: 분봉 자동 갱신 (장중에만)
+let _intradayRefreshTimer = null;
+
+function _isMarketHoursClient() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const t = now.getHours() * 100 + now.getMinutes();
+  return t >= 900 && t <= 1530;
+}
+
+function _startIntradayRefresh() {
+  _stopIntradayRefresh();
+  const tf = CHART_STATE.chartType;
+  if (tf === 'day') return;
+  // 1분봉은 60s 마다, 나머지는 300s (5분) 마다
+  const intervalMs = tf === '1' ? 60_000 : 300_000;
+  _intradayRefreshTimer = setInterval(() => {
+    if (!_isMarketHoursClient()) return;
+    if (document.hidden) return;
+    if (CHART_STATE.chartType === 'day') return;
+    if (!CHART_STATE.code) return;
+    _loadIntradayForCurrent();
+  }, intervalMs);
+  console.log('[intraday refresh]', tf, '분봉 자동 갱신 시작 (', intervalMs / 1000, 's)');
+}
+
+function _stopIntradayRefresh() {
+  if (_intradayRefreshTimer) {
+    clearInterval(_intradayRefreshTimer);
+    _intradayRefreshTimer = null;
   }
 }
 
@@ -2431,10 +2603,13 @@ function closeChartPanel() {
     _chartAbortCtrl = null;
   }
   _stopChartPricePolling();
-  _chartRequestCode = null;
-  CHART_STATE.code  = null;
-  CHART_STATE.data  = null;
-  CHART_STATE.tab   = 'analysis';
+  _stopIntradayRefresh();
+  _chartRequestCode      = null;
+  CHART_STATE.code       = null;
+  CHART_STATE.data       = null;
+  CHART_STATE.tab        = 'analysis';
+  CHART_STATE.chartType  = 'day';
+  CHART_STATE.intradayDays = 1;
   const panel = document.getElementById('chart-panel');
   panel.style.display = 'none';
   panel.innerHTML = '';
