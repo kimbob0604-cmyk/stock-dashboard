@@ -1919,259 +1919,6 @@ def api_flow(code: str):
     return jsonify(result)
 
 
-def _fetch_krx_shorting(kind: str) -> dict:
-    """
-    공매도 상위 종목 조회. kind: 'ratio' (거래 상위) | 'balance' (잔고 상위).
-
-    3-tier fallback:
-      1) data.krx.co.kr getJsonData (pykrx 와 동일 bld, 세션 쿠키)
-      2) pykrx 공매도_거래상위_50종목 / 공매도_잔고상위_50종목 클래스 직접 호출
-      3) pykrx get_shorting_balance_by_ticker (전종목 fetch 후 정렬)
-
-    어느 단계든 KOSPI + KOSDAQ 를 합쳐 상위 30 반환.
-    모든 소스 실패 시 status='blocked' + attempted 소스 목록 반환.
-    """
-    assert kind in ("ratio", "balance")
-    bld = ("dbms/MDC/STAT/srt/MDCSTAT30401" if kind == "ratio"
-           else "dbms/MDC/STAT/srt/MDCSTAT30801")
-    attempted: list[dict] = []
-
-    # 직전 영업일 후보 (오늘 데이터는 보통 T+1 에 공개)
-    today_dt = now_kst().date()
-    candidates = []
-    for back in range(1, 8):
-        d = today_dt - timedelta(days=back)
-        if d.weekday() < 5:
-            candidates.append(d.strftime("%Y%m%d"))
-
-    # ── Tier 1: data.krx.co.kr getJsonData ──
-    try:
-        import requests as _rq
-        sess = _rq.Session()
-        sess.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) "
-                          "AppleWebKit/537.36 Chrome/120",
-            "Referer": "http://data.krx.co.kr/",
-            "X-Requested-With": "XMLHttpRequest",
-        })
-        # 초기 쿠키 획득
-        try:
-            sess.get("http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd"
-                     "?menuId=MDC0201020502", timeout=8)
-        except Exception:
-            pass
-        url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-
-        rows_combined: list[dict] = []
-        err_msgs: list[str] = []
-        for trdDd in candidates[:3]:
-            for mktTpCd in (1, 2):  # 1=KOSPI, 2=KOSDAQ
-                body = {"bld": bld, "trdDd": trdDd, "mktTpCd": mktTpCd}
-                try:
-                    resp = sess.post(url, data=body, timeout=10)
-                    if resp.status_code != 200:
-                        err_msgs.append(f"HTTP {resp.status_code} ({trdDd}/mkt{mktTpCd})")
-                        continue
-                    if not resp.text or not resp.text.strip():
-                        err_msgs.append(f"empty body ({trdDd}/mkt{mktTpCd})")
-                        continue
-                    try:
-                        j = resp.json()
-                    except ValueError:
-                        err_msgs.append(f"non-JSON ({trdDd}/mkt{mktTpCd})")
-                        continue
-                    out = j.get("OutBlock_1") or j.get("output") or []
-                    if out:
-                        rows_combined.extend(out)
-                except Exception as exc:
-                    err_msgs.append(f"{type(exc).__name__}: {str(exc)[:60]}")
-            if rows_combined:
-                break
-        attempted.append({
-            "source": "data.krx.co.kr getJsonData",
-            "bld":    bld,
-            "ok":     bool(rows_combined),
-            "errors": err_msgs[:4],
-        })
-        if rows_combined:
-            return _normalize_shorting_krx_rows(rows_combined, kind)
-    except Exception as exc:
-        attempted.append({"source": "data.krx.co.kr", "ok": False,
-                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
-
-    # ── Tier 2: pykrx 클래스 직접 호출 ──
-    try:
-        from pykrx.website.krx.market.core import (
-            공매도_거래상위_50종목, 공매도_잔고상위_50종목,
-        )
-        Cls = 공매도_거래상위_50종목 if kind == "ratio" else 공매도_잔고상위_50종목
-        rows_combined = []
-        err_msgs = []
-        for trdDd in candidates[:3]:
-            for mktTpCd in (1, 2):
-                try:
-                    df = Cls().fetch(trdDd, mktTpCd)
-                    if df is not None and len(df):
-                        rows_combined.extend(df.to_dict(orient="records"))
-                except Exception as exc:
-                    err_msgs.append(f"{trdDd}/mkt{mktTpCd}: {str(exc)[:60]}")
-            if rows_combined:
-                break
-        attempted.append({
-            "source": "pykrx direct",
-            "ok":     bool(rows_combined),
-            "errors": err_msgs[:4],
-        })
-        if rows_combined:
-            return _normalize_shorting_krx_rows(rows_combined, kind)
-    except ImportError:
-        attempted.append({"source": "pykrx direct", "ok": False,
-                          "errors": ["pykrx 미설치"]})
-    except Exception as exc:
-        attempted.append({"source": "pykrx direct", "ok": False,
-                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
-
-    # ── Tier 3: pykrx 고수준 wrapper ──
-    try:
-        from pykrx import stock as _stock
-        dfs = []
-        errs = []
-        for trdDd in candidates[:2]:
-            for market in ("KOSPI", "KOSDAQ"):
-                try:
-                    df = _stock.get_shorting_balance_by_ticker(trdDd, market)
-                    if df is not None and len(df):
-                        dfs.append(df)
-                except Exception as exc:
-                    errs.append(f"{trdDd}/{market}: {str(exc)[:60]}")
-            if dfs:
-                break
-        attempted.append({
-            "source": "pykrx wrapper",
-            "ok":     bool(dfs),
-            "errors": errs[:4],
-        })
-        if dfs:
-            import pandas as _pd
-            df_all = _pd.concat(dfs)
-            return _normalize_shorting_pykrx_df(df_all, kind)
-    except Exception as exc:
-        attempted.append({"source": "pykrx wrapper", "ok": False,
-                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
-
-    return {
-        "status":   "blocked",
-        "kind":     kind,
-        "stocks":   [],
-        "attempted": attempted,
-        "message": (
-            "공매도 데이터 소스에 접근할 수 없습니다. "
-            "KRX 공매도 통계 API (data.krx.co.kr) 가 외부 접근을 차단한 상태이며, "
-            "네이버 금융도 공매도 종합 페이지를 제공하지 않습니다. "
-            "KRX Open API 의 공매도 엔드포인트 구독 또는 벤더 데이터(Bloomberg/Refinitiv) "
-            "연동이 필요합니다."
-        ),
-    }
-
-
-def _normalize_shorting_krx_rows(rows: list, kind: str) -> dict:
-    """KRX getJsonData / pykrx.core 응답을 공통 스키마로 변환."""
-    out: list[dict] = []
-    for row in rows:
-        code = (row.get("ISU_SRT_CD") or row.get("ISU_CD") or "").strip()
-        name = (row.get("ISU_ABBRV") or row.get("ISU_NM") or "").strip()
-        if not code or not name:
-            continue
-        def _num(v) -> float | None:
-            if v is None or v == "":
-                return None
-            try:
-                return float(str(v).replace(",", ""))
-            except ValueError:
-                return None
-        ratio   = _num(row.get("TDD_SRTSELL_WT") or row.get("BAL_RTO"))
-        balance = _num(row.get("BAL_AMT") or row.get("CVSRTSELL_TRDVAL"))
-        volume  = _num(row.get("CVSRTSELL_TRDVOL") or row.get("BAL_QTY"))
-        mktcap  = _num(row.get("MKTCAP"))
-        out.append({
-            "code": code, "name": name,
-            "ratio":   ratio,
-            "balance": int(balance) if balance is not None else None,
-            "volume":  int(volume)  if volume  is not None else None,
-            "mktcap":  int(mktcap)  if mktcap  is not None else None,
-        })
-    # 상위 30 정렬
-    key = "ratio" if kind == "ratio" else "balance"
-    out.sort(key=lambda x: (x.get(key) or 0), reverse=True)
-    return {"status": "ok", "kind": kind, "count": len(out), "stocks": out[:30]}
-
-
-def _normalize_shorting_pykrx_df(df, kind: str) -> dict:
-    """pykrx get_shorting_balance_by_ticker DataFrame → 공통 스키마."""
-    ratio_col   = next((c for c in df.columns if "비중"    in c), None)
-    balance_col = next((c for c in df.columns if "잔고금액" in c or "금액" in c), None)
-    volume_col  = next((c for c in df.columns if "잔고수량" in c or "수량" in c), None)
-    key_col = ratio_col if kind == "ratio" else (balance_col or ratio_col)
-    if key_col is None:
-        return {"status": "blocked", "kind": kind, "stocks": [],
-                "message": "공매도 컬럼 없음"}
-    df2 = df.sort_values(key_col, ascending=False).head(30)
-    out = []
-    for code, row in df2.iterrows():
-        out.append({
-            "code": str(code),
-            "name": row.get("종목명", ""),
-            "ratio":   float(row[ratio_col])   if ratio_col   else None,
-            "balance": int(row[balance_col])   if balance_col else None,
-            "volume":  int(row[volume_col])    if volume_col  else None,
-            "mktcap":  None,
-        })
-    return {"status": "ok", "kind": kind, "count": len(out), "stocks": out}
-
-
-def _cached_short(kind: str) -> dict:
-    """캐시 확인 + fetch + 저장. blocked 는 15분, ok 는 24시간 캐시."""
-    today = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"short_{kind}_{today}.json"
-    if cache_file.exists():
-        try:
-            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            ttl = 1440 if cached.get("status") == "ok" else 15
-            if age_min < ttl:
-                return cached
-        except Exception:
-            pass
-    result = _fetch_krx_shorting(kind)
-    result["updated_at"] = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        cache_file.parent.mkdir(exist_ok=True)
-        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    return result
-
-
-@app.route("/api/short/ratio")
-def api_short_ratio():
-    """공매도 비중(거래) 상위 종목."""
-    return jsonify(_cached_short("ratio"))
-
-
-@app.route("/api/short/balance")
-def api_short_balance():
-    """공매도 잔고 상위 종목."""
-    return jsonify(_cached_short("balance"))
-
-
-@app.route("/api/short")
-def api_short():
-    """레거시 라우트 — /api/short?sort=ratio|balance → 신규 엔드포인트로 위임."""
-    sort_by = (request.args.get("sort") or "ratio").strip()
-    if sort_by not in ("ratio", "balance"):
-        sort_by = "ratio"
-    return jsonify(_cached_short(sort_by))
-
 
 def _parse_pct(s: str) -> float:
     """'+7.94%', '-1.32%' → float"""
@@ -3124,6 +2871,1046 @@ def static_file(filename: str):
 # ─────────────────────────────────────────────────────────────────────────────
 _startup_done = False
 
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 24 Step 2 — 국내 야간선물 + 옵션 PCR (best-effort)
+# ─────────────────────────────────────────────────────────────────────────
+def _fetch_night_futures() -> dict:
+    """
+    코스피200 야간선물 종가 조회. 3-tier fallback:
+      1) yfinance ^KS200 (코스피200 현물 지수, 가장 신뢰도 높음)
+      2) esignal.co.kr 스크랩 (페이지 구조 변경 시 실패)
+      3) investing.com 스크랩 (봇 차단 가능성)
+    전부 실패 시 structured empty state.
+    """
+    result: dict = {
+        "day_close":   None,
+        "night_close": None,
+        "change":      None,
+        "change_pct":  None,
+        "signal":      None,
+        "source":      None,
+        "attempted":   [],
+        "updated_at":  now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    # Tier 1: yfinance ^KS200 — 최근 2일 종가 비교로 "야간선물 프록시"
+    try:
+        import yfinance as _yf
+        h = _yf.Ticker("^KS200").history(period="5d")
+        if h is not None and not h.empty and len(h) >= 2:
+            closes = [float(v) for v in h["Close"].tolist() if v == v]
+            if len(closes) >= 2:
+                result["day_close"]   = round(closes[-2], 2)
+                result["night_close"] = round(closes[-1], 2)
+                result["source"] = "yfinance:^KS200"
+                result["attempted"].append({"source": "yfinance ^KS200", "ok": True})
+    except Exception as exc:
+        result["attempted"].append({
+            "source": "yfinance ^KS200", "ok": False, "error": str(exc)[:80]
+        })
+
+    # Tier 2: esignal.co.kr
+    if result["night_close"] is None:
+        try:
+            import requests as _rq
+            from bs4 import BeautifulSoup
+            r = _rq.get(
+                "https://esignal.co.kr/kospi200-futures-night/",
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=8,
+            )
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                price_tag = (soup.select_one(".current_price")
+                             or soup.select_one(".price")
+                             or soup.select_one("[class*='price']"))
+                if price_tag:
+                    txt = price_tag.get_text(strip=True).replace(",", "")
+                    try:
+                        result["night_close"] = float(txt)
+                        result["source"] = "esignal.co.kr"
+                        result["attempted"].append({"source": "esignal.co.kr", "ok": True})
+                    except ValueError:
+                        result["attempted"].append({
+                            "source": "esignal.co.kr", "ok": False,
+                            "error": f"파싱 실패: '{txt[:30]}'"
+                        })
+                else:
+                    result["attempted"].append({
+                        "source": "esignal.co.kr", "ok": False,
+                        "error": "price 셀렉터 매칭 실패"
+                    })
+            else:
+                result["attempted"].append({
+                    "source": "esignal.co.kr", "ok": False,
+                    "error": f"HTTP {r.status_code}"
+                })
+        except Exception as exc:
+            result["attempted"].append({
+                "source": "esignal.co.kr", "ok": False, "error": str(exc)[:80]
+            })
+
+    # Tier 3: investing.com
+    if result["night_close"] is None:
+        try:
+            import requests as _rq
+            from bs4 import BeautifulSoup
+            r = _rq.get(
+                "https://kr.investing.com/indices/korea-200-futures",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 Chrome/120"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                pt = (soup.select_one('[data-test="instrument-price-last"]')
+                      or soup.select_one(".text-5xl"))
+                if pt:
+                    txt = pt.get_text(strip=True).replace(",", "")
+                    try:
+                        result["night_close"] = float(txt)
+                        result["source"] = "investing.com"
+                        result["attempted"].append({"source": "investing.com", "ok": True})
+                    except ValueError:
+                        result["attempted"].append({
+                            "source": "investing.com", "ok": False,
+                            "error": f"파싱 실패: '{txt[:30]}'"
+                        })
+            else:
+                result["attempted"].append({
+                    "source": "investing.com", "ok": False,
+                    "error": f"HTTP {r.status_code}"
+                })
+        except Exception as exc:
+            result["attempted"].append({
+                "source": "investing.com", "ok": False, "error": str(exc)[:80]
+            })
+
+    # 등락률 계산 (day_close 있을 때만)
+    if result["night_close"] and result["day_close"]:
+        result["change"] = round(result["night_close"] - result["day_close"], 2)
+        if result["day_close"]:
+            result["change_pct"] = round(
+                (result["night_close"] / result["day_close"] - 1) * 100, 2
+            )
+
+    # 시그널 매핑
+    pct = result.get("change_pct")
+    if pct is not None:
+        if   pct >  1.5: result["signal"] = "야간선물 강세 → 익일 갭업 출발 예상"
+        elif pct >  0.5: result["signal"] = "야간선물 소폭 강세 → 소폭 상승 출발"
+        elif pct > -0.5: result["signal"] = "야간선물 보합 → 횡보 출발"
+        elif pct > -1.5: result["signal"] = "야간선물 소폭 약세 → 소폭 하락 출발"
+        else:            result["signal"] = "야간선물 약세 → 갭다운 출발 예상"
+    elif result["night_close"] is not None:
+        result["signal"] = f"현재가 {result['night_close']} (전일 종가 불명 — 등락률 계산 불가)"
+    else:
+        result["signal"] = ("모든 소스 차단 — yfinance·esignal·investing 순서로 시도 실패. "
+                            "한투/키움 API 연동 시 활성화")
+    return result
+
+
+@app.route("/api/night_futures")
+def api_night_futures():
+    """코스피200 야간선물 — 30분 캐시."""
+    cache_file = BASE_DIR / "cache" / "night_futures.json"
+    cached = _read_fresh_json(cache_file, 30)
+    if cached:
+        return jsonify(cached)
+    result = _fetch_night_futures()
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/kr_options")
+def api_kr_options():
+    """
+    코스피200 옵션 PCR — KRX data.krx.co.kr 차단 상태라 현재 전부 unavailable.
+    엔드포인트는 유지해서 소스 복구 시 즉시 활성화. 6시간 캐시.
+    """
+    cache_file = BASE_DIR / "cache" / "kr_options_pcr.json"
+    cached = _read_fresh_json(cache_file, 360)
+    if cached:
+        return jsonify(cached)
+
+    result = {
+        "pcr_volume":     None,
+        "pcr_oi":         None,
+        "signal":         ("KRX data.krx.co.kr 가 외부 접근을 차단한 상태이며 "
+                           "공매도와 동일하게 옵션 PCR 도 현재 무료 소스가 없습니다. "
+                           "한투 OpenAPI / KIS 증권사 API 연동 시 활성화 가능."),
+        "source":         "unavailable",
+        "attempted":      [
+            {"source": "pykrx option PCR", "ok": False, "error": "KRX blocked"},
+            {"source": "data.krx.co.kr getJsonData", "ok": False, "error": "HTTP 400 blocked"},
+            {"source": "investing.com kospi200 options", "ok": False, "error": "봇 차단"},
+        ],
+        "updated_at":     now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 24 — 미국 옵션 시그널 (SPY/QQQ): PCR + MaxPain + GEX 근사
+# ─────────────────────────────────────────────────────────────────────────
+def _nan_int(v) -> int:
+    """NaN/None/빈값을 0으로 변환."""
+    try:
+        if v is None:
+            return 0
+        f = float(v)
+        if f != f:   # NaN check
+            return 0
+        return int(f)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _nan_float(v) -> float:
+    try:
+        if v is None:
+            return 0.0
+        f = float(v)
+        return 0.0 if f != f else f
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compute_options_signal(symbol: str) -> dict:
+    """
+    SPY/QQQ yfinance 옵션 체인에서 PCR/MaxPain/GEX 근사 계산.
+    - 가장 가까운 2개 만기 수집
+    - 맥스페인: ATM ±20% 행사가 범위에서 총 옵션 가치 최소 지점
+    - GEX 근사: (C_OI − P_OI) × (1 - moneyness*10) × 100 × spot
+    """
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return {"error": "yfinance 미설치"}
+
+    try:
+        t = _yf.Ticker(symbol)
+        hist = t.history(period="1d")
+        if hist is None or hist.empty:
+            return {"error": "현재가 조회 실패"}
+        spot = _nan_float(hist["Close"].iloc[-1])
+
+        exps = list(t.options or [])
+        if not exps:
+            return {"error": "옵션 만기 없음"}
+        target_exps = exps[:2]
+
+        all_calls: list[dict] = []
+        all_puts:  list[dict] = []
+        for exp in target_exps:
+            try:
+                chain = t.option_chain(exp)
+            except Exception as exc:
+                log.debug("chain %s %s fail: %s", symbol, exp, exc)
+                continue
+            for _, r in chain.calls.iterrows():
+                all_calls.append({
+                    "expiry":       exp,
+                    "strike":       _nan_float(r.get("strike")),
+                    "volume":       _nan_int(r.get("volume")),
+                    "openInterest": _nan_int(r.get("openInterest")),
+                    "iv":           _nan_float(r.get("impliedVolatility")),
+                })
+            for _, r in chain.puts.iterrows():
+                all_puts.append({
+                    "expiry":       exp,
+                    "strike":       _nan_float(r.get("strike")),
+                    "volume":       _nan_int(r.get("volume")),
+                    "openInterest": _nan_int(r.get("openInterest")),
+                    "iv":           _nan_float(r.get("impliedVolatility")),
+                })
+
+        if not all_calls or not all_puts:
+            return {"error": "옵션 체인 비어 있음"}
+
+        # ── PCR ──
+        tot_pv = sum(p["volume"] for p in all_puts)
+        tot_cv = sum(c["volume"] for c in all_calls)
+        tot_pi = sum(p["openInterest"] for p in all_puts)
+        tot_ci = sum(c["openInterest"] for c in all_calls)
+        pcr_vol = round(tot_pv / tot_cv, 3) if tot_cv > 0 else None
+        pcr_oi  = round(tot_pi / tot_ci, 3) if tot_ci > 0 else None
+
+        if pcr_vol is None:
+            pcr_signal = "거래량 부족"
+        elif pcr_vol > 1.2:
+            pcr_signal = "극도의 공포 → 역발상 매수 시그널"
+        elif pcr_vol > 1.0:
+            pcr_signal = "약한 공포 → 주의"
+        elif pcr_vol > 0.7:
+            pcr_signal = "중립"
+        elif pcr_vol > 0.5:
+            pcr_signal = "낙관 → 과매수 주의"
+        else:
+            pcr_signal = "극도의 낙관 → 역발상 매도 시그널"
+
+        # ── 맥스페인 (가장 가까운 만기만) ──
+        near_calls = [c for c in all_calls if c["expiry"] == target_exps[0]]
+        near_puts  = [p for p in all_puts  if p["expiry"] == target_exps[0]]
+
+        strikes_set = sorted(set(
+            [c["strike"] for c in near_calls] + [p["strike"] for p in near_puts]
+        ))
+        # ATM ±20% 범위로 클램프
+        strikes = [s for s in strikes_set if spot * 0.8 <= s <= spot * 1.2]
+        if not strikes:
+            strikes = strikes_set[:30]
+
+        call_oi_map = {c["strike"]: c["openInterest"] for c in near_calls}
+        put_oi_map  = {p["strike"]: p["openInterest"] for p in near_puts}
+
+        pain_by_strike: list[dict] = []
+        for test in strikes:
+            total = 0.0
+            for k in strikes:
+                c_oi = call_oi_map.get(k, 0)
+                p_oi = put_oi_map.get(k, 0)
+                total += max(test - k, 0) * c_oi * 100
+                total += max(k - test, 0) * p_oi * 100
+            pain_by_strike.append({"strike": test, "total_pain": int(total)})
+
+        if pain_by_strike:
+            min_item = min(pain_by_strike, key=lambda x: x["total_pain"])
+            max_pain_strike = min_item["strike"]
+            mp_diff = round((max_pain_strike / spot - 1) * 100, 2) if spot else 0
+            if mp_diff > 1:
+                mp_signal = f"현재가 < 맥스페인 → 상방 수렴 압력 (+{mp_diff}%)"
+            elif mp_diff < -1:
+                mp_signal = f"현재가 > 맥스페인 → 하방 수렴 압력 ({mp_diff}%)"
+            else:
+                mp_signal = f"맥스페인 근접 → 횡보/레인지 예상 ({mp_diff}%)"
+        else:
+            max_pain_strike = None
+            mp_diff = 0
+            mp_signal = "계산 불가"
+
+        # ── GEX 근사 ──
+        gex_by_strike: list[dict] = []
+        total_gex = 0.0
+        for k in strikes:
+            c_oi = call_oi_map.get(k, 0)
+            p_oi = put_oi_map.get(k, 0)
+            moneyness = abs(k - spot) / spot if spot else 1.0
+            approx_gamma = max(0.0, 1.0 - moneyness * 10) * 0.01
+            strike_gex = (c_oi - p_oi) * approx_gamma * 100 * spot
+            gex_by_strike.append({
+                "strike": k,
+                "call_oi": c_oi,
+                "put_oi":  p_oi,
+                "net_gex": int(round(strike_gex)),
+            })
+            total_gex += strike_gex
+
+        if total_gex > 0:
+            gex_signal = "양수 GEX → 마켓메이커 롱감마 · 변동성 축소, 레인지바운드 예상"
+            gex_regime = "positive"
+        else:
+            gex_signal = "음수 GEX → 마켓메이커 숏감마 · 변동성 확대, 추세 지속 예상"
+            gex_regime = "negative"
+
+        call_wall = max(near_calls, key=lambda x: x["openInterest"]) if near_calls else None
+        put_wall  = max(near_puts,  key=lambda x: x["openInterest"]) if near_puts  else None
+
+        # ── 종합 판단 ──
+        bullish = 0
+        bearish = 0
+        reasons = []
+        if pcr_vol is not None:
+            if pcr_vol > 1.0:
+                bullish += 2
+                reasons.append(f"PCR {pcr_vol} (공포 → 역발상 매수)")
+            elif pcr_vol < 0.7:
+                bearish += 2
+                reasons.append(f"PCR {pcr_vol} (낙관 → 과매수 경고)")
+            else:
+                reasons.append(f"PCR {pcr_vol} (중립)")
+        if mp_diff > 1:
+            bullish += 1
+            reasons.append(f"맥스페인 ${max_pain_strike} → 상방 수렴")
+        elif mp_diff < -1:
+            bearish += 1
+            reasons.append(f"맥스페인 ${max_pain_strike} → 하방 수렴")
+        if gex_regime == "positive":
+            reasons.append("양수 GEX → 안정적 레인지")
+        else:
+            reasons.append("음수 GEX → 변동성 확대 주의")
+            bearish += 1
+
+        if bullish > bearish:
+            overall = "강세"; emoji = "🟢"
+        elif bearish > bullish:
+            overall = "약세"; emoji = "🔴"
+        else:
+            overall = "중립"; emoji = "🟡"
+
+        return {
+            "symbol":     symbol,
+            "spot_price": round(spot, 2),
+            "expiry":     target_exps[0],
+            "expiry_count": len(target_exps),
+            "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "pcr": {
+                "volume":         pcr_vol,
+                "open_interest":  pcr_oi,
+                "total_put_vol":  tot_pv,
+                "total_call_vol": tot_cv,
+                "total_put_oi":   tot_pi,
+                "total_call_oi":  tot_ci,
+                "signal":         pcr_signal,
+            },
+            "max_pain": {
+                "strike":   max_pain_strike,
+                "diff_pct": mp_diff,
+                "signal":   mp_signal,
+                "pain_by_strike": sorted(pain_by_strike, key=lambda x: x["strike"])[:60],
+            },
+            "gex": {
+                "total":     int(round(total_gex)),
+                "regime":    gex_regime,
+                "signal":    gex_signal,
+                "by_strike": gex_by_strike,
+                "call_wall": {"strike": call_wall["strike"], "oi": call_wall["openInterest"]} if call_wall else None,
+                "put_wall":  {"strike": put_wall["strike"],  "oi": put_wall["openInterest"]}  if put_wall  else None,
+            },
+            "overall": {
+                "direction":      overall,
+                "emoji":          emoji,
+                "bullish_score":  bullish,
+                "bearish_score":  bearish,
+                "reasons":        reasons,
+            },
+        }
+    except Exception as exc:
+        log.debug("options_signal %s fail: %s", symbol, exc)
+        return {"error": str(exc)}
+
+
+@app.route("/api/options_signal")
+def api_options_signal():
+    symbol = (request.args.get("symbol") or "SPY").upper()
+    if symbol not in ("SPY", "QQQ", "IWM", "DIA"):
+        return jsonify({"error": "지원 심볼: SPY/QQQ/IWM/DIA"}), 400
+    cache_file = BASE_DIR / "cache" / f"options_signal_{symbol}.json"
+    cached = _read_fresh_json(cache_file, 30)
+    if cached:
+        return jsonify(cached)
+    result = _compute_options_signal(symbol)
+    if "error" not in result:
+        try:
+            cache_file.parent.mkdir(exist_ok=True)
+            cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 23 — 텔레그램 알림 / ETF 히트맵 / 배당 스크리너
+# ─────────────────────────────────────────────────────────────────────────
+def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
+    """텔레그램 메시지 전송. 토큰 미설정 시 silently skip."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return False
+    try:
+        import requests as _rq
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        r = _rq.post(url, json={
+            "chat_id": chat_id, "text": message,
+            "parse_mode": parse_mode, "disable_web_page_preview": True,
+        }, timeout=10)
+        if r.status_code != 200:
+            log.warning("[텔레그램] send failed: %s %s", r.status_code, r.text[:200])
+            return False
+        return True
+    except Exception as exc:
+        log.warning("[텔레그램] error: %s", exc)
+        return False
+
+
+@app.route("/api/telegram/test", methods=["POST"])
+def api_telegram_test():
+    """테스트 메시지 전송."""
+    ok = send_telegram(
+        "🔔 <b>테스트</b>\n"
+        "stock-dashboard 텔레그램 연동 성공!\n"
+        f"시각: {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST"
+    )
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/watchlist/sync", methods=["POST"])
+def api_watchlist_sync():
+    """프론트 localStorage 관심종목 → 서버 파일 동기화 (알림용)."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+    items = data.get("items") or []
+    out = BASE_DIR / "cache" / "server_watchlist.json"
+    try:
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+    return jsonify({"status": "ok", "count": len(items)})
+
+
+def _load_server_watchlist() -> list:
+    f = BASE_DIR / "cache" / "server_watchlist.json"
+    if not f.exists():
+        return []
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) or []
+    except Exception:
+        return []
+
+
+# ── 알림 1: 장 시작 전 브리핑 (평일 08:30) ──
+def alert_morning_briefing():
+    try:
+        today_kst = now_kst().strftime("%Y-%m-%d")
+        lines = [f"📊 <b>오늘의 시황 브리핑</b> ({today_kst})", ""]
+
+        # 매크로: USD/KRW, WTI, VIX
+        macro = _read_fresh_json(BASE_DIR / "cache" / "macro_data.json", 24 * 60) or {}
+        for it in macro.get("items") or []:
+            if it["name"] in ("USD/KRW", "WTI 원유", "VIX", "미국 10년물"):
+                arrow = "🔴" if it["change_pct"] >= 0 else "🟢"
+                sign  = "+" if it["change_pct"] >= 0 else ""
+                lines.append(f"{arrow} {it['name']}: {it['value']} ({sign}{it['change_pct']}%)")
+        lines.append("")
+
+        # 오늘 경제 일정 (high impact)
+        import glob as _glob
+        econ_files = sorted(_glob.glob(str(BASE_DIR / "cache" / "economic_calendar_*.json")), reverse=True)
+        high_events = []
+        if econ_files:
+            try:
+                econ = json.loads(open(econ_files[0], encoding="utf-8").read())
+                for e in econ.get("events") or []:
+                    if e.get("date") == today_kst and e.get("impact") == "high":
+                        high_events.append(e)
+            except Exception:
+                pass
+        if high_events:
+            lines.append("📅 <b>오늘 주요 일정</b>")
+            for e in high_events[:5]:
+                lines.append(f"  🔴 {e.get('time') or '—'} {e.get('country_kr','')} {e.get('event_kr') or e.get('event') or ''}")
+        else:
+            lines.append("📅 오늘 high impact 지표 없음")
+        send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.warning("alert_morning_briefing: %s", exc)
+
+
+# ── 알림 2: 종목 발굴 Stage 2 신규 진입 ──
+def alert_discovery_new_entries():
+    try:
+        cur_file = BASE_DIR / "cache" / "discover_kr_stage2.json"
+        prev_file = BASE_DIR / "cache" / "discover_kr_stage2_prev.json"
+        if not cur_file.exists():
+            return
+        cur = json.loads(cur_file.read_text(encoding="utf-8"))
+        cur_top = [it for it in (cur.get("items") or [])[:20]]
+        cur_set = set(it["code"] for it in cur_top)
+
+        prev_set = set()
+        if prev_file.exists():
+            try:
+                prev = json.loads(prev_file.read_text(encoding="utf-8"))
+                prev_set = set(it["code"] for it in (prev.get("items") or [])[:20])
+            except Exception:
+                pass
+
+        new_codes = cur_set - prev_set
+        if new_codes:
+            lines = ["🔬 <b>종목 발굴 TOP20 신규 진입</b>", ""]
+            for it in cur_top:
+                if it["code"] in new_codes:
+                    chg = it.get("change_pct") or 0
+                    sign = "+" if chg >= 0 else ""
+                    lines.append(f"🇰🇷 <b>{it['name']}</b> ({it['code']}) · {it['total_score']}점 · {sign}{chg}%")
+                    s = it.get("scores") or {}
+                    lines.append(
+                        f"   mom={s.get('momentum',0)} flow={s.get('flow',0)} "
+                        f"val={s.get('valuation',0)} tech={s.get('technical',0)} sect={s.get('sector',0)}"
+                    )
+            send_telegram("\n".join(lines))
+
+        import shutil
+        shutil.copy2(cur_file, prev_file)
+    except Exception as exc:
+        log.warning("alert_discovery_new_entries: %s", exc)
+
+
+# ── 알림 3: 관심종목 급등/급락 (±5%) ──
+def alert_watchlist_price():
+    try:
+        watchlist = _load_server_watchlist()
+        if not watchlist:
+            return
+        uni = _load_naver_universe()
+        stocks = (uni or {}).get("stocks") or {}
+        alerts = []
+        for item in watchlist:
+            code = item.get("code") or ""
+            if (item.get("market") or "kr") != "kr":
+                continue
+            st = stocks.get(code)
+            if not st:
+                continue
+            chg = st.get("change_pct") or 0
+            if abs(chg) >= 5:
+                alerts.append({
+                    "code": code, "name": st.get("name", code),
+                    "price": st.get("close", 0), "chg": chg,
+                })
+        if alerts:
+            lines = ["⚠️ <b>관심종목 급등/급락</b>", ""]
+            for a in alerts:
+                emoji = "🔴" if a["chg"] >= 0 else "🟢"
+                sign = "+" if a["chg"] >= 0 else ""
+                lines.append(f"{emoji} <b>{a['name']}</b> ({a['code']})")
+                lines.append(f"   ₩{a['price']:,} ({sign}{a['chg']}%)")
+            send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.warning("alert_watchlist_price: %s", exc)
+
+
+# ── 알림 4: 관심종목 신규 리포트 ──
+def alert_new_reports():
+    try:
+        watchlist = _load_server_watchlist()
+        if not watchlist:
+            return
+        wl_codes = set(it.get("code") for it in watchlist if it.get("code"))
+        reports_file = BASE_DIR / "cache" / "company_reports.json"
+        if not reports_file.exists():
+            return
+        data = json.loads(reports_file.read_text(encoding="utf-8"))
+        today_prefix = now_kst().strftime("%y.%m")  # 26.04
+        matched = []
+        for r in data.get("reports") or []:
+            if r.get("stock_code") in wl_codes:
+                d = r.get("date") or ""
+                if d.startswith(today_prefix):
+                    matched.append(r)
+        if matched:
+            lines = ["📑 <b>관심종목 신규 리포트</b>", ""]
+            for r in matched[:5]:
+                lines.append(f"• <b>{r.get('stock_name')}</b> — {r.get('title','')}")
+                lines.append(f"   {r.get('broker','')} · {r.get('date','')}")
+            send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.warning("alert_new_reports: %s", exc)
+
+
+# ── 알림 6: 새벽 5:30 익일 시장 예측 (미국 옵션 + 야간선물 + 매크로) ──
+def alert_overnight_prediction():
+    """
+    새벽 5:30 (미국장 마감 직후) 종합 예측 브리핑.
+    SPY/QQQ 옵션 시그널 + 코스피200 야간선물 + 매크로 + 오늘 주요 일정.
+    """
+    try:
+        lines = [f"🔮 <b>익일 시장 예측 브리핑</b>",
+                 f"{now_kst().strftime('%Y-%m-%d %H:%M')} KST", ""]
+
+        # SPY/QQQ 옵션 시그널 (캐시 우선, 없으면 재계산)
+        for sym in ("SPY", "QQQ"):
+            try:
+                cache_file = BASE_DIR / "cache" / f"options_signal_{sym}.json"
+                data = _read_fresh_json(cache_file, 180)   # 3h 허용
+                if not data:
+                    data = _compute_options_signal(sym)
+                if not data or "error" in data:
+                    continue
+                flag = "🇺🇸"
+                o = data.get("overall") or {}
+                p = data.get("pcr") or {}
+                m = data.get("max_pain") or {}
+                g = data.get("gex") or {}
+                lines.append(f"{flag} <b>{sym}</b> ${data.get('spot_price')} · {o.get('emoji','🟡')} {o.get('direction','중립')}")
+                lines.append(f"  PCR {p.get('volume','—')} · MaxPain ${m.get('strike','—')} ({m.get('diff_pct',0):+.1f}%) · GEX {g.get('regime','—')}")
+                cw = g.get("call_wall") or {}
+                pw = g.get("put_wall") or {}
+                if cw.get("strike") or pw.get("strike"):
+                    lines.append(f"  저항 ${cw.get('strike','—')} / 지지 ${pw.get('strike','—')}")
+            except Exception as exc:
+                log.debug("overnight SPY/QQQ %s: %s", sym, exc)
+        lines.append("")
+
+        # 코스피200 야간선물
+        try:
+            nf = _read_fresh_json(BASE_DIR / "cache" / "night_futures.json", 180)
+            if not nf:
+                nf = _fetch_night_futures()
+            if nf and nf.get("night_close"):
+                sign = "+" if (nf.get("change_pct") or 0) >= 0 else ""
+                lines.append(f"🇰🇷 <b>코스피200 (^KS200)</b>")
+                lines.append(f"  종가 {nf['night_close']} ({sign}{nf.get('change_pct','—')}%)")
+                if nf.get("signal"):
+                    lines.append(f"  {nf['signal']}")
+                lines.append("")
+        except Exception as exc:
+            log.debug("overnight kr futures: %s", exc)
+
+        # 매크로 핵심 4개
+        try:
+            macro = _read_fresh_json(BASE_DIR / "cache" / "macro_data.json", 6 * 60)
+            if macro and macro.get("items"):
+                lines.append("📊 <b>주요 지표</b>")
+                for it in macro["items"]:
+                    if it["name"] in ("USD/KRW", "WTI 원유", "VIX", "미국 10년물", "BTC"):
+                        sign = "+" if it["change_pct"] >= 0 else ""
+                        lines.append(f"  {it['name']}: {it['value']} ({sign}{it['change_pct']}%)")
+                lines.append("")
+        except Exception as exc:
+            log.debug("overnight macro: %s", exc)
+
+        # 오늘 high impact 경제 일정
+        try:
+            today_kst = now_kst().strftime("%Y-%m-%d")
+            import glob as _glob
+            econ_files = sorted(
+                _glob.glob(str(BASE_DIR / "cache" / "economic_calendar_*.json")),
+                reverse=True,
+            )
+            if econ_files:
+                econ = json.loads(open(econ_files[0], encoding="utf-8").read())
+                today_evs = [
+                    e for e in (econ.get("events") or [])
+                    if e.get("date") == today_kst and e.get("impact") == "high"
+                ]
+                if today_evs:
+                    lines.append("📅 <b>오늘 주요 일정</b>")
+                    for e in today_evs[:5]:
+                        lines.append(
+                            f"  🔴 {e.get('time') or '—'} "
+                            f"{e.get('country_kr','')} "
+                            f"{e.get('event_kr') or e.get('event','')}"
+                        )
+        except Exception as exc:
+            log.debug("overnight calendar: %s", exc)
+
+        send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.warning("alert_overnight_prediction: %s", exc)
+
+
+def refresh_us_options_signal():
+    """미국장 시작 전(KST 22:00) 옵션 시그널 캐시 무효화 — 다음 조회 시 재수집."""
+    for sym in ("SPY", "QQQ"):
+        f = BASE_DIR / "cache" / f"options_signal_{sym}.json"
+        try:
+            if f.exists():
+                f.unlink()
+                log.info("[옵션] %s 캐시 삭제", sym)
+        except Exception as exc:
+            log.debug("refresh_us_options %s: %s", sym, exc)
+
+
+# ── 알림 5: 장 마감 요약 (평일 15:40) ──
+def alert_closing_summary():
+    try:
+        lines = ["🔔 <b>장 마감 요약</b>", ""]
+
+        # KOSPI/KOSDAQ
+        if DATA_JSON.exists():
+            try:
+                d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+                for label, key in (("KOSPI", "kospi"), ("KOSDAQ", "kosdaq")):
+                    idx = d.get(key) or {}
+                    val = idx.get("value")
+                    chg = idx.get("change_pct")
+                    if val is not None:
+                        sign = "+" if (chg or 0) >= 0 else ""
+                        lines.append(f"{label} {val:,.2f} ({sign}{chg}%)")
+            except Exception:
+                pass
+        lines.append("")
+
+        # 종목 발굴 TOP5 (KR stage2)
+        ds = BASE_DIR / "cache" / "discover_kr_stage2.json"
+        if ds.exists():
+            try:
+                dd = json.loads(ds.read_text(encoding="utf-8"))
+                lines.append("🔬 <b>종목 발굴 TOP5</b>")
+                for it in (dd.get("items") or [])[:5]:
+                    chg = it.get("change_pct") or 0
+                    sign = "+" if chg >= 0 else ""
+                    lines.append(f"  🇰🇷 {it['name']} {it['total_score']}점 ({sign}{chg}%)")
+            except Exception:
+                pass
+        send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.warning("alert_closing_summary: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 23 — ETF 히트맵
+# ─────────────────────────────────────────────────────────────────────────
+_ETF_THEMES = {
+    "반도체/AI": [
+        ("091160", "KODEX 반도체"),
+        ("395160", "TIGER AI반도체핵심공정"),
+        ("466920", "TIGER 코리아AI전력핵심설비"),
+        ("139260", "TIGER 200 IT"),
+    ],
+    "2차전지": [
+        ("305720", "KODEX 2차전지산업"),
+        ("364960", "TIGER 2차전지테마"),
+    ],
+    "바이오/헬스": [
+        ("244580", "KODEX 바이오"),
+        ("227540", "TIGER 헬스케어"),
+    ],
+    "방산/조선": [
+        ("464510", "TIGER 우주방산"),
+    ],
+    "레버리지/인버스": [
+        ("122630", "KODEX 레버리지"),
+        ("114800", "KODEX 인버스"),
+        ("252670", "KODEX 200선물인버스2X"),
+    ],
+    "미국 지수": [
+        ("379800", "KODEX 미국S&P500TR"),
+        ("381170", "TIGER 미국나스닥100"),
+        ("453810", "TIGER 미국필라델피아반도체나스닥"),
+    ],
+    "배당": [
+        ("211900", "KODEX 배당가치"),
+        ("161510", "TIGER 배당성장"),
+    ],
+    "에너지/화학": [
+        ("117460", "KODEX 에너지화학"),
+    ],
+}
+
+
+def _scrape_etf_price(code: str) -> dict | None:
+    """
+    네이버 금융 종목 페이지에서 ETF 시세 + 등락률 추출.
+    HTML 구조:
+      .no_today .blind        → 현재가
+      .no_exday em (2개)      → [전일대비 금액, 등락률 숫자(%제외)]
+      .no_exday .ico.plus/minus 또는 .no_up/.no_down → 부호
+    """
+    try:
+        import requests as _rq
+        from bs4 import BeautifulSoup
+        r = _rq.get(
+            "https://finance.naver.com/item/main.naver",
+            params={"code": code},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=8,
+        )
+        r.encoding = "euc-kr"
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        price = None
+        pt = soup.select_one(".no_today .blind")
+        if pt:
+            try:
+                price = int(pt.get_text(strip=True).replace(",", ""))
+            except Exception:
+                pass
+
+        change_pct = None
+        no_exday = soup.select_one(".no_exday")
+        if no_exday:
+            ems = no_exday.select("em")
+            if len(ems) >= 2:
+                # 마지막 em = 등락률, 그 안 .blind = 숫자
+                rate_em = ems[-1]
+                rate_blind = rate_em.select_one(".blind")
+                if rate_blind:
+                    try:
+                        change_pct = float(rate_blind.get_text(strip=True).replace(",", ""))
+                    except ValueError:
+                        pass
+            # 부호 판정: .ico.minus / .ico.plus / no_down / no_up
+            if change_pct is not None:
+                html = str(no_exday)
+                if "ico minus" in html or "no_down" in html:
+                    change_pct = -abs(change_pct)
+                elif "ico plus" in html or "no_up" in html:
+                    change_pct = abs(change_pct)
+        return {"code": code, "price": price, "change_pct": change_pct}
+    except Exception as exc:
+        log.debug("etf scrape %s fail: %s", code, exc)
+        return None
+
+
+@app.route("/api/etf_map")
+def api_etf_map():
+    """국내 주요 ETF 히트맵 — 테마별 가중평균 등락률. 30분 캐시."""
+    today = now_kst().strftime("%Y%m%d")
+    cache_file = BASE_DIR / "cache" / f"etf_map_{today}.json"
+    cached = _read_fresh_json(cache_file, 30)
+    if cached:
+        return jsonify(cached)
+
+    # 고유 ETF 코드 집합
+    unique_codes = {}
+    for theme, etfs in _ETF_THEMES.items():
+        for code, name in etfs:
+            unique_codes[code] = name
+
+    # 시세 스크랩
+    price_map: dict[str, dict] = {}
+    for code, name in unique_codes.items():
+        p = _scrape_etf_price(code)
+        if p:
+            p["name"] = name
+            price_map[code] = p
+        time.sleep(0.12)
+
+    # 테마 조립
+    themes = []
+    for theme_name, etfs in _ETF_THEMES.items():
+        stocks = []
+        for code, name in etfs:
+            info = price_map.get(code) or {"code": code, "name": name, "price": None, "change_pct": None}
+            stocks.append({
+                "code":       code,
+                "name":       name,
+                "price":      info.get("price"),
+                "change_pct": info.get("change_pct") or 0,
+                "volume_mn":  0,   # 거래대금 크롤링은 생략 (트리맵 가중은 동일 가중 fallback)
+            })
+        # 단순 평균 등락률
+        vals = [s["change_pct"] for s in stocks if s.get("change_pct") is not None]
+        avg = round(sum(vals) / len(vals), 2) if vals else 0
+        themes.append({
+            "name":             theme_name,
+            "weighted_avg_pct": avg,
+            "stock_count":      len(stocks),
+            "stocks":           stocks,
+        })
+    # 가중평균 절댓값 기준 정렬
+    themes.sort(key=lambda t: abs(t.get("weighted_avg_pct") or 0), reverse=True)
+
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "theme_count": len(themes),
+        "themes": themes,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 23 — 배당 스크리너
+# ─────────────────────────────────────────────────────────────────────────
+_DIV_SEED_CODES = [
+    "017670",  # SK텔레콤
+    "030200",  # KT
+    "032640",  # LG유플러스
+    "086790",  # 하나금융지주
+    "105560",  # KB금융
+    "055550",  # 신한지주
+    "316140",  # 우리금융지주
+    "000270",  # 기아
+    "005490",  # POSCO홀딩스
+    "051910",  # LG화학
+    "006400",  # 삼성SDI
+    "003550",  # LG
+    "000810",  # 삼성화재
+    "010130",  # 고려아연
+    "033780",  # KT&G
+    "005380",  # 현대차
+    "005930",  # 삼성전자
+    "000660",  # SK하이닉스
+    "138930",  # BNK금융지주
+    "175330",  # JB금융지주
+    "139130",  # DGB금융지주
+    "006260",  # LS
+    "097950",  # CJ제일제당
+    "011780",  # 금호석유
+    "010950",  # S-Oil
+    "003490",  # 대한항공
+    "090430",  # 아모레퍼시픽
+    "009540",  # HD한국조선해양
+    "024110",  # 기업은행
+    "034730",  # SK
+]
+
+
+@app.route("/api/dividend")
+def api_dividend():
+    """
+    배당수익률 상위 종목. 기존 /api/financial 캐시 재사용 우선,
+    없으면 네이버 main.naver 스크랩. 일 1회 캐시.
+    """
+    today = now_kst().strftime("%Y%m%d")
+    cache_file = BASE_DIR / "cache" / f"dividend_{today}.json"
+    cached = _read_fresh_json(cache_file, 1440)
+    if cached:
+        return jsonify(cached)
+
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    items: list[dict] = []
+    seen = set()
+
+    for code in _DIV_SEED_CODES:
+        try:
+            fin = _call_api_internal(f"/api/financial/{code}") or {}
+            dy = fin.get("dividend_yield")
+            if dy is None or dy <= 0:
+                continue
+            if code in seen:
+                continue
+            seen.add(code)
+            uni_stock = stocks.get(code) or {}
+            items.append({
+                "code":           code,
+                "name":           uni_stock.get("name") or fin.get("name") or code,
+                "price":          uni_stock.get("close") or 0,
+                "change_pct":     uni_stock.get("change_pct") or 0,
+                "dividend_yield": round(dy, 2),
+                "per":            fin.get("per"),
+                "pbr":            fin.get("pbr"),
+                "sector":         (uni_stock.get("sectors") or [None])[0] or "—",
+            })
+            time.sleep(0.05)
+        except Exception as exc:
+            log.debug("div fetch %s fail: %s", code, exc)
+            continue
+
+    items.sort(key=lambda x: x["dividend_yield"], reverse=True)
+
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":      len(items),
+        "items":      items,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
 def _startup():
     global _startup_done, _scheduler
     if _startup_done:
@@ -3167,6 +3954,33 @@ def _startup():
             _scheduled_update, "interval", minutes=interval,
             id="market_update", max_instances=1,
         )
+
+        # Phase 23: 텔레그램 알림 스케줄 (토큰 있을 때만)
+        if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
+            _scheduler.add_job(alert_morning_briefing, "cron",
+                               day_of_week="mon-fri", hour=8, minute=30,
+                               id="tg_morning")
+            _scheduler.add_job(alert_watchlist_price, "cron",
+                               day_of_week="mon-fri", hour="9-14", minute="0,30",
+                               id="tg_watchlist")
+            _scheduler.add_job(alert_new_reports, "cron",
+                               day_of_week="mon-fri", hour=10, minute=0,
+                               id="tg_reports")
+            _scheduler.add_job(alert_closing_summary, "cron",
+                               day_of_week="mon-fri", hour=15, minute=40,
+                               id="tg_closing")
+            # Phase 24 Step 3: 새벽 5:30 익일 예측 브리핑
+            _scheduler.add_job(alert_overnight_prediction, "cron",
+                               day_of_week="mon-fri", hour=5, minute=30,
+                               id="tg_overnight")
+            # Phase 24 Step 3: 밤 22:00 미국장 시작 전 옵션 캐시 무효화
+            _scheduler.add_job(refresh_us_options_signal, "cron",
+                               day_of_week="mon-fri", hour=22, minute=0,
+                               id="refresh_options")
+            log.info("[텔레그램] 알림 스케줄 6개 등록 (4 alert + overnight + refresh_options)")
+        else:
+            log.info("[텔레그램] 토큰 미설정 — 알림 비활성화")
+
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
     else:
@@ -4203,9 +5017,318 @@ def _extract_econ_date(event: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# PHASE 22 — 섹터 로테이션 / 동종비교 / 매크로
+# ─────────────────────────────────────────────────────────────────────────
+@app.route("/api/sector_rotation")
+def api_sector_rotation():
+    """
+    KR 업종별 1주(5d) / 1개월(20d) 수익률. pykrx 지수 API 차단 상태이므로
+    ticker_data sparkline + naver_universe 섹터로 거래대금 가중평균 집계.
+    6시간 캐시.
+    """
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"sector_rotation_{today}.json"
+    cached = _read_fresh_json(cache_file, 360)
+    if cached:
+        return jsonify(cached)
+
+    sparklines = _load_ticker_sparklines_kr()
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    if not sparklines or not stocks:
+        return jsonify({"error": "캐시 데이터 부족", "sectors": []}), 503
+
+    sectors_raw: dict[str, list[dict]] = {}
+    for code, st in stocks.items():
+        sp = sparklines.get(code)
+        if not sp or len(sp) < 20 or not sp[0]:
+            continue
+        sec_list = st.get("sectors") or []
+        if not sec_list:
+            continue
+        sector = sec_list[0]
+        try:
+            ret_5d  = (sp[-1] / sp[-5] - 1) * 100 if sp[-5] else None
+            ret_20d = (sp[-1] / sp[0]  - 1) * 100
+        except Exception:
+            continue
+        sectors_raw.setdefault(sector, []).append({
+            "code":      code,
+            "volume_mn": st.get("volume_mn") or 0,
+            "chg_today": st.get("change_pct") or 0,
+            "ret_5d":    ret_5d,
+            "ret_20d":   ret_20d,
+        })
+
+    def _weighted_avg(rows: list, key: str) -> float | None:
+        vals = [r for r in rows if r.get(key) is not None]
+        if not vals:
+            return None
+        total_w = sum(r["volume_mn"] for r in vals) or 0
+        if total_w > 0:
+            return round(
+                sum((r[key] or 0) * (r["volume_mn"] or 0) for r in vals) / total_w, 2
+            )
+        return round(sum((r[key] or 0) for r in vals) / len(vals), 2)
+
+    sectors_out: list[dict] = []
+    for name, rows in sectors_raw.items():
+        if len(rows) < 2:
+            continue
+        sectors_out.append({
+            "name":         name,
+            "stock_count":  len(rows),
+            "ret_1w":       _weighted_avg(rows, "ret_5d"),
+            "ret_1m":       _weighted_avg(rows, "ret_20d"),
+            "change_today": _weighted_avg(rows, "chg_today"),
+        })
+    sectors_out.sort(key=lambda x: (x.get("ret_1m") or 0), reverse=True)
+
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":      len(sectors_out),
+        "sectors":    sectors_out,
+        "note":       "1주=5영업일, 1개월=20영업일 sparkline 가중평균. 3개월 데이터 없음.",
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/peers/<code>")
+def api_peers_kr(code: str):
+    """KR 동종 업계 비교. naver_universe 같은 섹터 → 거래대금 상위 20, 12h 캐시."""
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+    cache_file = BASE_DIR / "cache" / f"peers_{code}.json"
+    cached = _read_fresh_json(cache_file, 720)
+    if cached:
+        return jsonify(cached)
+
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    target = stocks.get(code)
+    if not target:
+        return jsonify({"error": "종목 유니버스에 없음", "peers": []}), 404
+
+    target_sector = (target.get("sectors") or [None])[0]
+    if not target_sector:
+        return jsonify({"error": "섹터 정보 없음", "peers": []}), 404
+
+    same_sector = []
+    for c, s in stocks.items():
+        if (s.get("sectors") or [None])[0] != target_sector:
+            continue
+        same_sector.append({
+            "code":       c,
+            "name":       s.get("name"),
+            "price":      s.get("close"),
+            "change_pct": s.get("change_pct"),
+            "volume_mn":  s.get("volume_mn") or 0,
+        })
+    same_sector.sort(key=lambda x: x["volume_mn"], reverse=True)
+    top_peers = same_sector[:20]
+
+    # 기존 cache/financial_*.json 만 재사용 (신규 호출 없음)
+    for p in top_peers:
+        fin_cache = BASE_DIR / "cache" / f"financial_{p['code']}.json"
+        p["per"] = None
+        p["pbr"] = None
+        p["industry_per"] = None
+        if fin_cache.exists():
+            try:
+                age_hr = (now_kst().timestamp() - fin_cache.stat().st_mtime) / 3600
+                if age_hr < 24:
+                    fin = json.loads(fin_cache.read_text(encoding="utf-8"))
+                    p["per"] = fin.get("per")
+                    p["pbr"] = fin.get("pbr")
+                    p["industry_per"] = fin.get("industry_per")
+            except Exception:
+                pass
+
+    per_vals = [p["per"] for p in top_peers if isinstance(p.get("per"), (int, float)) and p["per"] > 0]
+    pbr_vals = [p["pbr"] for p in top_peers if isinstance(p.get("pbr"), (int, float)) and p["pbr"] > 0]
+    sector_avg = {
+        "per": round(sum(per_vals) / len(per_vals), 1) if per_vals else None,
+        "pbr": round(sum(pbr_vals) / len(pbr_vals), 2) if pbr_vals else None,
+    }
+    target_rank = next((i for i, p in enumerate(top_peers) if p["code"] == code), -1)
+
+    result = {
+        "code":        code,
+        "sector":      target_sector,
+        "sector_avg":  sector_avg,
+        "target_rank": target_rank,
+        "peer_count":  len(top_peers),
+        "peers":       top_peers,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/us/peers/<symbol>")
+def api_peers_us(symbol: str):
+    """US 동종비교. sp500_tickers + us_market + us_yinfo 캐시 조합, 12h 캐시."""
+    symbol = symbol.upper()
+    cache_file = BASE_DIR / "cache" / f"us_peers_{symbol}.json"
+    cached = _read_fresh_json(cache_file, 720)
+    if cached:
+        return jsonify(cached)
+
+    sp_file = BASE_DIR / "cache" / "sp500_tickers.json"
+    if not sp_file.exists():
+        return jsonify({"error": "sp500_tickers.json 없음", "peers": []}), 503
+    try:
+        sp500 = json.loads(sp_file.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"error": "sp500 파싱 실패", "peers": []}), 503
+
+    target = next((t for t in sp500 if t.get("symbol") == symbol), None)
+    if not target:
+        return jsonify({"error": "S&P500 목록에 없음", "peers": []}), 404
+    sector = target.get("sector")
+    if not sector:
+        return jsonify({"error": "섹터 정보 없음", "peers": []}), 404
+
+    us_market = _fetch_us_market_data()
+    stocks_by_sym = {s["symbol"]: s for s in (us_market.get("all_stocks") or [])}
+    same_sector = [t for t in sp500 if t.get("sector") == sector]
+
+    peers: list[dict] = []
+    for t in same_sector:
+        sym = t["symbol"]
+        m = stocks_by_sym.get(sym, {})
+        p = {
+            "code":         sym,
+            "symbol":       sym,
+            "name":         t.get("name") or sym,
+            "sub_industry": t.get("sub_industry"),
+            "price":        m.get("price"),
+            "change_pct":   m.get("change_pct"),
+            "volume_mn":    m.get("volume_mn") or 0,
+            "per":          None,
+            "pbr":          None,
+            "roe":          None,
+            "market_cap":   None,
+        }
+        yinfo_cache = BASE_DIR / "cache" / f"us_yinfo_{sym}.json"
+        if yinfo_cache.exists():
+            try:
+                age_hr = (now_kst().timestamp() - yinfo_cache.stat().st_mtime) / 3600
+                if age_hr < 24:
+                    info = json.loads(yinfo_cache.read_text(encoding="utf-8"))
+                    tpe = info.get("trailingPE")
+                    pb  = info.get("priceToBook")
+                    roe = info.get("returnOnEquity")
+                    p["per"]        = round(tpe, 1) if tpe else None
+                    p["pbr"]        = round(pb, 2)  if pb  else None
+                    p["roe"]        = round(roe * 100, 1) if roe else None
+                    p["market_cap"] = info.get("marketCap")
+            except Exception:
+                pass
+        peers.append(p)
+
+    peers.sort(key=lambda x: (x.get("market_cap") or 0), reverse=True)
+    peers = peers[:25]
+
+    per_vals = [p["per"] for p in peers if isinstance(p.get("per"), (int, float)) and p["per"] > 0]
+    pbr_vals = [p["pbr"] for p in peers if isinstance(p.get("pbr"), (int, float)) and p["pbr"] > 0]
+    sector_avg = {
+        "per": round(sum(per_vals) / len(per_vals), 1) if per_vals else None,
+        "pbr": round(sum(pbr_vals) / len(pbr_vals), 2) if pbr_vals else None,
+    }
+    target_rank = next((i for i, p in enumerate(peers) if p["symbol"] == symbol), -1)
+
+    result = {
+        "symbol":      symbol,
+        "sector":      sector,
+        "sector_avg":  sector_avg,
+        "target_rank": target_rank,
+        "peer_count":  len(peers),
+        "peers":       peers,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+_MACRO_TICKERS = [
+    ("USD/KRW",     "KRW=X",    "currency",   ""),
+    ("USD/JPY",     "JPY=X",    "currency",   ""),
+    ("EUR/USD",     "EURUSD=X", "currency",   ""),
+    ("USD/CNY",     "CNY=X",    "currency",   ""),
+    ("WTI 원유",    "CL=F",     "commodity",  "$/bbl"),
+    ("금",          "GC=F",     "commodity",  "$/oz"),
+    ("은",          "SI=F",     "commodity",  "$/oz"),
+    ("구리",        "HG=F",     "commodity",  "$/lb"),
+    ("천연가스",    "NG=F",     "commodity",  "$"),
+    ("미국 10년물", "^TNX",     "bond",       "%"),
+    ("VIX",         "^VIX",     "volatility", "pt"),
+    ("BTC",         "BTC-USD",  "crypto",     "$"),
+]
+
+
+@app.route("/api/macro")
+def api_macro():
+    """yfinance 기반 글로벌 매크로 12종. 30분 캐시."""
+    cache_file = BASE_DIR / "cache" / "macro_data.json"
+    cached = _read_fresh_json(cache_file, 30)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return jsonify({"error": "yfinance 미설치", "items": []}), 500
+
+    items: list[dict] = []
+    for name, ticker, category, unit in _MACRO_TICKERS:
+        try:
+            t = _yf.Ticker(ticker)
+            hist = t.history(period="5d")
+            if hist is None or hist.empty:
+                continue
+            closes = [float(c) for c in hist["Close"].tolist() if c == c]
+            if not closes:
+                continue
+            cur = round(closes[-1], 4)
+            prev = round(closes[-2], 4) if len(closes) >= 2 else cur
+            change = round(cur - prev, 4)
+            change_pct = round((cur / prev - 1) * 100, 2) if prev else 0.0
+            items.append({
+                "name": name, "ticker": ticker, "category": category,
+                "value": cur, "change": change, "change_pct": change_pct, "unit": unit,
+            })
+            time.sleep(0.05)
+        except Exception as exc:
+            log.debug("macro %s fail: %s", ticker, exc)
+            continue
+
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":      len(items),
+        "items":      items,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # PHASE 20 — DART 12분기 손익계산서 (슬림)
-# 실제 DART API 는 집계 항목(매출액/원가/판관비/영업이익/순이익)만 반환하므로
-# 세부 비용 분류(Tier 2) 는 불가능. 공헌이익률은 GPM 근사 + 수동 변동비율 입력으로 대체.
 # ─────────────────────────────────────────────────────────────────────────
 _DART_CORP_MAP_CACHE: dict | None = None
 
@@ -5543,6 +6666,13 @@ def _run_stage2_kr() -> list | None:
     out = BASE_DIR / "cache" / "discover_kr_stage2.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+    # Phase 23: Stage 2 완료 시 텔레그램으로 신규 진입 종목 알림 (silent fail)
+    try:
+        alert_discovery_new_entries()
+    except Exception as exc:
+        log.debug("alert_discovery_new_entries failed: %s", exc)
+
     return candidates
 
 
