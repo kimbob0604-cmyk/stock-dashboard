@@ -485,24 +485,52 @@ def api_themes_post():
 
 @app.route("/api/stock_search")
 def api_stock_search():
-    import glob as _glob
-    q = request.args.get("q", "").strip()
+    """
+    국내 종목 검색. 데이터 소스 우선순위:
+      1) naver_universe (4,000+ 종목 전체) — Phase 10
+      2) stock_master (테마 구성 134종목) — 폴백
+    대소문자 무시 부분 일치. 정확 일치 → 접두 일치 → 부분 일치 순 정렬.
+    """
+    q = (request.args.get("q") or "").strip()
     if len(q) < 2:
         return jsonify([])
-    masters = sorted(
-        _glob.glob(str(BASE_DIR / "cache" / "stock_master_*.json")), reverse=True
-    )
-    if not masters:
-        return jsonify([])
-    with open(masters[0], encoding="utf-8") as f:
-        master: dict = json.load(f)
-    results = []
-    for code, name in master.items():
-        if q in code or q in name:
-            results.append({"code": code, "name": name})
-        if len(results) >= 10:
-            break
-    return jsonify(results)
+    ql = q.lower()
+
+    def _score(code: str, name: str) -> int:
+        """낮을수록 앞에 노출. 0=정확일치, 1=접두, 2=부분."""
+        cl = code.lower()
+        nl = (name or "").lower()
+        if cl == ql or nl == ql: return 0
+        if cl.startswith(ql) or nl.startswith(ql): return 1
+        return 2
+
+    results: list[tuple[int, str, str]] = []
+
+    # 1) naver_universe 우선
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    if stocks:
+        for code, rec in stocks.items():
+            name = rec.get("name") or ""
+            if ql in code.lower() or ql in name.lower():
+                results.append((_score(code, name), code, name))
+    else:
+        # 2) 폴백: 테마 기반 stock_master
+        import glob as _glob
+        masters = sorted(
+            _glob.glob(str(BASE_DIR / "cache" / "stock_master_*.json")), reverse=True
+        )
+        if masters:
+            try:
+                master: dict = json.loads(open(masters[0], encoding="utf-8").read())
+                for code, name in master.items():
+                    if ql in code.lower() or ql in (name or "").lower():
+                        results.append((_score(code, name), code, name))
+            except Exception:
+                pass
+
+    results.sort(key=lambda x: (x[0], x[1]))
+    return jsonify([{"code": c, "name": n} for _, c, n in results[:10]])
 
 
 def _get_krx_all_stocks_cached() -> dict:
