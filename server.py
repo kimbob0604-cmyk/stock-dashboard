@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import subprocess
+import re
 import sys
 import threading
 import time
@@ -761,15 +762,21 @@ def _fetch_us_market_data(force: bool = False) -> dict:
     S&P 500 전 종목 당일 시세 batch 수집 + 섹터별 집계.
     캐시: cache/us_market_{YYYYMMDD_KST}.json
     TTL: 미국 장중 15분 / 장외 24시간.
+    부분 빌드(< 400종목) 감지 시 자동 재빌드.
     """
     today = now_kst().strftime("%Y%m%d")
     cache_file = BASE_DIR / "cache" / f"us_market_{today}.json"
+    MIN_STOCKS = 400   # S&P500 정상 빌드 최소 기준 (yfinance 실패 허용치 ~100)
     if cache_file.exists() and not force:
         try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            n_cached = len(cached.get("all_stocks") or [])
             age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
             ttl = 15 if _is_us_market_hours() else 1440
-            if age_min < ttl:
-                return json.loads(cache_file.read_text(encoding="utf-8"))
+            if n_cached >= MIN_STOCKS and age_min < ttl:
+                return cached
+            if n_cached < MIN_STOCKS:
+                print(f"[US] 부분 빌드 감지 ({n_cached}종목) — 재빌드")
         except Exception:
             pass
 
@@ -788,8 +795,9 @@ def _fetch_us_market_data(force: bool = False) -> dict:
     stocks: list[dict] = []
     print(f"[US] yfinance batch download, {len(symbols)} 종목…")
 
-    # 100 종목씩 청크로 나누어 실패 격리
-    chunk_size = 100
+    # 50 종목씩 청크 (rate-limit 완화) + 청크간 sleep
+    chunk_size = 50
+    failed_chunks: list[list[str]] = []
     for i in range(0, len(symbols), chunk_size):
         chunk = symbols[i:i + chunk_size]
         try:
@@ -804,6 +812,12 @@ def _fetch_us_market_data(force: bool = False) -> dict:
             )
         except Exception as exc:
             print(f"[US chunk {i}] fail: {exc}")
+            failed_chunks.append(chunk)
+            continue
+        if df is None or df.empty:
+            print(f"[US chunk {i}] empty result — retry later")
+            failed_chunks.append(chunk)
+            time.sleep(0.3)
             continue
 
         for sym in chunk:
@@ -830,9 +844,40 @@ def _fetch_us_market_data(force: bool = False) -> dict:
                 })
             except Exception:
                 continue
+        time.sleep(0.3)   # 청크 간 rate-limit 완화
+
+    # 실패 청크 개별 재시도 (1회)
+    if failed_chunks:
+        retry_syms = [s for chunk in failed_chunks for s in chunk]
+        print(f"[US] 실패 청크 재시도: {len(retry_syms)} 종목 (개별)")
+        for sym in retry_syms:
+            try:
+                t_df = _yf.Ticker(sym).history(period="5d", auto_adjust=True)
+                if t_df is None or t_df.empty:
+                    continue
+                cur = float(t_df["Close"].iloc[-1])
+                prev = float(t_df["Close"].iloc[-2]) if len(t_df) >= 2 else cur
+                chg_pct = round((cur / prev - 1) * 100, 2) if prev else 0.0
+                vol = int(t_df["Volume"].iloc[-1] or 0)
+                info = by_sym[sym]
+                stocks.append({
+                    "symbol":     sym,
+                    "name":       info["name"],
+                    "sector":     info["sector"],
+                    "price":      round(cur, 2),
+                    "prev_close": round(prev, 2),
+                    "change_pct": chg_pct,
+                    "volume":     vol,
+                    "volume_mn":  round(vol * cur / 1_000_000, 1),
+                })
+            except Exception as exc:
+                print(f"[US retry] {sym}: {exc}")
+            time.sleep(0.05)
 
     if not stocks:
         return {"error": "yfinance 응답 없음", "sectors": [], "all_stocks": []}
+
+    print(f"[US] yfinance 최종: {len(stocks)}/{len(symbols)} 종목 수집")
 
     # 섹터별 그룹
     sectors_map: dict = {}
@@ -878,13 +923,21 @@ def _fetch_us_market_data(force: bool = False) -> dict:
 def _build_us_market_background():
     """
     서버 부팅 시 백그라운드로 S&P 500 전 종목 batch 를 돌린다.
-    초회 빌드 ~180s 소요 (yfinance). 캐시 존재 시 즉시 return.
+    초회 빌드 ~180s 소요 (yfinance). 정상 캐시(≥400종목) 존재 시 스킵.
+    부분 빌드는 감지하여 재실행.
     """
     today = now_kst().strftime("%Y%m%d")
     out_file = BASE_DIR / "cache" / f"us_market_{today}.json"
     if out_file.exists():
-        log.info("us_market 캐시 이미 존재 — 스킵 (%s)", out_file.name)
-        return
+        try:
+            cached = json.loads(out_file.read_text(encoding="utf-8"))
+            n = len(cached.get("all_stocks") or [])
+            if n >= 400:
+                log.info("us_market 캐시 정상 (%d종목) — 스킵 (%s)", n, out_file.name)
+                return
+            log.warning("us_market 부분 빌드 감지 (%d종목) — 재빌드 강제", n)
+        except Exception as exc:
+            log.warning("us_market 캐시 읽기 실패 — 재빌드: %s", exc)
     lock = out_file.with_suffix(".lock")
     if lock.exists():
         return
@@ -1866,60 +1919,258 @@ def api_flow(code: str):
     return jsonify(result)
 
 
+def _fetch_krx_shorting(kind: str) -> dict:
+    """
+    공매도 상위 종목 조회. kind: 'ratio' (거래 상위) | 'balance' (잔고 상위).
+
+    3-tier fallback:
+      1) data.krx.co.kr getJsonData (pykrx 와 동일 bld, 세션 쿠키)
+      2) pykrx 공매도_거래상위_50종목 / 공매도_잔고상위_50종목 클래스 직접 호출
+      3) pykrx get_shorting_balance_by_ticker (전종목 fetch 후 정렬)
+
+    어느 단계든 KOSPI + KOSDAQ 를 합쳐 상위 30 반환.
+    모든 소스 실패 시 status='blocked' + attempted 소스 목록 반환.
+    """
+    assert kind in ("ratio", "balance")
+    bld = ("dbms/MDC/STAT/srt/MDCSTAT30401" if kind == "ratio"
+           else "dbms/MDC/STAT/srt/MDCSTAT30801")
+    attempted: list[dict] = []
+
+    # 직전 영업일 후보 (오늘 데이터는 보통 T+1 에 공개)
+    today_dt = now_kst().date()
+    candidates = []
+    for back in range(1, 8):
+        d = today_dt - timedelta(days=back)
+        if d.weekday() < 5:
+            candidates.append(d.strftime("%Y%m%d"))
+
+    # ── Tier 1: data.krx.co.kr getJsonData ──
+    try:
+        import requests as _rq
+        sess = _rq.Session()
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) "
+                          "AppleWebKit/537.36 Chrome/120",
+            "Referer": "http://data.krx.co.kr/",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        # 초기 쿠키 획득
+        try:
+            sess.get("http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd"
+                     "?menuId=MDC0201020502", timeout=8)
+        except Exception:
+            pass
+        url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+
+        rows_combined: list[dict] = []
+        err_msgs: list[str] = []
+        for trdDd in candidates[:3]:
+            for mktTpCd in (1, 2):  # 1=KOSPI, 2=KOSDAQ
+                body = {"bld": bld, "trdDd": trdDd, "mktTpCd": mktTpCd}
+                try:
+                    resp = sess.post(url, data=body, timeout=10)
+                    if resp.status_code != 200:
+                        err_msgs.append(f"HTTP {resp.status_code} ({trdDd}/mkt{mktTpCd})")
+                        continue
+                    if not resp.text or not resp.text.strip():
+                        err_msgs.append(f"empty body ({trdDd}/mkt{mktTpCd})")
+                        continue
+                    try:
+                        j = resp.json()
+                    except ValueError:
+                        err_msgs.append(f"non-JSON ({trdDd}/mkt{mktTpCd})")
+                        continue
+                    out = j.get("OutBlock_1") or j.get("output") or []
+                    if out:
+                        rows_combined.extend(out)
+                except Exception as exc:
+                    err_msgs.append(f"{type(exc).__name__}: {str(exc)[:60]}")
+            if rows_combined:
+                break
+        attempted.append({
+            "source": "data.krx.co.kr getJsonData",
+            "bld":    bld,
+            "ok":     bool(rows_combined),
+            "errors": err_msgs[:4],
+        })
+        if rows_combined:
+            return _normalize_shorting_krx_rows(rows_combined, kind)
+    except Exception as exc:
+        attempted.append({"source": "data.krx.co.kr", "ok": False,
+                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
+
+    # ── Tier 2: pykrx 클래스 직접 호출 ──
+    try:
+        from pykrx.website.krx.market.core import (
+            공매도_거래상위_50종목, 공매도_잔고상위_50종목,
+        )
+        Cls = 공매도_거래상위_50종목 if kind == "ratio" else 공매도_잔고상위_50종목
+        rows_combined = []
+        err_msgs = []
+        for trdDd in candidates[:3]:
+            for mktTpCd in (1, 2):
+                try:
+                    df = Cls().fetch(trdDd, mktTpCd)
+                    if df is not None and len(df):
+                        rows_combined.extend(df.to_dict(orient="records"))
+                except Exception as exc:
+                    err_msgs.append(f"{trdDd}/mkt{mktTpCd}: {str(exc)[:60]}")
+            if rows_combined:
+                break
+        attempted.append({
+            "source": "pykrx direct",
+            "ok":     bool(rows_combined),
+            "errors": err_msgs[:4],
+        })
+        if rows_combined:
+            return _normalize_shorting_krx_rows(rows_combined, kind)
+    except ImportError:
+        attempted.append({"source": "pykrx direct", "ok": False,
+                          "errors": ["pykrx 미설치"]})
+    except Exception as exc:
+        attempted.append({"source": "pykrx direct", "ok": False,
+                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
+
+    # ── Tier 3: pykrx 고수준 wrapper ──
+    try:
+        from pykrx import stock as _stock
+        dfs = []
+        errs = []
+        for trdDd in candidates[:2]:
+            for market in ("KOSPI", "KOSDAQ"):
+                try:
+                    df = _stock.get_shorting_balance_by_ticker(trdDd, market)
+                    if df is not None and len(df):
+                        dfs.append(df)
+                except Exception as exc:
+                    errs.append(f"{trdDd}/{market}: {str(exc)[:60]}")
+            if dfs:
+                break
+        attempted.append({
+            "source": "pykrx wrapper",
+            "ok":     bool(dfs),
+            "errors": errs[:4],
+        })
+        if dfs:
+            import pandas as _pd
+            df_all = _pd.concat(dfs)
+            return _normalize_shorting_pykrx_df(df_all, kind)
+    except Exception as exc:
+        attempted.append({"source": "pykrx wrapper", "ok": False,
+                          "errors": [f"{type(exc).__name__}: {str(exc)[:80]}"]})
+
+    return {
+        "status":   "blocked",
+        "kind":     kind,
+        "stocks":   [],
+        "attempted": attempted,
+        "message": (
+            "공매도 데이터 소스에 접근할 수 없습니다. "
+            "KRX 공매도 통계 API (data.krx.co.kr) 가 외부 접근을 차단한 상태이며, "
+            "네이버 금융도 공매도 종합 페이지를 제공하지 않습니다. "
+            "KRX Open API 의 공매도 엔드포인트 구독 또는 벤더 데이터(Bloomberg/Refinitiv) "
+            "연동이 필요합니다."
+        ),
+    }
+
+
+def _normalize_shorting_krx_rows(rows: list, kind: str) -> dict:
+    """KRX getJsonData / pykrx.core 응답을 공통 스키마로 변환."""
+    out: list[dict] = []
+    for row in rows:
+        code = (row.get("ISU_SRT_CD") or row.get("ISU_CD") or "").strip()
+        name = (row.get("ISU_ABBRV") or row.get("ISU_NM") or "").strip()
+        if not code or not name:
+            continue
+        def _num(v) -> float | None:
+            if v is None or v == "":
+                return None
+            try:
+                return float(str(v).replace(",", ""))
+            except ValueError:
+                return None
+        ratio   = _num(row.get("TDD_SRTSELL_WT") or row.get("BAL_RTO"))
+        balance = _num(row.get("BAL_AMT") or row.get("CVSRTSELL_TRDVAL"))
+        volume  = _num(row.get("CVSRTSELL_TRDVOL") or row.get("BAL_QTY"))
+        mktcap  = _num(row.get("MKTCAP"))
+        out.append({
+            "code": code, "name": name,
+            "ratio":   ratio,
+            "balance": int(balance) if balance is not None else None,
+            "volume":  int(volume)  if volume  is not None else None,
+            "mktcap":  int(mktcap)  if mktcap  is not None else None,
+        })
+    # 상위 30 정렬
+    key = "ratio" if kind == "ratio" else "balance"
+    out.sort(key=lambda x: (x.get(key) or 0), reverse=True)
+    return {"status": "ok", "kind": kind, "count": len(out), "stocks": out[:30]}
+
+
+def _normalize_shorting_pykrx_df(df, kind: str) -> dict:
+    """pykrx get_shorting_balance_by_ticker DataFrame → 공통 스키마."""
+    ratio_col   = next((c for c in df.columns if "비중"    in c), None)
+    balance_col = next((c for c in df.columns if "잔고금액" in c or "금액" in c), None)
+    volume_col  = next((c for c in df.columns if "잔고수량" in c or "수량" in c), None)
+    key_col = ratio_col if kind == "ratio" else (balance_col or ratio_col)
+    if key_col is None:
+        return {"status": "blocked", "kind": kind, "stocks": [],
+                "message": "공매도 컬럼 없음"}
+    df2 = df.sort_values(key_col, ascending=False).head(30)
+    out = []
+    for code, row in df2.iterrows():
+        out.append({
+            "code": str(code),
+            "name": row.get("종목명", ""),
+            "ratio":   float(row[ratio_col])   if ratio_col   else None,
+            "balance": int(row[balance_col])   if balance_col else None,
+            "volume":  int(row[volume_col])    if volume_col  else None,
+            "mktcap":  None,
+        })
+    return {"status": "ok", "kind": kind, "count": len(out), "stocks": out}
+
+
+def _cached_short(kind: str) -> dict:
+    """캐시 확인 + fetch + 저장. blocked 는 15분, ok 는 24시간 캐시."""
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"short_{kind}_{today}.json"
+    if cache_file.exists():
+        try:
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            ttl = 1440 if cached.get("status") == "ok" else 15
+            if age_min < ttl:
+                return cached
+        except Exception:
+            pass
+    result = _fetch_krx_shorting(kind)
+    result["updated_at"] = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return result
+
+
+@app.route("/api/short/ratio")
+def api_short_ratio():
+    """공매도 비중(거래) 상위 종목."""
+    return jsonify(_cached_short("ratio"))
+
+
+@app.route("/api/short/balance")
+def api_short_balance():
+    """공매도 잔고 상위 종목."""
+    return jsonify(_cached_short("balance"))
+
+
 @app.route("/api/short")
 def api_short():
-    """
-    공매도 현황 — pykrx get_shorting_balance_by_ticker 시도.
-    Cache: cache/short_{sort}_{date}.json
-    """
+    """레거시 라우트 — /api/short?sort=ratio|balance → 신규 엔드포인트로 위임."""
     sort_by = (request.args.get("sort") or "ratio").strip()
     if sort_by not in ("ratio", "balance"):
         sort_by = "ratio"
-
-    today      = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"short_{sort_by}_{today}.json"
-    if cache_file.exists():
-        return Response(
-            cache_file.read_text(encoding="utf-8"),
-            content_type="application/json; charset=utf-8",
-        )
-
-    try:
-        from pykrx import stock as _stock
-    except ImportError:
-        return jsonify({"error": "pykrx 미설치"}), 500
-
-    try:
-        df = _stock.get_shorting_balance_by_ticker(today, "KOSPI")
-    except Exception as exc:
-        return jsonify({
-            "error": f"pykrx 공매도 API 호출 실패 ({exc})",
-            "hint":  "KRX_API_KEY 환경변수 설정 후 사용 가능합니다.",
-        }), 503
-
-    if df is None or df.empty:
-        return jsonify({"error": "데이터 없음"}), 503
-
-    ratio_col   = next((c for c in df.columns if "비중"    in c), None)
-    balance_col = next((c for c in df.columns if "잔고금액" in c or "금액" in c), None)
-    key_col     = ratio_col if sort_by == "ratio" else (balance_col or ratio_col)
-    if key_col is None:
-        return jsonify({"error": "공매도 컬럼 없음"}), 503
-
-    df_sorted = df.sort_values(key_col, ascending=False).head(30)
-    stocks = []
-    for code, row in df_sorted.iterrows():
-        stocks.append({
-            "code":    str(code),
-            "name":    row.get("종목명", ""),
-            "ratio":   float(row[ratio_col])   if ratio_col   else None,
-            "balance": int(row[balance_col])   if balance_col else None,
-        })
-
-    result = {"sort": sort_by, "stocks": stocks}
-    cache_file.parent.mkdir(exist_ok=True)
-    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return jsonify(result)
+    return jsonify(_cached_short(sort_by))
 
 
 def _parse_pct(s: str) -> float:
@@ -3454,6 +3705,1292 @@ def _read_fresh_json(path, ttl_min: float) -> dict | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 17 — 리서치: 섹터/기업 리포트 수집 + 추천 스코어링
+# ─────────────────────────────────────────────────────────────────────────
+_BUY_WORDS  = {"매수", "buy", "strong buy", "outperform", "비중확대", "trading buy"}
+_HOLD_WORDS = {"중립", "hold", "neutral", "시장수익률", "marketperform"}
+_SELL_WORDS = {"매도", "sell", "strong sell", "underperform", "비중축소"}
+
+
+def _scrape_naver_research_list(kind: str, pages: int) -> list[dict]:
+    """
+    네이버 리서치 목록 페이지 스크래핑.
+    kind: 'industry' (산업분석) 또는 'company' (기업분석).
+    반환: list of dict. 각 item 의 필드는 아래 주석 참고.
+    """
+    import requests as _rq
+    from bs4 import BeautifulSoup
+    out: list[dict] = []
+    for page in range(1, pages + 1):
+        url = f"https://finance.naver.com/research/{kind}_list.naver"
+        try:
+            res = _rq.get(
+                url, params={"page": page},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=10,
+            )
+            res.encoding = "euc-kr"
+            soup = BeautifulSoup(res.text, "html.parser")
+        except Exception as exc:
+            log.debug("research %s page %d fail: %s", kind, page, exc)
+            continue
+
+        table = soup.select_one("table.type_1")
+        if not table:
+            continue
+        for row in table.select("tr"):
+            cols = row.select("td")
+            if len(cols) < 5:
+                continue
+            name_tag  = cols[0].select_one("a")
+            title_tag = cols[1].select_one("a")
+            if not title_tag:
+                continue
+
+            entry: dict = {
+                "title":  title_tag.get_text(strip=True),
+                "broker": cols[2].get_text(strip=True) if len(cols) > 2 else "",
+                "date":   cols[4].get_text(strip=True) if len(cols) > 4 else "",
+            }
+            detail_href = title_tag.get("href", "")
+            if detail_href:
+                entry["detail_link"] = f"https://finance.naver.com/research/{detail_href}"
+                m = re.search(r"nid=(\d+)", detail_href)
+                if m:
+                    entry["nid"] = m.group(1)
+
+            # PDF 링크 (컬럼 3 또는 row 전체에서)
+            pdf_a = cols[3].select_one('a[href$=".pdf"]') if len(cols) > 3 else None
+            if not pdf_a:
+                for a in row.select('a[href$=".pdf"]'):
+                    pdf_a = a; break
+            entry["pdf_url"] = pdf_a.get("href", "") if pdf_a else ""
+
+            if kind == "industry":
+                entry["sector"] = cols[0].get_text(strip=True)
+            else:
+                entry["stock_name"] = name_tag.get_text(strip=True) if name_tag else cols[0].get_text(strip=True)
+                code_href = (name_tag.get("href") or "") if name_tag else ""
+                m = re.search(r"code=(\d{6})", code_href)
+                entry["stock_code"] = m.group(1) if m else ""
+
+            out.append(entry)
+        time.sleep(0.3)
+    return out
+
+
+@app.route("/api/research/sectors")
+def api_research_sectors():
+    """네이버 산업분석 리스트 + 섹터별 빈도. 6시간 캐시."""
+    cache_file = BASE_DIR / "cache" / "sector_reports.json"
+    cached = _read_fresh_json(cache_file, 360)
+    if cached:
+        return jsonify(cached)
+
+    reports = _scrape_naver_research_list("industry", pages=3)
+    freq: dict[str, int] = {}
+    for r in reports:
+        s = r.get("sector") or "기타"
+        freq[s] = freq.get(s, 0) + 1
+    freq_sorted = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+
+    result = {
+        "updated_at":       now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":            len(reports),
+        "reports":          reports,
+        "sector_frequency": freq_sorted,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/research/companies")
+def api_research_companies():
+    """네이버 기업분석 리스트 + 종목별 리포트 수. 3시간 캐시."""
+    cache_file = BASE_DIR / "cache" / "company_reports.json"
+    cached = _read_fresh_json(cache_file, 180)
+    if cached:
+        return jsonify(cached)
+
+    reports = _scrape_naver_research_list("company", pages=5)
+
+    # 종목 단위 집계 (목표가/의견은 list 에 없으므로 None → recommend 엔드포인트에서 보강)
+    consensus: dict[str, dict] = {}
+    for r in reports:
+        code = r.get("stock_code")
+        if not code:
+            continue
+        c = consensus.setdefault(code, {
+            "code":         code,
+            "name":         r.get("stock_name", ""),
+            "report_count": 0,
+            "brokers":      set(),
+            "latest_date":  "",
+            "latest_title": "",
+        })
+        c["report_count"] += 1
+        if r.get("broker"):
+            c["brokers"].add(r["broker"])
+        if r.get("date") and (not c["latest_date"] or r["date"] > c["latest_date"]):
+            c["latest_date"]  = r["date"]
+            c["latest_title"] = r.get("title", "")
+
+    consensus_list = []
+    for c in consensus.values():
+        c["brokers"] = sorted(c["brokers"])
+        consensus_list.append(c)
+    consensus_list.sort(key=lambda x: x["report_count"], reverse=True)
+
+    result = {
+        "updated_at":   now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "report_count": len(reports),
+        "reports":      reports,
+        "consensus":    consensus_list,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+def _kr_current_prices() -> dict:
+    """naver_universe 에서 {code: close} 맵 구성."""
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    return {code: (s.get("close") or 0) for code, s in stocks.items() if s.get("close")}
+
+
+@app.route("/api/research/recommend")
+def api_research_recommend():
+    """
+    기업 리포트 기반 종목 추천.
+    상위 20 종목에 대해 최신 리포트 detail 을 파싱해 목표가/의견 보강.
+    점수 = 리포트 모멘텀(30) + 컨센서스(30) + 괴리율(40).
+    3시간 캐시.
+    """
+    cache_file = BASE_DIR / "cache" / "research_recommend.json"
+    cached = _read_fresh_json(cache_file, 180)
+    if cached:
+        return jsonify(cached)
+
+    # 기업 리포트 데이터 로드 (없으면 즉시 스크래핑)
+    company_cache = BASE_DIR / "cache" / "company_reports.json"
+    company_data = _read_fresh_json(company_cache, 180)
+    if not company_data:
+        # 캐시가 없으면 스크래핑
+        reports = _scrape_naver_research_list("company", pages=5)
+        company_data = {"reports": reports, "consensus": []}
+        consensus_map: dict[str, dict] = {}
+        for r in reports:
+            code = r.get("stock_code")
+            if not code:
+                continue
+            c = consensus_map.setdefault(code, {
+                "code": code, "name": r.get("stock_name", ""),
+                "report_count": 0, "brokers": set(),
+                "latest_date": "", "latest_title": "",
+            })
+            c["report_count"] += 1
+            if r.get("broker"):
+                c["brokers"].add(r["broker"])
+            if r.get("date") and (not c["latest_date"] or r["date"] > c["latest_date"]):
+                c["latest_date"]  = r["date"]
+                c["latest_title"] = r.get("title", "")
+        for c in consensus_map.values():
+            c["brokers"] = sorted(c["brokers"])
+        company_data["consensus"] = sorted(consensus_map.values(),
+                                           key=lambda x: x["report_count"], reverse=True)
+
+    consensus_list = company_data.get("consensus") or []
+    all_reports    = company_data.get("reports") or []
+    prices         = _kr_current_prices()
+
+    # 상위 20 종목에 대해 최신 리포트의 detail 파싱
+    TOP_N = 20
+    top_codes = [c["code"] for c in consensus_list[:TOP_N]]
+    reports_by_code: dict[str, list[dict]] = {}
+    for r in all_reports:
+        code = r.get("stock_code")
+        if code in top_codes:
+            reports_by_code.setdefault(code, []).append(r)
+
+    detail_by_code: dict[str, dict] = {}
+    for code in top_codes:
+        rlist = reports_by_code.get(code) or []
+        if not rlist:
+            continue
+        rlist.sort(key=lambda x: x.get("date", ""), reverse=True)
+        latest = rlist[0]
+        if not latest.get("nid"):
+            continue
+        try:
+            detail = _extract_report_html({
+                "title":       latest.get("title", ""),
+                "broker":      latest.get("broker", ""),
+                "date":        latest.get("date", ""),
+                "pdf_url":     latest.get("pdf_url", ""),
+                "detail_link": latest.get("detail_link", ""),
+            })
+            detail_by_code[code] = detail
+        except Exception as exc:
+            log.debug("detail parse fail %s: %s", code, exc)
+        time.sleep(0.3)
+
+    # 전체 consensus 를 돌며 의견 집계 (모든 리포트 detail 을 파싱하지 않고 list-only 는 의견 불명)
+    # 상위 20 중 detail 파싱된 것만 target_price/opinion 활용
+    scored: list[dict] = []
+    for c in consensus_list:
+        code = c["code"]
+        detail = detail_by_code.get(code) or {}
+        target_price = detail.get("target_price")
+        opinion      = detail.get("opinion")
+
+        score = 0
+        expl: list[str] = []
+
+        # 1. 리포트 모멘텀 (30)
+        rc = c.get("report_count", 0)
+        if   rc >= 5: score += 30; expl.append(f"리포트 {rc}건 (관심 집중)")
+        elif rc >= 3: score += 20; expl.append(f"리포트 {rc}건")
+        elif rc >= 2: score += 10; expl.append(f"리포트 {rc}건")
+        else:         score += 5;  expl.append(f"리포트 {rc}건")
+
+        # 2. 컨센서스 방향 (30) — detail 파싱된 종목만 가능
+        op_norm = (opinion or "").lower()
+        if op_norm in _BUY_WORDS:
+            score += 25
+            expl.append(f"최신 의견: {opinion}")
+        elif op_norm in _HOLD_WORDS:
+            score += 10
+            expl.append(f"최신 의견: {opinion}")
+        elif op_norm in _SELL_WORDS:
+            expl.append(f"최신 의견: {opinion}")
+        else:
+            expl.append("의견 데이터 없음")
+
+        # 3. 목표주가 괴리율 (40)
+        current_price = prices.get(code)
+        upside = None
+        if target_price and current_price and current_price > 0:
+            upside = round((target_price / current_price - 1) * 100, 1)
+            if   upside >= 50: score += 40; expl.append(f"목표가 +{upside}% (대폭 저평가)")
+            elif upside >= 30: score += 30; expl.append(f"목표가 +{upside}%")
+            elif upside >= 15: score += 20; expl.append(f"목표가 +{upside}%")
+            elif upside >=  5: score += 10; expl.append(f"목표가 +{upside}%")
+            elif upside >=  0: score += 5;  expl.append(f"목표가 근접 ({upside:+.1f}%)")
+            else:              expl.append(f"목표가 하회 ({upside}%)")
+        elif code in top_codes:
+            expl.append("목표가 미제공")
+
+        scored.append({
+            "code":          code,
+            "name":          c.get("name"),
+            "market":        "kr",
+            "score":         score,
+            "explanation":   expl,
+            "report_count":  rc,
+            "opinion":       opinion,
+            "target_price":  target_price,
+            "current_price": current_price,
+            "upside":        upside,
+            "brokers":       c.get("brokers", []),
+            "latest_date":   c.get("latest_date", ""),
+            "latest_title":  c.get("latest_title", ""),
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":      len(scored),
+        "items":      scored[:20],
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/research/us_recommend")
+def api_research_us_recommend():
+    """Finnhub 애널리스트 추천 트렌드 + 목표가. 상위 50 심볼. 6시간 캐시."""
+    finn = os.getenv("FINNHUB_API_KEY")
+    if not finn:
+        return jsonify({"error": "FINNHUB_API_KEY 미설정", "items": []}), 503
+
+    cache_file = BASE_DIR / "cache" / "us_research_recommend.json"
+    cached = _read_fresh_json(cache_file, 360)
+    if cached:
+        return jsonify(cached)
+
+    sp500_syms, sp500_names = _load_sp500_symbols()
+    if not sp500_syms:
+        return jsonify({"error": "S&P500 리스트 없음", "items": []}), 503
+
+    # 시총 상위는 sp500_tickers.json 순서상 앞쪽에 있지 않으므로 모두 시도
+    symbols = sorted(sp500_syms)[:50]
+    try:
+        import requests as _rq
+    except ImportError:
+        return jsonify({"error": "requests 미설치"}), 500
+
+    results = []
+    for sym in symbols:
+        try:
+            r1 = _rq.get(
+                "https://finnhub.io/api/v1/stock/recommendation",
+                params={"symbol": sym, "token": finn}, timeout=5,
+            )
+            data = r1.json() if r1.status_code == 200 else []
+            if not isinstance(data, list) or not data:
+                continue
+            latest = data[0]
+            buy = (latest.get("buy") or 0) + (latest.get("strongBuy") or 0)
+            hold = latest.get("hold") or 0
+            sell = (latest.get("sell") or 0) + (latest.get("strongSell") or 0)
+            total = buy + hold + sell
+            if total == 0:
+                continue
+            buy_ratio = round(buy / total * 100)
+
+            prev = data[1] if len(data) > 1 else {}
+            prev_buy = (prev.get("buy") or 0) + (prev.get("strongBuy") or 0)
+            prev_total = prev_buy + (prev.get("hold") or 0) + (prev.get("sell") or 0) + (prev.get("strongSell") or 0)
+            prev_ratio = round(prev_buy / prev_total * 100) if prev_total > 0 else buy_ratio
+            direction = "up" if buy_ratio > prev_ratio else "down" if buy_ratio < prev_ratio else "flat"
+
+            # 목표가 (실패해도 계속)
+            target_mean = target_high = target_low = None
+            try:
+                r2 = _rq.get(
+                    "https://finnhub.io/api/v1/stock/price-target",
+                    params={"symbol": sym, "token": finn}, timeout=5,
+                )
+                if r2.status_code == 200:
+                    pt = r2.json() or {}
+                    target_mean = pt.get("targetMean")
+                    target_high = pt.get("targetHigh")
+                    target_low  = pt.get("targetLow")
+            except Exception:
+                pass
+
+            score = 0
+            expl = []
+            if   buy_ratio >= 80: score += 40; expl.append(f"매수비율 {buy_ratio}% (강한 공감대)")
+            elif buy_ratio >= 60: score += 30; expl.append(f"매수비율 {buy_ratio}%")
+            elif buy_ratio >= 40: score += 20; expl.append(f"매수비율 {buy_ratio}%")
+            else:                 score += 10; expl.append(f"매수비율 {buy_ratio}%")
+            if   direction == "up":   score += 20; expl.append(f"추세 상승 ({prev_ratio}% → {buy_ratio}%)")
+            elif direction == "flat": score += 10; expl.append("추세 유지")
+            else:                     expl.append(f"추세 하락 ({prev_ratio}% → {buy_ratio}%)")
+
+            results.append({
+                "code":            sym,
+                "symbol":          sym,
+                "name":            sp500_names.get(sym, sym),
+                "market":          "us",
+                "score":           score,
+                "explanation":     expl,
+                "buy":             buy, "hold": hold, "sell": sell,
+                "buy_ratio":       buy_ratio,
+                "prev_buy_ratio":  prev_ratio,
+                "direction":       direction,
+                "target_mean":     target_mean,
+                "target_high":     target_high,
+                "target_low":      target_low,
+                "period":          latest.get("period", ""),
+            })
+            time.sleep(0.05)
+        except Exception as exc:
+            log.debug("finnhub rec %s fail: %s", sym, exc)
+            continue
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "count":      len(results),
+        "items":      results[:20],
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 16 — 경제지표 + 실적발표 캘린더 (Finnhub / DART)
+# ─────────────────────────────────────────────────────────────────────────
+_COUNTRY_KR = {
+    "US": "🇺🇸 미국", "KR": "🇰🇷 한국", "CN": "🇨🇳 중국",
+    "JP": "🇯🇵 일본", "EU": "🇪🇺 유럽", "GB": "🇬🇧 영국", "DE": "🇩🇪 독일",
+}
+_EVENT_KR = {
+    "CPI MoM": "소비자물가지수(CPI) 전월대비",
+    "CPI YoY": "소비자물가지수(CPI) 전년대비",
+    "Core CPI MoM": "근원 CPI 전월대비",
+    "Core CPI YoY": "근원 CPI 전년대비",
+    "GDP Growth Rate QoQ": "GDP 성장률 전분기대비",
+    "GDP Growth Rate YoY": "GDP 성장률 전년대비",
+    "Unemployment Rate": "실업률",
+    "Non Farm Payrolls": "비농업 고용",
+    "Interest Rate Decision": "기준금리 결정",
+    "Retail Sales MoM": "소매판매 전월대비",
+    "PPI MoM": "생산자물가지수 전월대비",
+    "PPI YoY": "생산자물가지수 전년대비",
+    "ISM Manufacturing PMI": "ISM 제조업 PMI",
+    "ISM Services PMI": "ISM 서비스업 PMI",
+    "Consumer Confidence": "소비자신뢰지수",
+    "Initial Jobless Claims": "신규 실업수당청구건수",
+    "Trade Balance": "무역수지",
+    "Industrial Production MoM": "산업생산 전월대비",
+    "Industrial Production YoY": "산업생산 전년대비",
+    "Manufacturing PMI": "제조업 PMI",
+    "Services PMI": "서비스업 PMI",
+    "Housing Starts": "주택착공건수",
+    "Building Permits": "건축허가건수",
+    "Durable Goods Orders": "내구재 주문",
+    "Fed Interest Rate Decision": "Fed 금리 결정",
+    "BOJ Interest Rate Decision": "BOJ 금리 결정",
+    "ECB Interest Rate Decision": "ECB 금리 결정",
+    "BOK Interest Rate Decision": "한국은행 기준금리 결정",
+}
+
+
+def _load_sp500_symbols() -> tuple[set, dict]:
+    """S&P500 심볼 세트 + {symbol: name} 맵. _sp500_tickers 캐시 재사용."""
+    cache_file = BASE_DIR / "cache" / "sp500_tickers.json"
+    if not cache_file.exists():
+        return set(), {}
+    try:
+        tickers = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return set(), {}
+    if not isinstance(tickers, list):
+        return set(), {}
+    syms = set()
+    names = {}
+    for t in tickers:
+        sym = t.get("symbol")
+        if sym:
+            syms.add(sym)
+            names[sym] = t.get("name") or sym
+    return syms, names
+
+
+def _calendar_date_range() -> tuple[str, str]:
+    """이번 주 월요일 ~ 다음 주 금요일 (2주)."""
+    today = now_kst().date()
+    monday = today - timedelta(days=today.weekday())
+    friday = monday + timedelta(days=11)
+    return monday.strftime("%Y-%m-%d"), friday.strftime("%Y-%m-%d")
+
+
+def _extract_econ_date(event: dict) -> str:
+    """Finnhub 이벤트의 time 필드('2026-04-13 00:00:00')에서 날짜만 추출."""
+    t = event.get("time") or ""
+    if isinstance(t, str) and len(t) >= 10 and t[4] == "-":
+        return t[:10]
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 20 — DART 12분기 손익계산서 (슬림)
+# 실제 DART API 는 집계 항목(매출액/원가/판관비/영업이익/순이익)만 반환하므로
+# 세부 비용 분류(Tier 2) 는 불가능. 공헌이익률은 GPM 근사 + 수동 변동비율 입력으로 대체.
+# ─────────────────────────────────────────────────────────────────────────
+_DART_CORP_MAP_CACHE: dict | None = None
+
+
+def _load_dart_corp_code_map() -> dict:
+    """종목코드(6자리) → corp_code(8자리) 매핑. 1회 다운로드 후 파일+메모리 캐시."""
+    global _DART_CORP_MAP_CACHE
+    if _DART_CORP_MAP_CACHE is not None:
+        return _DART_CORP_MAP_CACHE
+    cache_file = BASE_DIR / "cache" / "dart_corp_codes.json"
+    if cache_file.exists():
+        try:
+            _DART_CORP_MAP_CACHE = json.loads(cache_file.read_text(encoding="utf-8"))
+            return _DART_CORP_MAP_CACHE
+        except Exception:
+            pass
+    dart_key = os.getenv("DART_API_KEY")
+    if not dart_key:
+        _DART_CORP_MAP_CACHE = {}
+        return _DART_CORP_MAP_CACHE
+    try:
+        import requests as _rq, io as _io, zipfile as _zf
+        import xml.etree.ElementTree as _ET
+        r = _rq.get("https://opendart.fss.or.kr/api/corpCode.xml",
+                    params={"crtfc_key": dart_key}, timeout=30)
+        if r.status_code != 200 or len(r.content) < 1000:
+            _DART_CORP_MAP_CACHE = {}
+            return _DART_CORP_MAP_CACHE
+        z = _zf.ZipFile(_io.BytesIO(r.content))
+        xml_data = z.read(z.namelist()[0])
+        root = _ET.fromstring(xml_data)
+        mapping: dict[str, str] = {}
+        for corp in root.findall(".//list"):
+            sc = (corp.findtext("stock_code") or "").strip()
+            cc = (corp.findtext("corp_code") or "").strip()
+            if sc and cc:
+                mapping[sc] = cc
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(mapping, ensure_ascii=False),
+                              encoding="utf-8")
+        _DART_CORP_MAP_CACHE = mapping
+        return mapping
+    except Exception as exc:
+        log.debug("dart corp code load fail: %s", exc)
+        _DART_CORP_MAP_CACHE = {}
+        return _DART_CORP_MAP_CACHE
+
+
+_DART_IS_KEYWORDS = {
+    "revenue":      ["매출액"],
+    "cogs":         ["매출원가"],
+    "gross_profit": ["매출총이익"],
+    "sga":          ["판매비와관리비", "판관비"],
+    "op_income":    ["영업이익"],
+    "net_income":   ["당기순이익", "분기순이익", "반기순이익"],
+}
+
+
+def _extract_is_aggregates(is_items: list) -> dict:
+    """
+    DART IS/CIS 리스트에서 6개 집계 항목만 추출.
+    thstrm_amount (당기금액) 를 그대로 사용 — 검증 결과 이미 개별 분기값이며 누적 아님.
+    """
+    out = {k: None for k in _DART_IS_KEYWORDS}
+    for item in is_items:
+        nm = (item.get("account_nm") or "").strip()
+        amt_str = (item.get("thstrm_amount") or "").replace(",", "").strip()
+        if not amt_str:
+            continue
+        try:
+            amt = int(amt_str)
+        except ValueError:
+            try:
+                amt = int(float(amt_str))
+            except ValueError:
+                continue
+        for key, kws in _DART_IS_KEYWORDS.items():
+            if out[key] is not None:
+                continue
+            # 특별 처리: '매출액' 은 '매출원가', '총매출' 등을 피해야 함
+            if key == "revenue":
+                if "매출액" in nm and "원가" not in nm and "총매" not in nm and "차감" not in nm:
+                    out[key] = amt
+                    break
+            elif key == "op_income":
+                if "영업이익" in nm and "영업외" not in nm and "조정" not in nm:
+                    out[key] = amt
+                    break
+            elif key == "net_income":
+                # '지배기업' / '비지배' 수식이 붙은 것은 제외, 순수 '당기순이익' 우선
+                if any(k in nm for k in kws) and "지배" not in nm and "비지배" not in nm:
+                    out[key] = amt
+                    break
+            else:
+                if any(k in nm for k in kws):
+                    out[key] = amt
+                    break
+    # 매출총이익 역산
+    if out["gross_profit"] is None and out["revenue"] and out["cogs"]:
+        out["gross_profit"] = out["revenue"] - out["cogs"]
+    return out
+
+
+def _fetch_dart_quarter(dart_key: str, corp_code: str, year: int,
+                        reprt_code: str) -> dict | None:
+    """한 분기 조회. CFS 우선, 없으면 OFS fallback."""
+    try:
+        import requests as _rq
+        for fs_div in ("CFS", "OFS"):
+            r = _rq.get(
+                "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+                params={
+                    "crtfc_key": dart_key, "corp_code": corp_code,
+                    "bsns_year": str(year), "reprt_code": reprt_code,
+                    "fs_div": fs_div,
+                },
+                timeout=10,
+            )
+            d = r.json()
+            if d.get("status") == "000":
+                is_items = [i for i in (d.get("list") or [])
+                            if i.get("sj_div") in ("IS", "CIS")]
+                if is_items:
+                    agg = _extract_is_aggregates(is_items)
+                    agg["fs_div"] = fs_div
+                    return agg
+    except Exception as exc:
+        log.debug("dart quarter fetch fail %s %d %s: %s",
+                  corp_code, year, reprt_code, exc)
+    return None
+
+
+def _try_dart_segment_revenue(dart_key: str, corp_code: str, year: int) -> list | None:
+    """
+    사업보고서 원문 HTML 에서 '매출실적' / '부문별' 테이블 추출 시도.
+    Best-effort: 회사별 포맷이 제각각이라 실패 잦음. 실패 시 None.
+    """
+    try:
+        import requests as _rq
+        from bs4 import BeautifulSoup
+        r = _rq.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={
+                "crtfc_key": dart_key, "corp_code": corp_code,
+                "bgn_de": f"{year}0101", "end_de": f"{year}1231",
+                "pblntf_ty": "A", "page_count": 10,
+            }, timeout=10,
+        )
+        d = r.json()
+        if d.get("status") != "000":
+            return None
+        rcept_no = None
+        for item in d.get("list") or []:
+            if "사업보고서" in (item.get("report_nm") or ""):
+                rcept_no = item.get("rcept_no")
+                break
+        if not rcept_no:
+            return None
+
+        doc_r = _rq.get(
+            "https://opendart.fss.or.kr/api/document.xml",
+            params={"crtfc_key": dart_key, "rcept_no": rcept_no},
+            timeout=20,
+        )
+        if doc_r.status_code != 200 or len(doc_r.content) < 1000:
+            return None
+        # document.xml 은 ZIP 일 수도 있음
+        content = doc_r.content
+        if content[:2] == b"PK":
+            import io as _io, zipfile as _zf
+            z = _zf.ZipFile(_io.BytesIO(content))
+            content = z.read(z.namelist()[0])
+        text = content.decode("utf-8", errors="replace")
+        soup = BeautifulSoup(text, "html.parser")
+
+        segments: list[dict] = []
+        KW = ("매출실적", "매출현황", "부문별", "사업부문별", "제품별 매출", "제품별매출")
+        for table in soup.find_all("table"):
+            # 테이블 직전의 제목 텍스트
+            prev = table.find_previous(["p", "div", "h3", "h4", "span", "title"])
+            head_txt = prev.get_text(strip=True) if prev else ""
+            if not any(k in head_txt for k in KW):
+                continue
+            for tr in table.find_all("tr"):
+                cells = tr.find_all(["td", "th"])
+                if len(cells) < 2:
+                    continue
+                name = cells[0].get_text(" ", strip=True)
+                amounts = []
+                for cell in cells[1:]:
+                    v = cell.get_text(" ", strip=True).replace(",", "").replace(" ", "")
+                    try:
+                        amounts.append(int(v))
+                    except ValueError:
+                        amounts.append(v)
+                if name and any(isinstance(a, int) for a in amounts):
+                    segments.append({"segment": name, "amounts": amounts})
+            if segments:
+                return segments  # 첫 매칭 테이블만
+        return None
+    except Exception as exc:
+        log.debug("dart segment parse fail %s: %s", corp_code, exc)
+        return None
+
+
+@app.route("/api/dart_financial/<code>")
+def api_dart_financial(code: str):
+    """
+    국내 종목 12분기 손익 + 마진 + (best-effort) 사업부별 매출.
+    24h 캐시: cache/dart_fin_{code}.json
+    """
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+
+    dart_key = os.getenv("DART_API_KEY")
+    if not dart_key:
+        return jsonify({"error": "DART_API_KEY 미설정"}), 503
+
+    cache_file = BASE_DIR / "cache" / f"dart_fin_{code}.json"
+    cached = _read_fresh_json(cache_file, 1440)
+    if cached:
+        return jsonify(cached)
+
+    corp_map = _load_dart_corp_code_map()
+    corp_code = corp_map.get(code)
+    if not corp_code:
+        return jsonify({"error": "corp_code 매핑 실패 (비상장 또는 신규 상장)"}), 404
+
+    # 가장 최근 완결 사업연도 기준 3년 × 4분기
+    current_year = now_kst().year
+    # 현재 연도 1Q/반기 데이터도 있으면 포함
+    years = [current_year, current_year - 1, current_year - 2, current_year - 3]
+    quarters = [
+        ("11013", "1Q"),
+        ("11012", "2Q"),
+        ("11014", "3Q"),
+        ("11011", "4Q"),
+    ]
+
+    # 연도별로 raw 값 수집 후 Q4 는 (연간 - Q1+Q2+Q3) 로 역산
+    raw_by_year: dict[int, dict] = {}
+    for year in sorted(years):
+        raw_by_year[year] = {}
+        for reprt_code, q_label in quarters:
+            agg = _fetch_dart_quarter(dart_key, corp_code, year, reprt_code)
+            time.sleep(0.15)
+            if agg and agg.get("revenue") is not None:
+                raw_by_year[year][q_label] = agg
+
+    all_quarters: list[dict] = []
+    FIELDS = ("revenue", "cogs", "gross_profit", "sga", "op_income", "net_income")
+
+    def _sub_dicts(base: dict, *subtracts: dict) -> dict:
+        """base - subtracts (필드별 null-safe 감산)."""
+        out = {}
+        for f in FIELDS:
+            v = base.get(f)
+            if v is None:
+                out[f] = None; continue
+            total = v
+            for s in subtracts:
+                sv = (s or {}).get(f)
+                if sv is None:
+                    total = None; break
+                total -= sv
+            out[f] = total
+        return out
+
+    for year in sorted(years):
+        year_data = raw_by_year.get(year) or {}
+        q_individuals: dict[str, dict] = {}
+
+        # 1Q/2Q/3Q: thstrm_amount 가 이미 개별값 (Samsung 실측 확인)
+        for q in ("1Q", "2Q", "3Q"):
+            if q in year_data:
+                q_individuals[q] = {f: year_data[q].get(f) for f in FIELDS}
+                q_individuals[q]["fs_div"] = year_data[q].get("fs_div")
+
+        # 4Q: 연간 - (Q1+Q2+Q3). Q1~Q3 중 하나라도 없으면 Q4 역산 불가 → 스킵.
+        annual = year_data.get("4Q")   # 실제로는 11011 = 연간
+        if annual and all(q in q_individuals for q in ("1Q", "2Q", "3Q")):
+            q4 = _sub_dicts(annual, q_individuals["1Q"],
+                            q_individuals["2Q"], q_individuals["3Q"])
+            # 음수 revenue 는 비정상 → 스킵
+            if q4.get("revenue") and q4["revenue"] > 0:
+                q4["fs_div"] = annual.get("fs_div")
+                q_individuals["4Q"] = q4
+
+        for q_label in ("1Q", "2Q", "3Q", "4Q"):
+            if q_label not in q_individuals:
+                continue
+            d = q_individuals[q_label]
+            rev = d.get("revenue") or 0
+            gp  = d.get("gross_profit")
+            op  = d.get("op_income")
+            ni  = d.get("net_income")
+            sga = d.get("sga")
+            cogs = d.get("cogs")
+            if gp is None and rev and cogs is not None:
+                gp = rev - cogs
+            gpm = round(gp / rev * 100, 1) if (gp is not None and rev) else None
+            opm = round(op / rev * 100, 1) if (op is not None and rev) else None
+            npm = round(ni / rev * 100, 1) if (ni is not None and rev) else None
+            bep = round(sga / (gpm / 100)) if (sga and gpm and gpm > 0) else None
+            all_quarters.append({
+                "year":    year,
+                "quarter": q_label,
+                "period":  f"{str(year)[-2:]}.{q_label}",
+                "fs_div":  d.get("fs_div"),
+                "summary": {
+                    "revenue":      rev,
+                    "cogs":         cogs,
+                    "gross_profit": gp,
+                    "sga":          sga,
+                    "op_income":    op,
+                    "net_income":   ni,
+                },
+                "margins": {
+                    "gpm": gpm, "opm": opm, "npm": npm,
+                    "cm_ratio_approx": gpm,
+                    "bep_revenue":     bep,
+                },
+            })
+
+    # 이상치 방어: 직전 분기 대비 10배 초과 또는 음수 매출 → 해당 분기 값 전부 null 처리
+    # (프론트 _dartFmt(null) → '—'. 12분기 레이아웃은 유지하되 anomaly 플래그 표시.)
+    ANOMALY_RATIO = 10.0
+    prev_rev: float | None = None
+    for q in all_quarters:
+        rev = q["summary"].get("revenue")
+        is_anomaly = False
+        if rev is None or rev <= 0:
+            is_anomaly = rev is not None and rev < 0
+        elif prev_rev and prev_rev > 0 and rev > prev_rev * ANOMALY_RATIO:
+            is_anomaly = True
+        if is_anomaly:
+            for f in FIELDS:
+                q["summary"][f] = None
+            q["margins"] = {"gpm": None, "opm": None, "npm": None,
+                            "cm_ratio_approx": None, "bep_revenue": None}
+            q["anomaly"] = True
+            # prev_rev 는 업데이트하지 않음 — 다음 분기는 직전의 '정상' 분기와 비교
+        else:
+            q["anomaly"] = False
+            if rev and rev > 0:
+                prev_rev = rev
+
+    # 최근 12분기만
+    all_quarters = all_quarters[-12:]
+
+    # best-effort 사업부별 매출
+    segment = None
+    if all_quarters:
+        latest_year = max(q["year"] for q in all_quarters)
+        segment = _try_dart_segment_revenue(dart_key, corp_code, latest_year - 1)
+
+    result = {
+        "code":       code,
+        "corp_code":  corp_code,
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "quarter_count": len(all_quarters),
+        "quarters":   all_quarters,
+        "segment_revenue": segment,
+        "note": "DART API 는 집계 항목만 제공. 세부 비용 분류는 불가하며 GPM 을 공헌이익률 근사로 사용.",
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False),
+                              encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+def _extract_econ_time(event: dict) -> str:
+    """time 필드에서 HH:MM 부분만 추출 (UTC 기준, 00:00 은 '미정')."""
+    t = event.get("time") or ""
+    if isinstance(t, str) and len(t) >= 16:
+        hm = t[11:16]
+        return "" if hm == "00:00" else hm
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 19 — 52주 신고가 (KR/US)
+# ─────────────────────────────────────────────────────────────────────────
+def _kr_new_highs_from_charts(top_by_volume: int = 200,
+                              ratio_threshold: float = 0.95) -> list[dict]:
+    """
+    거래대금 상위 top_by_volume 종목에 대해 /api/chart?days=252 호출,
+    52주(≈252영업일) 고점 대비 현재가 비율이 threshold 이상인 종목 반환.
+    """
+    uni = _load_naver_universe()
+    stocks_map = (uni or {}).get("stocks") or {}
+    if not stocks_map:
+        return []
+
+    # 거래대금 기준 정렬
+    eligible = sorted(
+        [s for s in stocks_map.values() if (s.get("volume_mn") or 0) >= 50],
+        key=lambda x: x.get("volume_mn") or 0,
+        reverse=True,
+    )[:top_by_volume]
+
+    out: list[dict] = []
+    today_str = now_kst().strftime("%Y-%m-%d")
+
+    for st in eligible:
+        code = st.get("code")
+        if not code:
+            continue
+        try:
+            chart = _call_api_internal(f"/api/chart/{code}?days=252")
+            if not chart or chart.get("error"):
+                continue
+            highs  = chart.get("high")  or []
+            lows   = chart.get("low")   or []
+            closes = chart.get("close") or []
+            dates  = chart.get("dates") or []
+            if not highs or not closes:
+                continue
+            hi_52w = max(highs)
+            lo_52w = min(lows) if lows else None
+            current = closes[-1]
+            if not hi_52w or not current:
+                continue
+            ratio = current / hi_52w
+            if ratio < ratio_threshold:
+                continue
+            # 52주 고점 발생일 (오늘과 같으면 TODAY)
+            hi_idx = highs.index(hi_52w)
+            hi_date = dates[hi_idx] if hi_idx < len(dates) else ""
+            is_today = (dates[-1] == today_str and highs[-1] == hi_52w)
+
+            out.append({
+                "code":       code,
+                "name":       st.get("name"),
+                "sector":     (st.get("sectors") or [None])[0],
+                "market":     "kr",
+                "market_cap": None,                           # naver_universe 는 시총 미포함
+                "volume_mn":  st.get("volume_mn"),
+                "per":        None,                            # 비용 큰 조회라 생략
+                "price":      current,
+                "change_pct": st.get("change_pct"),
+                "w52_high":   hi_52w,
+                "w52_low":    lo_52w,
+                "w52_ratio":  round(ratio * 100, 1),
+                "hi_date":    hi_date,
+                "is_today":   is_today,
+            })
+        except Exception as exc:
+            log.debug("new_high chart %s fail: %s", code, exc)
+            continue
+
+    # 회전율 = 거래대금/시총 은 시총 없어 계산 불가. 프론트에서 표시 생략.
+    out.sort(key=lambda x: x["w52_ratio"], reverse=True)
+    return out
+
+
+@app.route("/api/new_highs")
+def api_new_highs_kr():
+    """KR 52주 신고가 근접 종목. 거래대금 상위 200 스캔, 일 1회 캐시."""
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"new_highs_kr_{today}.json"
+    cached = _read_fresh_json(cache_file, 1440)   # 24h
+    if cached:
+        return jsonify(cached)
+
+    items = _kr_new_highs_from_charts()
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":     "kr",
+        "count":      len(items),
+        "items":      items,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+def _us_new_highs_from_yinfo(ratio_threshold: float = 0.95) -> list[dict]:
+    """
+    S&P500 전 종목에 대해 us_yinfo 캐시 + yfinance info.fiftyTwoWeekHigh 로
+    52주 고점 비율 계산 후 필터.
+    """
+    us_data = _fetch_us_market_data()
+    all_stocks = us_data.get("all_stocks") or []
+    if not all_stocks:
+        return []
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return []
+
+    out: list[dict] = []
+    for s in all_stocks:
+        sym = s.get("symbol")
+        if not sym:
+            continue
+        info = None
+        cache = BASE_DIR / "cache" / f"us_yinfo_{sym}.json"
+        if cache.exists():
+            try:
+                age_hr = (now_kst().timestamp() - cache.stat().st_mtime) / 3600
+                if age_hr < 24:
+                    info = json.loads(cache.read_text(encoding="utf-8"))
+            except Exception:
+                info = None
+        if info is None:
+            try:
+                raw = _yf.Ticker(sym).info or {}
+                info = {k: v for k, v in raw.items()
+                        if isinstance(v, (int, float, str, bool, type(None)))}
+                cache.parent.mkdir(exist_ok=True)
+                cache.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                log.debug("us_new_highs yinfo %s fail: %s", sym, exc)
+                continue
+            time.sleep(0.05)
+
+        hi = info.get("fiftyTwoWeekHigh")
+        lo = info.get("fiftyTwoWeekLow")
+        current = info.get("currentPrice") or info.get("regularMarketPrice") or s.get("price")
+        if not hi or not current:
+            continue
+        ratio = current / hi
+        if ratio < ratio_threshold:
+            continue
+
+        market_cap = info.get("marketCap")
+        per        = info.get("trailingPE")
+        vol_mn     = s.get("volume_mn") or 0    # US 기준: $M traded
+        turnover = (vol_mn * 1e6 / market_cap * 100) if market_cap else None
+
+        out.append({
+            "symbol":     sym,
+            "code":       sym,
+            "name":       s.get("name"),
+            "sector":     s.get("sector"),
+            "market":     "us",
+            "market_cap": market_cap,
+            "volume_mn":  vol_mn,
+            "turnover":   round(turnover, 3) if turnover is not None else None,
+            "per":        round(per, 2) if isinstance(per, (int, float)) else None,
+            "price":      round(current, 2),
+            "change_pct": s.get("change_pct"),
+            "w52_high":   round(hi, 2),
+            "w52_low":    round(lo, 2) if lo else None,
+            "w52_ratio":  round(ratio * 100, 1),
+            "hi_date":    "",   # yfinance 는 고점 발생일 미제공
+            "is_today":   ratio >= 0.998,
+        })
+
+    out.sort(key=lambda x: x["w52_ratio"], reverse=True)
+    return out
+
+
+@app.route("/api/us/new_highs")
+def api_new_highs_us():
+    """US 52주 신고가 근접 종목. S&P500 전체 스캔, 일 1회 캐시."""
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"new_highs_us_{today}.json"
+    cached = _read_fresh_json(cache_file, 1440)
+    if cached:
+        return jsonify(cached)
+
+    items = _us_new_highs_from_yinfo()
+    result = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "market":     "us",
+        "count":      len(items),
+        "items":      items,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/calendar/economic")
+def api_calendar_economic():
+    """경제지표 발표 일정 (Finnhub). 6시간 캐시."""
+    finnhub_key = os.getenv("FINNHUB_API_KEY")
+    if not finnhub_key:
+        return jsonify({"error": "FINNHUB_API_KEY 미설정", "events": []}), 503
+
+    from_date, to_date = _calendar_date_range()
+    cache_file = BASE_DIR / "cache" / f"economic_calendar_{from_date}.json"
+    cached = _read_fresh_json(cache_file, 360)  # 6h
+    if cached:
+        return jsonify(cached)
+
+    try:
+        import requests as _rq
+        res = _rq.get(
+            "https://finnhub.io/api/v1/calendar/economic",
+            params={"token": finnhub_key, "from": from_date, "to": to_date},
+            timeout=10,
+        )
+        if res.status_code != 200:
+            return jsonify({"error": f"Finnhub HTTP {res.status_code}", "events": []}), 502
+        data = res.json()
+    except Exception as exc:
+        return jsonify({"error": f"Finnhub 요청 실패: {exc}", "events": []}), 502
+
+    raw_events = data.get("economicCalendar") or []
+
+    # 필터: 주요국 + medium/high 임팩트만
+    keep_countries = {"US", "KR", "CN", "JP", "EU", "GB", "DE"}
+    keep_impacts = {"high", "medium"}
+    filtered = []
+    for e in raw_events:
+        if e.get("country") not in keep_countries:
+            continue
+        if (e.get("impact") or "").lower() not in keep_impacts:
+            continue
+        date = _extract_econ_date(e)
+        if not date:
+            continue
+        impact = (e.get("impact") or "low").lower()
+        filtered.append({
+            "date":         date,
+            "time":         _extract_econ_time(e),
+            "country":      e.get("country"),
+            "country_kr":   _COUNTRY_KR.get(e.get("country"), e.get("country")),
+            "event":        e.get("event"),
+            "event_kr":     _EVENT_KR.get(e.get("event"), e.get("event")),
+            "impact":       impact,
+            "impact_emoji": "🔴" if impact == "high" else "🟡" if impact == "medium" else "⚪",
+            "actual":       e.get("actual"),
+            "estimate":     e.get("estimate"),
+            "prev":         e.get("prev"),
+            "unit":         e.get("unit") or "",
+        })
+
+    impact_order = {"high": 0, "medium": 1, "low": 2}
+    filtered.sort(key=lambda x: (x["date"], impact_order.get(x["impact"], 2), x["time"] or "99:99"))
+
+    result = {
+        "from":   from_date,
+        "to":     to_date,
+        "count":  len(filtered),
+        "raw_count": len(raw_events),
+        "events": filtered,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+def _fetch_us_earnings(from_date: str, to_date: str) -> list:
+    """Finnhub 미국 실적 — S&P500 종목만 필터."""
+    finnhub_key = os.getenv("FINNHUB_API_KEY")
+    if not finnhub_key:
+        return []
+    try:
+        import requests as _rq
+        res = _rq.get(
+            "https://finnhub.io/api/v1/calendar/earnings",
+            params={"token": finnhub_key, "from": from_date, "to": to_date},
+            timeout=10,
+        )
+        if res.status_code != 200:
+            return []
+        data = res.json()
+    except Exception as exc:
+        log.debug("finnhub earnings fail: %s", exc)
+        return []
+
+    raw = data.get("earningsCalendar") or []
+    sp500_syms, sp500_names = _load_sp500_symbols()
+    out = []
+    hour_label = {"bmo": "장전", "amc": "장후", "dmh": "장중"}
+    for e in raw:
+        sym = e.get("symbol")
+        if not sym or sym not in sp500_syms:
+            continue
+        out.append({
+            "date":             e.get("date") or "",
+            "market":           "us",
+            "symbol":           sym,
+            "name":             sp500_names.get(sym, sym),
+            "time":             hour_label.get(e.get("hour") or "", ""),
+            "eps_estimate":     e.get("epsEstimate"),
+            "eps_actual":       e.get("epsActual"),
+            "revenue_estimate": e.get("revenueEstimate"),
+            "revenue_actual":   e.get("revenueActual"),
+            "flag":             "🇺🇸",
+        })
+    return out
+
+
+def _fetch_kr_earnings(from_date: str, to_date: str) -> list:
+    """DART 정기공시 (사업/반기/분기 보고서) 조회."""
+    dart_key = os.getenv("DART_API_KEY")
+    if not dart_key:
+        return []
+    try:
+        import requests as _rq
+        res = _rq.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={
+                "crtfc_key":  dart_key,
+                "bgn_de":     from_date.replace("-", ""),
+                "end_de":     to_date.replace("-", ""),
+                "pblntf_ty":  "A",   # 정기공시
+                "page_count": 100,
+            },
+            timeout=10,
+        )
+        data = res.json()
+    except Exception as exc:
+        log.debug("DART fail: %s", exc)
+        return []
+
+    if data.get("status") != "000":
+        return []
+
+    earnings = []
+    kw = ("분기보고서", "반기보고서", "사업보고서")
+    for item in data.get("list") or []:
+        report_nm = item.get("report_nm") or ""
+        if not any(k in report_nm for k in kw):
+            continue
+        stock_code = item.get("stock_code") or ""
+        if not stock_code:   # 상장사만
+            continue
+        rcept_dt = item.get("rcept_dt") or ""
+        if len(rcept_dt) != 8:
+            continue
+        date_str = f"{rcept_dt[:4]}-{rcept_dt[4:6]}-{rcept_dt[6:8]}"
+        earnings.append({
+            "date":             date_str,
+            "market":           "kr",
+            "symbol":           stock_code,
+            "name":             item.get("corp_name") or "",
+            "time":             "",
+            "report_type":      report_nm,
+            "eps_estimate":     None,
+            "eps_actual":       None,
+            "revenue_estimate": None,
+            "revenue_actual":   None,
+            "flag":             "🇰🇷",
+            "dart_link":        f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={item.get('rcept_no', '')}",
+        })
+    return earnings
+
+
+@app.route("/api/calendar/earnings")
+def api_calendar_earnings():
+    """실적발표 일정: Finnhub(미국 S&P500) + DART(한국). 6시간 캐시."""
+    from_date, to_date = _calendar_date_range()
+    cache_file = BASE_DIR / "cache" / f"earnings_calendar_{from_date}.json"
+    cached = _read_fresh_json(cache_file, 360)
+    if cached:
+        return jsonify(cached)
+
+    all_earn = []
+    all_earn.extend(_fetch_us_earnings(from_date, to_date))
+    all_earn.extend(_fetch_kr_earnings(from_date, to_date))
+    all_earn.sort(key=lambda x: (x.get("date") or "", x.get("market"), x.get("symbol")))
+
+    result = {
+        "from":     from_date,
+        "to":       to_date,
+        "count":    len(all_earn),
+        "earnings": all_earn,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
+
+
 @app.route("/api/discover")
 def api_discover():
     """
@@ -3468,7 +5005,7 @@ def api_discover():
     cache_dir = BASE_DIR / "cache"
 
     if market == "kr":
-        d = (_read_fresh_json(cache_dir / "discover_kr_stage2.json", 60)
+        d = (_read_fresh_json(cache_dir / "discover_kr_stage2.json", 360)
              or _read_fresh_json(cache_dir / "discover_kr_stage1.json", 15))
         if d:
             return jsonify(d)
