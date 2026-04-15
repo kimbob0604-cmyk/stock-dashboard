@@ -2909,6 +2909,47 @@ def _fetch_night_futures() -> dict:
             "source": "yfinance ^KS200", "ok": False, "error": str(exc)[:80]
         })
 
+    # Tier 1b: pykrx 로 day_close 보강 (night_close 가 다른 소스에서 확보된 경우)
+    # 코스피200 지수 (1028) 최근 영업일 종가 조회
+    if result["day_close"] is None:
+        try:
+            from pykrx import stock as _pykrx_stock
+            from datetime import timedelta as _td
+            # 최근 7일 내에서 데이터가 있는 영업일 찾기
+            today_dt = now_kst().date()
+            day_close_val = None
+            for back in range(1, 8):
+                d_str = (today_dt - _td(days=back)).strftime("%Y%m%d")
+                if (today_dt - _td(days=back)).weekday() >= 5:
+                    continue
+                try:
+                    df = _pykrx_stock.get_index_ohlcv_by_date(d_str, d_str, "1028")
+                    if df is not None and not df.empty and "종가" in df.columns:
+                        val = float(df["종가"].iloc[-1])
+                        if val > 0:
+                            day_close_val = val
+                            break
+                except Exception:
+                    continue
+            if day_close_val is not None:
+                result["day_close"] = round(day_close_val, 2)
+                result["attempted"].append({
+                    "source": "pykrx 코스피200(1028)", "ok": True
+                })
+            else:
+                result["attempted"].append({
+                    "source": "pykrx 코스피200(1028)", "ok": False,
+                    "error": "최근 7일간 OHLCV 없음"
+                })
+        except ImportError:
+            result["attempted"].append({
+                "source": "pykrx 코스피200(1028)", "ok": False, "error": "pykrx 미설치"
+            })
+        except Exception as exc:
+            result["attempted"].append({
+                "source": "pykrx 코스피200(1028)", "ok": False, "error": str(exc)[:80]
+            })
+
     # Tier 2: esignal.co.kr
     if result["night_close"] is None:
         try:
@@ -3098,10 +3139,15 @@ def _compute_options_signal(symbol: str) -> dict:
 
     try:
         t = _yf.Ticker(symbol)
-        hist = t.history(period="1d")
+        # 미국 장 마감 후 period='1d' 가 빈 DF 가 되는 경우가 있어 5d 로 폴백
+        hist = t.history(period="5d")
         if hist is None or hist.empty:
-            return {"error": "현재가 조회 실패"}
-        spot = _nan_float(hist["Close"].iloc[-1])
+            return {"error": "현재가 조회 실패 (5d 기간에 데이터 없음)"}
+        # NaN 제거 후 마지막 종가
+        closes = [c for c in hist["Close"].tolist() if c == c]
+        if not closes:
+            return {"error": "현재가 NaN"}
+        spot = _nan_float(closes[-1])
 
         exps = list(t.options or [])
         if not exps:
