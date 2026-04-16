@@ -2426,6 +2426,40 @@ body.chart-modal-open { overflow: hidden; }
   font-weight: 700;
 }
 
+/* 태그 필터 2단 구조 + 프리셋 */
+.preset-bar {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 8px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.preset-btn {
+  background: #FFD70011; color: #FFD700;
+  border: 1px solid #FFD70033;
+  padding: 5px 12px; border-radius: 14px;
+  cursor: pointer; font-size: 11px; font-weight: 600;
+  transition: all 0.1s;
+}
+.preset-btn:hover { background: #FFD70022; border-color: #FFD700; }
+.preset-btn.active { background: #FFD700; color: #000; }
+
+.tag-section {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  margin-bottom: 6px;
+}
+.tag-section-label {
+  color: #FFD700; font-size: 10px; font-weight: 700;
+  margin-right: 4px; white-space: nowrap;
+}
+.tag-section-label.bearish { color: #888; }
+.tag-toggle-all {
+  background: #2C2C2E; color: #888;
+  border: 1px dashed #555;
+  padding: 3px 10px; border-radius: 10px;
+  cursor: pointer; font-size: 10px;
+  margin-bottom: 6px;
+}
+.tag-toggle-all:hover { color: #FFD700; border-color: #FFD700; }
+
 .watchlist-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -8888,36 +8922,44 @@ const DISCOVER_STATE = {
 // 태그 매핑: details.*_signal → 태그명 + 색상 카테고리
 const _TAG_MAP = {
   // bb_signal
-  '과매수':     { color: 'bull' },
-  '과매도':     { color: 'bear' },
-  '중립 상향':  { color: 'neutral' },
-  '중립 하향':  { color: 'neutral' },
-  '스퀴즈':     { color: 'warn' },
-  '밴드 확장':  { color: 'neutral' },
+  '과매수':     { color: 'bull',    buy: false },
+  '과매도':     { color: 'warn',    buy: true  },  // 반등 기회
+  '중립 상향':  { color: 'neutral', buy: false },
+  '중립 하향':  { color: 'neutral', buy: false },
+  '스퀴즈':     { color: 'warn',    buy: true  },  // 돌파 임박
+  '밴드 확장':  { color: 'neutral', buy: false },
   // trend_signal
-  '지지선 위':  { color: 'bull' },
-  '저항선 돌파': { color: 'bull' },
-  '저항선 하':  { color: 'neutral' },
-  '지지선 이탈': { color: 'bear' },
+  '지지선 위':  { color: 'bull',    buy: true  },
+  '저항선 돌파': { color: 'bull',   buy: true  },
+  '저항선 하':  { color: 'neutral', buy: false },
+  '지지선 이탈': { color: 'bear',   buy: false },
   // fib_signal
-  '깊은 조정':  { color: 'bear' },
-  '중간 조정':  { color: 'warn' },
-  '일반 조정':  { color: 'neutral' },
-  '약조정 구간': { color: 'warn' },
-  '신고가 근접': { color: 'bull' },
-  '추세 전환':  { color: 'bear' },
+  '깊은 조정':  { color: 'bear',   buy: false },
+  '중간 조정':  { color: 'warn',   buy: false },
+  '일반 조정':  { color: 'neutral', buy: false },
+  '약조정 구간': { color: 'warn',   buy: false },
+  '신고가 근접': { color: 'bull',   buy: true  },
+  '추세 전환':  { color: 'bear',   buy: false },
   // vol_signal
-  '거래량 급증': { color: 'bull' },
-  '거래량 급감': { color: 'bear' },
-  // RSI / MACD 태그 (rsi_macd 필드 기반)
-  '과매수_RSI':     { color: 'bull' },
-  '상승진행_RSI':   { color: 'bull' },
-  '과매도_RSI':     { color: 'bear' },
-  '과매도회복_RSI': { color: 'warn' },
-  'MACD_골든크로스': { color: 'bull' },
-  'MACD_데드크로스': { color: 'bear' },
-  'MACD_양전환':    { color: 'warn' },
+  '거래량 급증': { color: 'bull',   buy: true  },
+  '거래량 급감': { color: 'bear',   buy: false },
+  // RSI / MACD 태그
+  '과매수_RSI':     { color: 'bull',    buy: false },
+  '상승진행_RSI':   { color: 'bull',    buy: true  },
+  '과매도_RSI':     { color: 'warn',    buy: true  },
+  '과매도회복_RSI': { color: 'warn',    buy: true  },
+  'MACD_골든크로스': { color: 'bull',   buy: true  },
+  'MACD_데드크로스': { color: 'bear',   buy: false },
+  'MACD_양전환':    { color: 'warn',   buy: true  },
 };
+
+// 복합 필터 프리셋
+const _TAG_PRESETS = [
+  { emoji: '🎯', label: '스윙 매수 후보',  tags: ['지지선 위', '거래량 급증', 'MACD_골든크로스'] },
+  { emoji: '🚀', label: '돌파 임박',       tags: ['스퀴즈', '신고가 근접'] },
+  { emoji: '🔥', label: '강세 추세',       tags: ['상승진행_RSI', '거래량 급증'] },
+  { emoji: '💎', label: '과매도 반등',      tags: ['과매도회복_RSI', '과매도', '지지선 위'] },
+];
 const _TAG_COLORS = {
   bull:    { bg: '#FF333322', color: '#FF3333', border: '#FF333366' },
   bear:    { bg: '#33AA3322', color: '#33AA33', border: '#33AA3366' },
@@ -9385,21 +9427,79 @@ function _dcBuildDetailsPanel(it, stage) {
 }
 
 // ── 태그 필터 헬퍼 ──
+let _showAllTags = false;
+
 function _dcBuildTagChips(items) {
   const bar = document.getElementById('dc-filter-bar');
   if (!bar) return;
-  // 모든 종목의 태그 수집 + 빈도 순 정렬
   const freq = {};
   items.forEach(it => (it._tags || []).forEach(t => freq[t] = (freq[t] || 0) + 1));
   const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]);
 
-  let html = '<span class="dc-filter-label">태그 필터</span>';
-  html += `<button class="dc-tag-chip ${DISCOVER_STATE.activeTags.length === 0 ? 'active' : ''}" data-tag="">전체</button>`;
-  for (const [tag, cnt] of sorted) {
+  // 매수 vs 기타 분류
+  const buyTags = sorted.filter(([t]) => (_TAG_MAP[t] || {}).buy);
+  const otherTags = sorted.filter(([t]) => !(_TAG_MAP[t] || {}).buy);
+
+  let html = '';
+
+  // 프리셋 버튼
+  html += '<div class="preset-bar">';
+  for (const p of _TAG_PRESETS) {
+    const isActive = p.tags.every(t => DISCOVER_STATE.activeTags.includes(t))
+                     && DISCOVER_STATE.activeTags.length === p.tags.length;
+    html += `<button class="preset-btn ${isActive ? 'active' : ''}" data-preset="${_escHtml(p.label)}">${p.emoji} ${_escHtml(p.label)}</button>`;
+  }
+  html += `<button class="dc-tag-chip ${DISCOVER_STATE.activeTags.length === 0 ? 'active' : ''}" data-tag="" style="margin-left:auto">전체 초기화</button>`;
+  html += '</div>';
+
+  // 📈 매수 신호 섹션
+  html += '<div class="tag-section"><span class="tag-section-label">📈 매수 신호</span>';
+  for (const [tag, cnt] of buyTags) {
     const isActive = DISCOVER_STATE.activeTags.includes(tag);
     html += `<button class="dc-tag-chip ${isActive ? 'active' : ''}" data-tag="${_escHtml(tag)}" style="${isActive ? '' : _tagStyle(tag)}">${_escHtml(tag)} <span class="dc-chip-count">${cnt}</span></button>`;
   }
+  html += '</div>';
+
+  // ▼ 전체 태그 (토글)
+  if (otherTags.length) {
+    html += `<button class="tag-toggle-all" id="tag-toggle-all">${_showAllTags ? '▲ 접기' : '▼ 전체 태그 보기 (' + otherTags.length + ')'}</button>`;
+    html += `<div class="tag-section tag-other" style="display:${_showAllTags ? 'flex' : 'none'}" id="tag-other-section">`;
+    html += '<span class="tag-section-label bearish">📉 기타</span>';
+    for (const [tag, cnt] of otherTags) {
+      const isActive = DISCOVER_STATE.activeTags.includes(tag);
+      html += `<button class="dc-tag-chip ${isActive ? 'active' : ''}" data-tag="${_escHtml(tag)}" style="${isActive ? '' : _tagStyle(tag)}">${_escHtml(tag)} <span class="dc-chip-count">${cnt}</span></button>`;
+    }
+    html += '</div>';
+  }
+
   bar.innerHTML = html;
+
+  // 토글 이벤트
+  document.getElementById('tag-toggle-all')?.addEventListener('click', () => {
+    _showAllTags = !_showAllTags;
+    const sec = document.getElementById('tag-other-section');
+    const btn = document.getElementById('tag-toggle-all');
+    if (sec) sec.style.display = _showAllTags ? 'flex' : 'none';
+    if (btn) btn.textContent = _showAllTags ? '▲ 접기' : `▼ 전체 태그 보기 (${otherTags.length})`;
+  });
+
+  // 프리셋 이벤트
+  bar.querySelector('.preset-bar')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.preset-btn');
+    if (!btn) return;
+    const presetLabel = btn.dataset.preset;
+    const preset = _TAG_PRESETS.find(p => p.label === presetLabel);
+    if (!preset) return;
+    // 현재 프리셋과 동일하면 해제, 아니면 적용
+    const isAlreadyActive = preset.tags.every(t => DISCOVER_STATE.activeTags.includes(t))
+                            && DISCOVER_STATE.activeTags.length === preset.tags.length;
+    if (isAlreadyActive) {
+      DISCOVER_STATE.activeTags = [];
+    } else {
+      DISCOVER_STATE.activeTags = [...preset.tags];
+    }
+    if (DISCOVER_STATE.data) _dcRenderResults(DISCOVER_STATE.data);
+  });
 }
 
 function _dcUpdateFilterUI() {
