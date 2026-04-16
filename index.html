@@ -3940,6 +3940,9 @@ async function openChartPanel(code, hintName, marketOverride) {
 
   _drawCandles(document.getElementById('cv-candle'), data, W, HC);
   _drawVolume(document.getElementById('cv-volume'),  data, W, HV, null);
+  console.log('[chart] rsi_macd in response:', !!data.rsi_macd,
+    'rsi len:', data.rsi_macd?.rsi?.length,
+    'cv-rsi:', !!document.getElementById('cv-rsi'));
   _drawRSI(document.getElementById('cv-rsi'), data, W, HV);
   _drawMACD(document.getElementById('cv-macd'), data, W, HV);
   // 크로스헤어 최적화: 초기 렌더 결과를 이미지로 저장 (매번 재그리기 방지)
@@ -5170,9 +5173,10 @@ function _drawCandles(canvas, data, W, H) {
 
 // ── RSI 서브차트 ──
 function _drawRSI(canvas, data, W, H) {
-  if (!canvas) return;
+  if (!canvas) { console.warn('[RSI] canvas not found'); return; }
   const rm = data.rsi_macd;
-  if (!rm || !rm.rsi) return;
+  if (!rm || !rm.rsi) { console.warn('[RSI] rsi_macd missing from data'); return; }
+  console.log('[RSI] drawing', rm.rsi.length, 'points, last=', rm.rsi[rm.rsi.length-1]);
   const ctx = canvas.getContext('2d');
   const rsi = rm.rsi;
   const len = rsi.length;
@@ -5228,9 +5232,10 @@ function _drawRSI(canvas, data, W, H) {
 
 // ── MACD 서브차트 ──
 function _drawMACD(canvas, data, W, H) {
-  if (!canvas) return;
+  if (!canvas) { console.warn('[MACD] canvas not found'); return; }
   const rm = data.rsi_macd;
-  if (!rm || !rm.macd) return;
+  if (!rm || !rm.macd) { console.warn('[MACD] rsi_macd missing from data'); return; }
+  console.log('[MACD] drawing', rm.macd.length, 'points');
   const ctx = canvas.getContext('2d');
   const { macd, macd_signal, macd_hist } = rm;
   const len = macd.length;
