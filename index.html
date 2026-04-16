@@ -1313,6 +1313,93 @@ select:focus { border-color: var(--accent); }
   font-size: 11px; color: var(--text);
 }
 
+/* ── TRADE PANEL (우측 슬라이드) ──────────────────────── */
+.tp-toggle-btn {
+  background: #FFD700; color: #000; border: none;
+  padding: 4px 12px; border-radius: 6px; cursor: pointer;
+  font-weight: 700; font-size: 12px;
+}
+.tp-toggle-btn:hover { opacity: 0.85; }
+.trade-panel {
+  position: fixed; top: 0; right: 0;
+  width: 340px; height: 100vh;
+  background: #1C1C1E; border-left: 1px solid var(--border);
+  z-index: 100000; overflow-y: auto;
+  box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+  animation: tpSlideIn 0.2s ease-out;
+}
+@keyframes tpSlideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.tp-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: #1C1C1E; z-index: 1;
+}
+.tp-title { color: #FFD700; font-size: 15px; font-weight: 700; }
+.tp-close { background: none; border: none; color: #888; font-size: 22px; cursor: pointer; }
+.tp-close:hover { color: #FF3333; }
+.tp-body { padding: 14px 16px; }
+
+.tp-stock { padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.tp-sname { color: var(--text); font-size: 16px; font-weight: 700; }
+.tp-scode { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.tp-sprice { color: #FFD700; font-size: 22px; font-weight: 800; margin-top: 4px; }
+
+.tp-verdict {
+  background: var(--surface2); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.tp-v-head { color: var(--text); font-size: 14px; margin-bottom: 4px; }
+.tp-v-reasons { color: var(--text-sub); font-size: 10px; line-height: 1.6; }
+
+.tp-ind-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 6px; margin-bottom: 12px;
+}
+.tp-ind {
+  background: var(--surface2); border-radius: 6px;
+  padding: 8px 6px; text-align: center;
+}
+.tp-ind span { color: var(--text-muted); font-size: 9px; display: block; }
+.tp-ind b { color: var(--text); font-size: 16px; }
+
+.tp-section {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 10px;
+}
+.tp-mypos { border-color: #FFD70044; }
+.tp-sec-title {
+  color: var(--text-muted); font-size: 11px; font-weight: 600;
+  margin-bottom: 6px; padding-bottom: 4px;
+  border-bottom: 1px solid #2C2C2E;
+}
+.tp-row {
+  display: flex; justify-content: space-between;
+  padding: 3px 0; font-size: 11px;
+}
+.tp-row span { color: var(--text-muted); }
+.tp-row b { color: var(--text); }
+
+.tp-alert-chip {
+  display: inline-block; background: #151516;
+  color: var(--text-sub); padding: 3px 8px;
+  border-radius: 6px; font-size: 10px; margin: 2px;
+}
+
+.tp-actions {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.tp-btn {
+  padding: 10px; border: none; border-radius: 6px;
+  cursor: pointer; font-size: 12px; font-weight: 600;
+}
+.tp-btn.buy { background: #FF3333; color: #fff; }
+.tp-btn.sell { background: #4488FF; color: #fff; }
+.tp-btn.manage { background: #FFD700; color: #000; }
+.tp-btn.alert { background: var(--surface2); color: #FFD700; border: 1px solid #FFD700; }
+.tp-btn:hover { opacity: 0.85; }
+
 /* ── JOURNAL REVIEW (복기) ─────────────────────────────── */
 .jn-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 .jn-tab {
@@ -3673,10 +3760,16 @@ async function openChartPanel(code, hintName, marketOverride) {
   panel.innerHTML = `
     <div class="chart-header" data-header-code="${safeCode}">
       <span class="chart-title">${safeName} (${safeCode})</span>
-      <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button class="tp-toggle-btn" id="chart-tp-btn" title="매매 패널">⚡</button>
+        <button class="chart-close" id="chart-close-btn">✕ 닫기</button>
+      </div>
     </div>
     <div class="chart-loading"><div class="spin"></div>차트 데이터 로딩 중… (${safeCode})</div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
+  document.getElementById('chart-tp-btn').addEventListener('click', () =>
+    _toggleTradePanel(code, hintName || code, isUS ? 'us' : 'kr')
+  );
   panel.scrollTop = 0;
 
   // Phase 14: 시장별 엔드포인트 (marketOverride 존중)
@@ -8038,6 +8131,172 @@ function _showTrailingModal(posId) {
     _savePortfolio(pf2);
     overlay.remove();
     renderPortfolioPage();
+  });
+}
+
+// ── 통합 매매 패널 (우측 슬라이드) ──
+function _toggleTradePanel(code, name, market) {
+  const existing = document.getElementById('trade-panel');
+  if (existing) { existing.remove(); return; }
+
+  const html = `<div class="trade-panel" id="trade-panel">
+    <div class="tp-header">
+      <span class="tp-title">⚡ 매매 패널</span>
+      <button class="tp-close" id="tp-close">×</button>
+    </div>
+    <div class="tp-body" id="tp-body"><div class="pg-empty">로딩 중…</div></div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  document.getElementById('tp-close').addEventListener('click', () =>
+    document.getElementById('trade-panel')?.remove()
+  );
+  _loadTradePanel(code, name, market);
+}
+
+async function _loadTradePanel(code, name, market) {
+  const body = document.getElementById('tp-body');
+  if (!body) return;
+  const cur = market === 'us' ? '$' : '₩';
+  const isUS = market === 'us';
+
+  // 기존 데이터 수집 (병렬)
+  let vpData = null;
+  try {
+    const vpUrl = `/api/volume_profile/${code}?market=${market}`;
+    const r = await fetch(vpUrl);
+    if (r.ok) vpData = await r.json();
+  } catch {}
+
+  // CHART_STATE에서 기술 지표
+  const chartData = CHART_STATE.data || {};
+  const rm = chartData.rsi_macd || {};
+  const adxData = chartData.adx || {};
+  const rsiCur = (rm.rsi || []).slice(-1)[0];
+  const adxCur = (adxData.adx || []).slice(-1)[0];
+  const pdi = (adxData.plus_di || []).slice(-1)[0];
+  const mdi = (adxData.minus_di || []).slice(-1)[0];
+  const macdCur = (rm.macd || []).slice(-1)[0];
+  const sigCur = (rm.macd_signal || []).slice(-1)[0];
+  const histCur = (rm.macd_hist || []).slice(-1)[0];
+  const divs = rm.divergences || [];
+  const closes = chartData.close || [];
+  const curPrice = closes[closes.length - 1] || 0;
+
+  // 종합 판단 (간이)
+  let bullPts = 0, bearPts = 0;
+  const reasons = [];
+  if (rsiCur != null) {
+    if (rsiCur > 70) { bearPts++; reasons.push(`RSI ${rsiCur.toFixed(0)} 과매수`); }
+    else if (rsiCur < 30) { bullPts++; reasons.push(`RSI ${rsiCur.toFixed(0)} 과매도 반등`); }
+    else reasons.push(`RSI ${rsiCur.toFixed(0)}`);
+  }
+  if (macdCur != null && sigCur != null) {
+    if (macdCur > sigCur) { bullPts++; reasons.push('MACD > Signal'); }
+    else { bearPts++; reasons.push('MACD < Signal'); }
+  }
+  if (adxCur != null) {
+    if (adxCur > 25 && pdi > mdi) { bullPts++; reasons.push('ADX 추세 상승'); }
+    else if (adxCur > 25 && mdi > pdi) { bearPts++; reasons.push('ADX 추세 하락'); }
+    else reasons.push('ADX 횡보');
+  }
+  divs.forEach(d => {
+    if (d.type === 'bearish') { bearPts++; reasons.push(`${d.indicator} 베어리시 다이버전스`); }
+    if (d.type === 'bullish') { bullPts++; reasons.push(`${d.indicator} 불리시 다이버전스`); }
+  });
+
+  const verdict = bullPts > bearPts ? '강세' : bearPts > bullPts ? '약세' : '중립';
+  const verdictEmoji = verdict === '강세' ? '🟢' : verdict === '약세' ? '🔴' : '🟡';
+  const verdictCol = verdict === '강세' ? '#FF3333' : verdict === '약세' ? '#33AA33' : '#FFD700';
+
+  // 포트폴리오 포지션
+  const pf = _getPortfolio();
+  const myPos = (pf.positions || []).find(p => p.code === code);
+
+  // 알림
+  const alerts = (_getAlerts().rules || []).filter(r => r.code === code && r.enabled);
+
+  let h = '';
+  // 종목 헤더
+  h += `<div class="tp-stock">
+    <div class="tp-sname">${_escHtml(name)}</div>
+    <div class="tp-scode">${_escHtml(code)} · ${isUS ? '🇺🇸' : '🇰🇷'}</div>
+    <div class="tp-sprice">${cur}${curPrice.toLocaleString()}</div>
+  </div>`;
+
+  // 종합 판단
+  h += `<div class="tp-verdict" style="border-left:4px solid ${verdictCol}">
+    <div class="tp-v-head">${verdictEmoji} <b>${verdict}</b> (🟢${bullPts} 🔴${bearPts})</div>
+    <div class="tp-v-reasons">${reasons.map(r => `<div>• ${_escHtml(r)}</div>`).join('')}</div>
+  </div>`;
+
+  // 지표 그리드
+  h += `<div class="tp-ind-grid">
+    <div class="tp-ind"><span>RSI</span><b style="color:${rsiCur > 70 ? '#FF3333' : rsiCur < 30 ? '#33AA33' : 'var(--text)'}">${rsiCur?.toFixed(0) ?? '—'}</b></div>
+    <div class="tp-ind"><span>MACD</span><b>${macdCur?.toFixed(0) ?? '—'}</b></div>
+    <div class="tp-ind"><span>ADX</span><b style="color:${adxCur > 25 ? '#FFD700' : '#888'}">${adxCur?.toFixed(0) ?? '—'}</b></div>
+    <div class="tp-ind"><span>Hist</span><b style="color:${(histCur||0) >= 0 ? '#FF3333' : '#33AA33'}">${histCur?.toFixed(0) ?? '—'}</b></div>
+  </div>`;
+
+  // 매물대 (volume_profile)
+  if (vpData && !vpData.error) {
+    const vp = vpData.volume_profile || {};
+    h += `<div class="tp-section">
+      <div class="tp-sec-title">🎯 매물대</div>
+      <div class="tp-row"><span>POC</span><b style="color:#FFD700">${cur}${vp.poc?.toLocaleString()}</b></div>
+      <div class="tp-row"><span>VWAP</span><b style="color:#FF9500">${cur}${vpData.vwap_current?.toLocaleString()}</b></div>
+      <div class="tp-row"><span>Value Area</span><b>${cur}${vp.va_low?.toLocaleString()} ~ ${cur}${vp.va_high?.toLocaleString()}</b></div>
+      ${(vpData.resistance || []).map(r => `<div class="tp-row"><span style="color:#FF3333">저항 (${r.touches}x)</span><b>${cur}${r.price.toLocaleString()}</b></div>`).join('')}
+      ${(vpData.support || []).map(s => `<div class="tp-row"><span style="color:#33AA33">지지 (${s.touches}x)</span><b>${cur}${s.price.toLocaleString()}</b></div>`).join('')}
+    </div>`;
+  }
+
+  // 내 포지션
+  if (myPos) {
+    const pnl = (curPrice - myPos.buy_price) * myPos.quantity;
+    const pnlPct = myPos.buy_price ? ((curPrice / myPos.buy_price - 1) * 100) : 0;
+    const pnlCol = pnl >= 0 ? '#FF3333' : '#33AA33';
+    const sign = pnl >= 0 ? '+' : '';
+    const tr = myPos.trailing || {};
+    h += `<div class="tp-section tp-mypos">
+      <div class="tp-sec-title">💼 내 포지션</div>
+      <div class="tp-row"><span>매수가</span><b>${cur}${myPos.buy_price?.toLocaleString()}</b></div>
+      <div class="tp-row"><span>수량</span><b>${myPos.quantity}주</b></div>
+      <div class="tp-row"><span>손익</span><b style="color:${pnlCol}">${sign}${_fmtMoney(pnl, market)} (${sign}${pnlPct.toFixed(2)}%)</b></div>
+      ${tr.enabled ? `<div class="tp-row"><span>트레일링 손절</span><b style="color:#FFD700">${cur}${Number(tr.current_stop || 0).toLocaleString()}</b></div>` : ''}
+    </div>`;
+  }
+
+  // 활성 알림
+  if (alerts.length) {
+    h += `<div class="tp-section">
+      <div class="tp-sec-title">⏰ 활성 알림 (${alerts.length})</div>
+      ${alerts.map(a => {
+        const t = _ALERT_TYPES.find(x => x.value === a.type);
+        return `<div class="tp-alert-chip">${t?.label || a.type}${a.value ? ' ' + a.value : ''}</div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  // 액션 버튼
+  h += `<div class="tp-actions">
+    ${myPos
+      ? `<button class="tp-btn sell" data-act="sell">💰 매도 기록</button>
+         <button class="tp-btn manage" data-act="trailing">🎯 트레일링</button>`
+      : `<button class="tp-btn buy" data-act="buy">🛒 매수 (체크리스트)</button>`}
+    <button class="tp-btn alert" data-act="alert">⏰ 알림 설정</button>
+  </div>`;
+
+  body.innerHTML = h;
+
+  // 액션 버튼 이벤트
+  body.querySelector('.tp-actions')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tp-btn');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (act === 'buy') _showChecklist(code, name, market, 'buy', () => _showPfModal());
+    if (act === 'sell') _showJournalModal();
+    if (act === 'trailing' && myPos) _showTrailingModal(myPos.id);
+    if (act === 'alert') _showAlertModal(code, name, market);
   });
 }
 

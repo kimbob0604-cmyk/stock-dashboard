@@ -4762,6 +4762,24 @@ def _calc_momentum_score_kr(stock: dict, rank_change: int, rank_vol: int,
             "pts":    sub["vol_rank"], "max": 5,
         })
 
+    # v2 보너스: 볼밴 수축 (sparkline 변동성 축소 → 돌파 임박)
+    if sparkline and len(sparkline) >= 20:
+        try:
+            mean_all = sum(sparkline) / len(sparkline)
+            std_all = (sum((v - mean_all) ** 2 for v in sparkline) / len(sparkline)) ** 0.5
+            recent5 = sparkline[-5:]
+            mean5 = sum(recent5) / 5
+            std5 = (sum((v - mean5) ** 2 for v in recent5) / 5) ** 0.5
+            if std_all > 0 and std5 < std_all * 0.6:
+                sub["squeeze"] = 3
+                expl.append({
+                    "label": "볼밴 수축 보너스",
+                    "detail": f"5일 변동성 {std5/std_all*100:.0f}% (돌파 임박 가능)",
+                    "pts": 3, "max": 3,
+                })
+        except Exception:
+            pass
+
     return sum(sub.values()), sub, expl
 
 
@@ -7002,6 +7020,18 @@ def _calc_flow_score_kr(flow: dict) -> tuple[int, dict, list]:
         "pts":    sub["streak"], "max": 4,
     })
 
+    # v2 보너스: 외국인+기관 동반 매수 (최근 5일 양수 모두 양수)
+    if fv and iv:
+        frgn_5d = sum(fv[-5:])
+        inst_5d = sum(iv[-5:])
+        if frgn_5d > 0 and inst_5d > 0:
+            sub["alignment"] = 5
+            expl.append({
+                "label":  "외국인+기관 동반 매수",
+                "detail": f"외국인 5일 {_fmt_eok(frgn_5d)} · 기관 {_fmt_eok(inst_5d)}",
+                "pts":    5, "max": 5,
+            })
+
     return sum(sub.values()), sub, expl
 
 
@@ -7139,8 +7169,12 @@ def _calc_technical_score_kr(analysis: dict | None) -> tuple[int, dict, list]:
 
 
 def _calc_undervalued_bonus(stock_ret_20d: float | None,
-                            sector_avg_ret_20d: float | None) -> tuple[int, list]:
-    """섹터가 올랐는데 본인은 덜 오른 경우 가산 (0~10). 반환: (점수, 설명 리스트)."""
+                            sector_avg_ret_20d: float | None,
+                            stock_ret_5d: float | None = None) -> tuple[int, list]:
+    """
+    섹터가 올랐는데 본인은 덜 오른 경우 가산 (0~10).
+    v2 안전장치: 5일 수익률이 음수이면 반등 시그널 없음 → 보너스 절반.
+    """
     if sector_avg_ret_20d is None or stock_ret_20d is None:
         return 0, [{"label": "덜오른 보너스",
                     "detail": "20일 수익률 데이터 없음",
@@ -7149,10 +7183,15 @@ def _calc_undervalued_bonus(stock_ret_20d: float | None,
         gap = sector_avg_ret_20d - stock_ret_20d
         pts = (10 if gap > 15 else 7 if gap > 10 else
                5  if gap >  5 else 3 if gap >  3 else 0)
+        # v2 안전장치: 5일 모멘텀이 음수 → 아직 반등 안 함 → 절반만
+        safety_note = ""
+        if stock_ret_5d is not None and stock_ret_5d < 0:
+            pts = max(0, pts // 2)
+            safety_note = f" (5일 {stock_ret_5d:+.1f}% 약세 → 안전장치 적용, 절반)"
         return pts, [{
             "label":  "덜오른 보너스",
             "detail": (f"섹터 20일 평균 {sector_avg_ret_20d:+.1f}%인데 "
-                       f"이 종목은 {stock_ret_20d:+.1f}%. 차이 {gap:.1f}%p"),
+                       f"이 종목은 {stock_ret_20d:+.1f}%. 차이 {gap:.1f}%p{safety_note}"),
             "pts":    pts, "max": 10,
         }]
     return 0, [{
@@ -7307,8 +7346,10 @@ def _run_stage2_kr() -> list | None:
 
         sp = sparklines.get(code) or []
         stock_ret_20d = ((sp[-1] / sp[0] - 1) * 100) if (len(sp) >= 20 and sp[0]) else None
+        stock_ret_5d = ((sp[-1] / sp[-5] - 1) * 100) if (len(sp) >= 5 and sp[-5]) else None
         bonus, bonus_expl = _calc_undervalued_bonus(
-            stock_ret_20d, sector_avg_ret.get(it.get("sector") or "_")
+            stock_ret_20d, sector_avg_ret.get(it.get("sector") or "_"),
+            stock_ret_5d,
         )
 
         it["scores"]["flow"] = flow_score
