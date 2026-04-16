@@ -1212,6 +1212,146 @@ select:focus { border-color: var(--accent); }
   text-align: center; padding: 24px;
 }
 
+/* ── ALERT + CHECKLIST + SPLIT PLANNER ──────────────────── */
+.chart-alert-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); font-size: 14px;
+  width: 30px; height: 30px; border-radius: 6px;
+  cursor: pointer; margin-right: 4px;
+}
+.chart-alert-btn:hover { color: #FFD700; border-color: #FFD700; }
+
+.alert-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; background: var(--surface2);
+  border-radius: 6px; margin-bottom: 4px; font-size: 12px;
+  color: var(--text);
+}
+.alert-memo { color: var(--text-muted); font-size: 10px; margin-left: auto; }
+.alert-del-btn { background: none; border: none; cursor: pointer; font-size: 13px; }
+.alert-empty { color: var(--text-muted); font-size: 11px; text-align: center; padding: 10px; }
+
+.cl-items { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.cl-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; background: var(--surface2);
+  border-radius: 8px; cursor: pointer;
+  transition: background 0.08s;
+}
+.cl-item:hover { background: #3C3C3E; }
+.cl-cb { margin-top: 3px; }
+.cl-main { color: var(--text); font-size: 13px; font-weight: 600; }
+.cl-sub { color: var(--text-muted); font-size: 10px; margin-top: 2px; line-height: 1.5; }
+.cl-score { margin: 10px 0; }
+.cl-track { height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.cl-fill { height: 100%; background: linear-gradient(90deg, #FF6B6B, #33AA33); width: 0%; transition: width 0.3s; }
+.cl-proceed { opacity: 0.4; cursor: not-allowed; }
+.cl-proceed.enabled { opacity: 1; cursor: pointer; background: #33AA33; }
+
+.split-section {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; margin-top: 14px;
+}
+.split-title { color: #FFD700; font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.split-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  margin-bottom: 12px;
+}
+.split-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.split-row label { color: var(--text-muted); width: 70px; }
+.split-inp {
+  flex: 1; background: #151516; color: var(--text);
+  border: 1px solid var(--border); padding: 5px 7px;
+  border-radius: 4px; font-size: 11px; font-family: inherit;
+}
+.split-row span { color: var(--text-sub); font-size: 10px; width: 20px; }
+.sp-result { margin-bottom: 8px; }
+.sp-table {
+  width: 100%; border-collapse: collapse; font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.sp-table th {
+  background: #151516; color: var(--text-muted); padding: 5px 8px;
+  text-align: right; font-size: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sp-table th:first-child { text-align: left; }
+.sp-table td { padding: 5px 8px; text-align: right; color: var(--text); border-bottom: 1px solid #2C2C2E; }
+.sp-stage { text-align: left !important; color: #FFD700; font-weight: 600; }
+.sp-avg td { background: #151516; font-size: 13px; }
+.sp-tip { color: #4488FF; font-size: 10px; margin-top: 8px; }
+.split-save {
+  width: 100%; background: var(--accent); color: #fff; border: none;
+  padding: 8px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; font-weight: 600; margin-top: 8px;
+}
+
+/* ── JOURNAL REVIEW (복기) ─────────────────────────────── */
+.jn-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.jn-tab {
+  background: var(--surface2); color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 7px 18px; border-radius: 18px; cursor: pointer;
+  font-size: 12px;
+}
+.jn-tab.active { background: #FFD70022; color: #FFD700; border-color: #FFD700; }
+
+.rev-stat-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 8px; margin-bottom: 16px;
+}
+@media (max-width: 900px) { .rev-stat-grid { grid-template-columns: repeat(2, 1fr); } }
+.rev-stat {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px; text-align: center;
+}
+.rev-stat.hl { border-color: #FFD70044; }
+.rev-lbl { color: var(--text-muted); font-size: 10px; margin-bottom: 3px; }
+.rev-val { color: var(--text); font-size: 20px; font-weight: 800; }
+.rev-sub2 { color: var(--text-sub); font-size: 10px; margin-top: 2px; }
+
+.rev-pair-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+.rev-pair {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px;
+  cursor: pointer; transition: border-color 0.1s;
+}
+.rev-pair:hover { border-color: var(--accent); }
+.rev-pair-head { margin-bottom: 2px; }
+.rev-pair-code { color: var(--text-muted); font-size: 10px; }
+.rev-pair-period { color: var(--text-muted); font-size: 10px; }
+.rev-pair-prices { color: var(--text-sub); font-size: 11px; margin: 3px 0; }
+.rev-pair-pnl { font-size: 14px; font-weight: 700; }
+
+.rev-summary {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin-bottom: 14px;
+  line-height: 1.6; font-size: 13px; color: var(--text);
+}
+.rev-ro {
+  color: var(--text-sub); font-size: 12px; padding: 6px 10px;
+  background: #151516; border-radius: 4px; margin-top: 2px;
+}
+.rev-suggest {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
+}
+.rev-ls-chip {
+  background: #3C3C3E; color: #FFD700; padding: 2px 8px;
+  border-radius: 9px; font-size: 10px; cursor: pointer;
+}
+.rev-ls-chip:hover { background: #FFD70022; }
+
+.rev-lesson-cloud {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  padding: 12px; background: var(--surface2);
+  border-radius: 8px;
+}
+.rev-lesson-item { padding: 4px 8px; font-size: 13px; }
+.rev-lesson-item small { color: var(--text-muted); font-size: 10px; }
+
 /* ── NEW HIGHS (Phase 19) ──────────────────────────────────────── */
 .nh-guide {
   background: var(--surface2); border: 1px solid var(--border);
@@ -2125,6 +2265,51 @@ body.chart-modal-open { overflow: hidden; }
   margin-top: 16px; padding: 10px 14px;
   background: #2C2C2E; border-left: 3px solid #FFD700;
   color: var(--text-muted); font-size: 11px; border-radius: 4px;
+}
+
+/* ── TAG FILTER + SORT BAR ────────────────────────────────── */
+.dc-filter-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 10px 0 8px; padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.dc-filter-label, .dc-sort-label {
+  color: var(--text-muted); font-size: 11px; font-weight: 600;
+  margin-right: 4px;
+}
+.dc-tag-chip {
+  padding: 4px 10px; border-radius: 12px;
+  font-size: 11px; cursor: pointer;
+  background: #3C3C3E; color: #aaa;
+  border: 1px solid #4C4C4E;
+  transition: all 0.1s;
+}
+.dc-tag-chip:hover { color: var(--text); border-color: var(--accent); }
+.dc-tag-chip.active {
+  background: #FF333322 !important;
+  color: #FF3333 !important;
+  border-color: #FF3333 !important;
+}
+.dc-chip-count {
+  font-size: 9px; color: var(--text-muted);
+  margin-left: 2px; opacity: 0.7;
+}
+
+.dc-sort-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-bottom: 10px;
+}
+.dc-sort-btn {
+  padding: 4px 12px; border-radius: 12px;
+  font-size: 11px; cursor: pointer;
+  background: #2C2C2E; color: var(--text-muted);
+  border: 1px solid var(--border);
+  transition: all 0.1s;
+}
+.dc-sort-btn:hover { color: var(--text); }
+.dc-sort-btn.active {
+  color: #FFD700; border-color: #FFD700;
+  font-weight: 700;
 }
 
 .watchlist-grid {
@@ -3546,6 +3731,7 @@ async function openChartPanel(code, hintName, marketOverride) {
         <div class="chart-title-row">
           <button class="watchlist-star-lg ${favClass}" id="chart-star-btn"
                   title="관심종목 토글">${favStar}</button>
+          <button class="chart-alert-btn" id="chart-alert-btn" title="알림 설정">⏰</button>
           <span class="chart-title">${displayName} (${safeCode})</span>
         </div>
         <div class="chart-live-price" id="chart-live-price">
@@ -3611,6 +3797,13 @@ async function openChartPanel(code, hintName, marketOverride) {
       <div id="crosshair-date" class="crosshair-axis-label crosshair-date" style="display:none;"></div>
     </div>
 
+    <div class="chart-canvas-wrap chart-cv-wrap" id="cv-rsi-wrap">
+      <canvas id="cv-rsi" width="${W}" height="${HV}"></canvas>
+    </div>
+    <div class="chart-canvas-wrap chart-cv-wrap" id="cv-macd-wrap">
+      <canvas id="cv-macd" width="${W}" height="${HV}"></canvas>
+    </div>
+
     <div class="chart-tab-bar" id="chart-tab-bar">
       <button class="chart-tab-btn active" data-ctab="analysis">${isUS ? 'Analysis' : '기술적 분석'}</button>
       <button class="chart-tab-btn"        data-ctab="reports">${isUS ? 'Reports' : '리포트'}</button>
@@ -3621,9 +3814,14 @@ async function openChartPanel(code, hintName, marketOverride) {
     <div id="chart-tab-content"></div>`;
   document.getElementById('chart-close-btn').addEventListener('click', closeChartPanel);
   document.getElementById('chart-star-btn').addEventListener('click', _toggleChartStar);
+  document.getElementById('chart-alert-btn').addEventListener('click', () => {
+    _showAlertModal(code, hintName || code, isUS ? 'us' : 'kr');
+  });
 
   _drawCandles(document.getElementById('cv-candle'), data, W, HC);
   _drawVolume(document.getElementById('cv-volume'),  data, W, HV, null);
+  _drawRSI(document.getElementById('cv-rsi'), data, W, HV);
+  _drawMACD(document.getElementById('cv-macd'), data, W, HV);
 
   // Phase 10/11: 차트 패널 상태 + 기본 '기술적 분석' + 크로스헤어 + 가격 polling
   CHART_STATE.code        = code;
@@ -4803,6 +5001,137 @@ function _drawCandles(canvas, data, W, H) {
     ctx.fillStyle = col;
     ctx.fillRect(x - bw / 2, bt, bw, Math.max(bb2 - bt, 1));
   }
+}
+
+// ── RSI 서브차트 ──
+function _drawRSI(canvas, data, W, H) {
+  if (!canvas) return;
+  const rm = data.rsi_macd;
+  if (!rm || !rm.rsi) return;
+  const ctx = canvas.getContext('2d');
+  const rsi = rm.rsi;
+  const len = rsi.length;
+  const PAD = { top: 6, right: 120, bottom: 16, left: 68 };
+  const cw = W - PAD.left - PAD.right;
+  const ch = H - PAD.top - PAD.bottom;
+  const toX = i => PAD.left + (len > 1 ? (i / (len - 1)) * cw : cw / 2);
+  const toY = v => PAD.top + (1 - v / 100) * ch;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1C1C1E'; ctx.fillRect(0, 0, W, H);
+
+  // 가이드라인: 70 (빨강), 50 (회색), 30 (녹색)
+  for (const [level, color] of [[70, '#FF333366'], [50, '#44444488'], [30, '#33AA3366']]) {
+    const y = toY(level);
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color; ctx.font = '9px sans-serif';
+    ctx.fillText(String(level), PAD.left - 22, y + 3);
+  }
+
+  // 과매수(>70) / 과매도(<30) 영역 채움
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = '#FF3333';
+  ctx.fillRect(PAD.left, PAD.top, cw, toY(70) - PAD.top);
+  ctx.fillStyle = '#33AA33';
+  ctx.fillRect(PAD.left, toY(30), cw, toY(0) - toY(30));
+  ctx.globalAlpha = 1;
+
+  // RSI 라인
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < len; i++) {
+    const x = toX(i), y = toY(rsi[i]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // 현재값 라벨
+  const cur = rsi[len - 1];
+  const rsiCol = cur > 70 ? '#FF3333' : cur > 50 ? '#FF9999' : cur > 30 ? '#99CC99' : '#33AA33';
+  ctx.fillStyle = rsiCol; ctx.font = 'bold 11px sans-serif';
+  ctx.fillText(`RSI ${cur.toFixed(1)}`, W - PAD.right + 8, PAD.top + 14);
+
+  // Y축 라벨
+  ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
+  ctx.fillText('RSI(14)', PAD.left, PAD.top - 1);
+}
+
+// ── MACD 서브차트 ──
+function _drawMACD(canvas, data, W, H) {
+  if (!canvas) return;
+  const rm = data.rsi_macd;
+  if (!rm || !rm.macd) return;
+  const ctx = canvas.getContext('2d');
+  const { macd, macd_signal, macd_hist } = rm;
+  const len = macd.length;
+  const PAD = { top: 6, right: 120, bottom: 16, left: 68 };
+  const cw = W - PAD.left - PAD.right;
+  const ch = H - PAD.top - PAD.bottom;
+  const toX = i => PAD.left + (len > 1 ? (i / (len - 1)) * cw : cw / 2);
+
+  // Y범위 자동
+  const allVals = [...macd, ...macd_signal, ...macd_hist].filter(v => v !== 0);
+  const yMax = Math.max(...allVals.map(Math.abs), 1);
+  const toY = v => PAD.top + ch / 2 - (v / yMax) * (ch / 2);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1C1C1E'; ctx.fillRect(0, 0, W, H);
+
+  // 0 중심선
+  const y0 = toY(0);
+  ctx.strokeStyle = '#44444488'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(PAD.left, y0); ctx.lineTo(W - PAD.right, y0); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 히스토그램 바
+  const bw = Math.max(2, cw / len * 0.6);
+  for (let i = 0; i < len; i++) {
+    const h = macd_hist[i];
+    if (h === 0) continue;
+    const x = toX(i) - bw / 2;
+    const barH = Math.abs(toY(h) - y0);
+    const prev = i > 0 ? macd_hist[i - 1] : 0;
+    // 양수: 증가→진한 빨강, 감소→연한 빨강. 음수: 반대.
+    if (h > 0) {
+      ctx.fillStyle = h > prev ? 'rgba(255,51,51,0.8)' : 'rgba(255,51,51,0.35)';
+      ctx.fillRect(x, toY(h), bw, barH);
+    } else {
+      ctx.fillStyle = h < prev ? 'rgba(51,170,51,0.8)' : 'rgba(51,170,51,0.35)';
+      ctx.fillRect(x, y0, bw, barH);
+    }
+  }
+
+  // MACD 라인 (파랑)
+  ctx.strokeStyle = '#4488FF'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < len; i++) {
+    const x = toX(i), y = toY(macd[i]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Signal 라인 (주황)
+  ctx.strokeStyle = '#FF9500'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < len; i++) {
+    const x = toX(i), y = toY(macd_signal[i]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // 현재값 라벨
+  const curM = macd[len - 1], curS = macd_signal[len - 1], curH = macd_hist[len - 1];
+  ctx.font = '10px sans-serif';
+  ctx.fillStyle = '#4488FF'; ctx.fillText(`MACD ${curM.toFixed(1)}`, W - PAD.right + 8, PAD.top + 12);
+  ctx.fillStyle = '#FF9500'; ctx.fillText(`Sig ${curS.toFixed(1)}`, W - PAD.right + 8, PAD.top + 24);
+  ctx.fillStyle = curH >= 0 ? '#FF3333' : '#33AA33';
+  ctx.fillText(`Hist ${curH >= 0 ? '+' : ''}${curH.toFixed(1)}`, W - PAD.right + 8, PAD.top + 36);
+
+  // Y축 라벨
+  ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
+  ctx.fillText('MACD(12,26,9)', PAD.left, PAD.top - 1);
 }
 
 function _drawVolume(canvas, data, W, H, flowData) {
@@ -6700,8 +7029,32 @@ function _deletePosition(id) {
 }
 
 // ── 매매일지 페이지 ──
+let _journalTab = 'timeline';
+
 function renderJournalPage() {
   const root = document.getElementById('journal-view');
+  root.innerHTML = `<div class="pg-wrap">
+    <div class="pg-title">📝 매매일지</div>
+    <div class="jn-tabs" id="jn-tabs">
+      <button class="jn-tab ${_journalTab === 'timeline' ? 'active' : ''}" data-tab="timeline">타임라인</button>
+      <button class="jn-tab ${_journalTab === 'review' ? 'active' : ''}" data-tab="review">📊 복기 분석</button>
+    </div>
+    <div id="jn-tab-content"></div>
+  </div>`;
+  document.getElementById('jn-tabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('.jn-tab');
+    if (!btn) return;
+    _journalTab = btn.dataset.tab;
+    document.querySelectorAll('#jn-tabs .jn-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === _journalTab));
+    if (_journalTab === 'review') _renderJournalReview();
+    else _renderJournalTimeline();
+  });
+  if (_journalTab === 'review') _renderJournalReview();
+  else _renderJournalTimeline();
+}
+
+function _renderJournalTimeline() {
+  const root = document.getElementById('jn-tab-content');
   const j = _getJournal();
   const entries = j.entries || [];
 
@@ -6788,15 +7141,12 @@ function renderJournalPage() {
     });
   }
 
-  root.innerHTML = `<div class="pg-wrap">
-    <div class="pg-title">📝 매매일지</div>
-    <div class="pg-sub">localStorage 기반 · 매매 기록과 메모/태그 누적</div>
+  root.innerHTML = `
     ${summaryHTML}
     <div class="journal-actions">
       <button class="journal-add-btn" id="j-add-btn">+ 매매 기록</button>
     </div>
-    <div id="j-timeline">${timelineHTML}</div>
-  </div>`;
+    <div id="j-timeline">${timelineHTML}</div>`;
 
   document.getElementById('j-add-btn').addEventListener('click', () => _showJournalModal());
   document.getElementById('j-timeline').addEventListener('click', (e) => {
@@ -6997,6 +7347,212 @@ function _deleteJournal(id) {
   renderJournalPage();
 }
 
+// ── 매매 복기 시스템 ──
+function _pairBuySell(entries) {
+  const sorted = [...entries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const queues = {};   // code → [{...entry, rem: qty}]
+  const pairs = [];
+  for (const e of sorted) {
+    const code = e.code;
+    if (!queues[code]) queues[code] = [];
+    if (e.type === 'buy') {
+      queues[code].push({ ...e, rem: e.quantity || 0 });
+    } else if (e.type === 'sell') {
+      let rem = e.quantity || 0;
+      while (rem > 0 && queues[code].length > 0) {
+        const buy = queues[code][0];
+        const matched = Math.min(buy.rem, rem);
+        const pnl = (e.price - buy.price) * matched;
+        const pnlPct = buy.price ? ((e.price / buy.price - 1) * 100) : 0;
+        const d1 = new Date(buy.date), d2 = new Date(e.date);
+        const holdDays = Math.round((d2 - d1) / 86400000);
+        pairs.push({
+          id: `p_${buy.id}_${e.id}`,
+          code, name: e.name, market: e.market || 'kr',
+          buy_id: buy.id, sell_id: e.id,
+          buy_date: buy.date, sell_date: e.date,
+          buy_price: buy.price, sell_price: e.price,
+          quantity: matched, pnl: Math.round(pnl),
+          pnl_pct: Math.round(pnlPct * 100) / 100,
+          hold_days: holdDays,
+          buy_memo: buy.memo, sell_memo: e.memo,
+        });
+        buy.rem -= matched;
+        rem -= matched;
+        if (buy.rem <= 0) queues[code].shift();
+      }
+    }
+  }
+  return pairs;
+}
+
+function _renderJournalReview() {
+  const root = document.getElementById('jn-tab-content');
+  const j = _getJournal();
+  const pairs = _pairBuySell(j.entries || []);
+
+  if (!pairs.length) {
+    root.innerHTML = '<div class="pg-empty">완료된 매매(매수+매도)가 없습니다.<br>매수 후 매도를 기록하면 자동으로 FIFO 페어링됩니다.</div>';
+    return;
+  }
+
+  const wins = pairs.filter(p => p.pnl > 0);
+  const losses = pairs.filter(p => p.pnl < 0);
+  const winRate = (wins.length / pairs.length * 100).toFixed(1);
+  const totalPnl = pairs.reduce((s, p) => s + p.pnl, 0);
+  const avgWin = wins.length ? wins.reduce((s, p) => s + p.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, p) => s + p.pnl, 0) / losses.length) : 0;
+  const pf = avgLoss > 0 ? (avgWin / avgLoss) : 0;
+  const avgWinPct = wins.length ? (wins.reduce((s, p) => s + p.pnl_pct, 0) / wins.length) : 0;
+  const avgLossPct = losses.length ? (losses.reduce((s, p) => s + p.pnl_pct, 0) / losses.length) : 0;
+  const avgHold = pairs.reduce((s, p) => s + (p.hold_days || 0), 0) / pairs.length;
+
+  // 통계 카드
+  let html = `
+    <div class="rev-stat-grid">
+      <div class="rev-stat"><div class="rev-lbl">총 거래</div><div class="rev-val">${pairs.length}회</div>
+        <div class="rev-sub2">승${wins.length} 패${losses.length}</div></div>
+      <div class="rev-stat hl"><div class="rev-lbl">승률</div>
+        <div class="rev-val" style="color:${winRate >= 50 ? '#FF3333' : '#33AA33'}">${winRate}%</div></div>
+      <div class="rev-stat"><div class="rev-lbl">총 손익</div>
+        <div class="rev-val" style="color:${totalPnl >= 0 ? '#FF3333' : '#33AA33'}">${totalPnl >= 0 ? '+' : ''}${_fmtMoney(totalPnl, 'kr')}</div></div>
+      <div class="rev-stat hl"><div class="rev-lbl">손익비</div>
+        <div class="rev-val" style="color:${pf >= 1.5 ? '#FFD700' : '#FF6B6B'}">${pf.toFixed(2)}</div>
+        <div class="rev-sub2">목표 ≥ 1.5</div></div>
+      <div class="rev-stat"><div class="rev-lbl">평균 수익</div>
+        <div class="rev-val" style="color:#FF3333">+${avgWinPct.toFixed(2)}%</div></div>
+      <div class="rev-stat"><div class="rev-lbl">평균 손실</div>
+        <div class="rev-val" style="color:#33AA33">${avgLossPct.toFixed(2)}%</div></div>
+      <div class="rev-stat"><div class="rev-lbl">평균 보유</div>
+        <div class="rev-val">${avgHold.toFixed(1)}일</div></div>
+    </div>`;
+
+  // 페어 리스트
+  html += '<div style="color:var(--text);font-size:13px;font-weight:700;margin:14px 0 8px">🔍 매매 페어 (클릭 → 복기)</div>';
+  html += '<div class="rev-pair-list" id="rev-pairs">';
+  [...pairs].reverse().forEach(p => {
+    const col = p.pnl >= 0 ? '#FF3333' : '#33AA33';
+    const sign = p.pnl >= 0 ? '+' : '';
+    const cur = p.market === 'us' ? '$' : '₩';
+    html += `<div class="rev-pair" data-pid="${_escHtml(p.id)}">
+      <div class="rev-pair-head">
+        <b>${_escHtml(p.name)}</b> <span class="rev-pair-code">${_escHtml(p.code)}</span>
+      </div>
+      <div class="rev-pair-period">${_escHtml(p.buy_date||'')} → ${_escHtml(p.sell_date||'')} · ${p.hold_days}일</div>
+      <div class="rev-pair-prices">${cur}${p.buy_price?.toLocaleString()} → ${cur}${p.sell_price?.toLocaleString()} × ${p.quantity}</div>
+      <div class="rev-pair-pnl" style="color:${col}">${sign}${_fmtMoney(p.pnl, p.market)} (${sign}${p.pnl_pct}%)</div>
+    </div>`;
+  });
+  html += '</div>';
+
+  // 교훈 태그 클라우드
+  const lessonCounts = {};
+  (j.entries || []).forEach(e => {
+    ((e.review || {}).lessons || []).forEach(t => lessonCounts[t] = (lessonCounts[t] || 0) + 1);
+  });
+  if (Object.keys(lessonCounts).length) {
+    html += '<div style="color:#FFD700;font-size:13px;font-weight:700;margin:14px 0 8px">🏷 교훈 태그</div>';
+    html += '<div class="rev-lesson-cloud">';
+    Object.entries(lessonCounts).sort((a, b) => b[1] - a[1]).forEach(([tag, cnt]) => {
+      const neg = ['과신매수','뇌동매매','손절못함','너무일찍팔음','너무오래보유','타이밍부족'].includes(tag);
+      html += `<span class="rev-lesson-item" style="color:${neg ? '#FF6B6B' : '#FFD700'}">${_escHtml(tag)} <small>${cnt}</small></span>`;
+    });
+    html += '</div>';
+  }
+
+  root.innerHTML = html;
+
+  // 페어 캐시 + 클릭 이벤트
+  window._reviewPairs = {};
+  pairs.forEach(p => window._reviewPairs[p.id] = p);
+  document.getElementById('rev-pairs').addEventListener('click', (e) => {
+    const el = e.target.closest('.rev-pair');
+    if (!el) return;
+    _showReviewModal(el.dataset.pid);
+  });
+}
+
+function _showReviewModal(pairId) {
+  const p = (window._reviewPairs || {})[pairId];
+  if (!p) return;
+  const j = _getJournal();
+  const buyEntry = j.entries.find(e => e.id === p.buy_id);
+  const rv = buyEntry?.review || {};
+  const col = p.pnl >= 0 ? '#FF3333' : '#33AA33';
+  const sign = p.pnl >= 0 ? '+' : '';
+  const cur = p.market === 'us' ? '$' : '₩';
+
+  const lessonSuggest = ['익절성공','손절성공','수익보존','분할매수효과','과신매수','뇌동매매','손절못함','너무일찍팔음','너무오래보유','타이밍부족']
+    .map(t => `<span class="rev-ls-chip" data-tag="${_escHtml(t)}">${_escHtml(t)}</span>`).join('');
+
+  const html = `
+    <div class="pf-modal-overlay" id="rev-modal-ov">
+      <div class="pf-modal" style="max-width:580px">
+        <div class="pf-modal-title">🔍 매매 복기</div>
+        <div class="rev-summary">
+          <b style="color:#FFD700">${_escHtml(p.name)}</b> (${_escHtml(p.code)}) · ${p.hold_days}일 보유<br>
+          ${cur}${p.buy_price?.toLocaleString()} → ${cur}${p.sell_price?.toLocaleString()} × ${p.quantity}<br>
+          <span style="color:${col};font-size:16px;font-weight:700">${sign}${_fmtMoney(p.pnl, p.market)} (${sign}${p.pnl_pct}%)</span>
+        </div>
+        <div class="pf-modal-row"><label>매수 메모</label><div class="rev-ro">${_escHtml(p.buy_memo || '없음')}</div></div>
+        <div class="pf-modal-row"><label>매도 메모</label><div class="rev-ro">${_escHtml(p.sell_memo || '없음')}</div></div>
+        <div class="pf-modal-row"><label>목표가 도달?</label>
+          <select id="rv-target" class="pf-input"><option value="true" ${rv.target_reached ? 'selected' : ''}>예</option><option value="false" ${rv.target_reached === false ? 'selected' : ''}>아니오</option></select></div>
+        <div class="pf-modal-row"><label>손절 발동?</label>
+          <select id="rv-stop" class="pf-input"><option value="false" ${!rv.stop_triggered ? 'selected' : ''}>아니오</option><option value="true" ${rv.stop_triggered ? 'selected' : ''}>예</option></select></div>
+        <div class="pf-modal-row"><label>후회도 (1=만족 ~ 5=후회)</label>
+          <input type="range" id="rv-regret" min="1" max="5" value="${rv.regret_score || 3}" style="flex:1">
+          <span id="rv-regret-disp" style="color:var(--text);width:20px;text-align:center">${rv.regret_score || 3}</span></div>
+        <div class="pf-modal-row"><label>교훈 태그 (콤마 구분)</label>
+          <input type="text" id="rv-lessons" class="pf-input" value="${_escHtml((rv.lessons || []).join(', '))}" placeholder="익절성공, 뇌동매매 등">
+          <div class="rev-suggest" id="rv-suggest">${lessonSuggest}</div></div>
+        <div class="pf-modal-row"><label>복기 메모</label>
+          <textarea id="rv-memo" class="pf-input" rows="2" placeholder="이 거래의 핵심 교훈">${_escHtml(rv.review_memo || '')}</textarea></div>
+        <div class="pf-modal-actions">
+          <button class="pf-cancel-btn" id="rv-cancel">취소</button>
+          <button class="pf-save-btn" id="rv-save">저장</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+
+  const overlay = document.getElementById('rev-modal-ov');
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('rv-cancel').addEventListener('click', () => overlay.remove());
+  document.getElementById('rv-regret').addEventListener('input', (e) => {
+    document.getElementById('rv-regret-disp').textContent = e.target.value;
+  });
+  document.getElementById('rv-suggest').addEventListener('click', (e) => {
+    const chip = e.target.closest('.rev-ls-chip');
+    if (!chip) return;
+    const input = document.getElementById('rv-lessons');
+    const cur = input.value.split(',').map(s => s.trim()).filter(Boolean);
+    const tag = chip.dataset.tag;
+    if (!cur.includes(tag)) { cur.push(tag); input.value = cur.join(', '); }
+  });
+  document.getElementById('rv-save').addEventListener('click', () => {
+    const j2 = _getJournal();
+    const idx = j2.entries.findIndex(e => e.id === p.buy_id);
+    if (idx >= 0) {
+      const lessonsRaw = document.getElementById('rv-lessons').value;
+      j2.entries[idx].review = {
+        matched_pair_id: p.id,
+        actual_outcome: p.pnl > 0 ? 'win' : p.pnl < 0 ? 'loss' : 'breakeven',
+        realized_pnl: p.pnl, realized_pnl_pct: p.pnl_pct, hold_days: p.hold_days,
+        target_reached: document.getElementById('rv-target').value === 'true',
+        stop_triggered: document.getElementById('rv-stop').value === 'true',
+        regret_score: parseInt(document.getElementById('rv-regret').value),
+        lessons: lessonsRaw.split(',').map(s => s.trim()).filter(Boolean),
+        review_memo: document.getElementById('rv-memo').value,
+        reviewed_at: new Date().toISOString(),
+      };
+      _saveJournal(j2);
+    }
+    overlay.remove();
+    _renderJournalReview();
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GLOBAL SEARCH (Ctrl+K / 🔍)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7135,6 +7691,260 @@ function _deleteJournal(id) {
     _highlightItem();
   });
 })();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERT RULES + CHECKLIST + SPLIT PLANNER
+// ─────────────────────────────────────────────────────────────────────────────
+let _alertCache = null;
+function _getAlerts() {
+  if (_alertCache) return _alertCache;
+  try { _alertCache = JSON.parse(localStorage.getItem('alert_rules') || '{"rules":[]}'); }
+  catch { _alertCache = { rules: [] }; }
+  return _alertCache;
+}
+function _saveAlerts(d) {
+  _alertCache = d;
+  try { localStorage.setItem('alert_rules', JSON.stringify(d)); }
+  catch {}
+  fetch('/api/alerts/sync', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rules: d.rules }),
+  }).catch(() => {});
+}
+
+const _ALERT_TYPES = [
+  { value: 'price_above',    label: '가격 이상 도달',      unit: '원', group: '가격' },
+  { value: 'price_below',    label: '가격 이하 하락',      unit: '원', group: '가격' },
+  { value: 'change_up',      label: '당일 상승률 이상',    unit: '%',  group: '가격' },
+  { value: 'change_down',    label: '당일 하락률 이하',    unit: '%',  group: '가격' },
+  { value: 'rsi_oversold',   label: 'RSI 과매도 (≤)',     unit: '',   group: '기술' },
+  { value: 'rsi_overbought', label: 'RSI 과매수 (≥)',     unit: '',   group: '기술' },
+  { value: 'macd_golden',    label: 'MACD 골든크로스',     unit: null, group: '기술' },
+  { value: 'macd_dead',      label: 'MACD 데드크로스',     unit: null, group: '기술' },
+  { value: 'volume_spike',   label: '거래량 급증 (≥ N배)', unit: '배', group: '기술' },
+];
+
+function _showAlertModal(code, name, market) {
+  const cur = market === 'us' ? '$' : '₩';
+  const options = _ALERT_TYPES.map(t =>
+    `<option value="${t.value}">${t.label}</option>`
+  ).join('');
+  const existing = (_getAlerts().rules || []).filter(r => r.code === code);
+
+  const existingHTML = existing.length
+    ? existing.map(r => {
+        const label = _ALERT_TYPES.find(t => t.value === r.type)?.label || r.type;
+        const val = r.value != null ? ` (${r.value})` : '';
+        const status = r.triggered_at ? '✅' : (r.enabled ? '⏳' : '⏸');
+        return `<div class="alert-item" data-id="${_escHtml(r.id)}">
+          <span>${status} ${_escHtml(label)}${val}</span>
+          ${r.message ? `<span class="alert-memo">${_escHtml(r.message)}</span>` : ''}
+          <button class="alert-del-btn" data-action="del-alert" data-id="${_escHtml(r.id)}">🗑</button>
+        </div>`;
+      }).join('')
+    : '<div class="alert-empty">설정된 알림 없음</div>';
+
+  const html = `
+    <div class="pf-modal-overlay" id="alert-overlay">
+      <div class="pf-modal" style="max-width:520px">
+        <div class="pf-modal-title">⏰ ${_escHtml(name)} (${_escHtml(code)}) 알림</div>
+        <div class="pf-modal-row">
+          <label>조건</label>
+          <select id="alert-type" class="pf-input">${options}</select>
+        </div>
+        <div class="pf-modal-row" id="alert-val-row">
+          <label>값</label>
+          <input type="number" id="alert-value" class="pf-input" step="any" placeholder="예: 75000">
+        </div>
+        <div class="pf-modal-row">
+          <label>메모</label>
+          <input type="text" id="alert-memo" class="pf-input" placeholder="분할매수 1차 타점 등">
+        </div>
+        <div class="pf-modal-actions">
+          <button class="pf-cancel-btn" id="alert-cancel">취소</button>
+          <button class="pf-save-btn" id="alert-save">저장</button>
+        </div>
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:11px;margin-bottom:6px">이 종목 기존 알림</div>
+          <div id="alert-existing">${existingHTML}</div>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+
+  const overlay = document.getElementById('alert-overlay');
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('alert-cancel').addEventListener('click', () => overlay.remove());
+  document.getElementById('alert-save').addEventListener('click', () => {
+    const type = document.getElementById('alert-type').value;
+    const value = parseFloat(document.getElementById('alert-value').value) || null;
+    const memo = document.getElementById('alert-memo').value;
+    const alerts = _getAlerts();
+    alerts.rules.push({
+      id: 'alert_' + Date.now(), code, name, market,
+      type, value, message: memo,
+      enabled: true, triggered_at: null,
+      created_at: new Date().toISOString(),
+    });
+    _saveAlerts(alerts);
+    overlay.remove();
+  });
+
+  // 타입 변경 시 값 입력 필드 토글
+  const typeEl = document.getElementById('alert-type');
+  const valRow = document.getElementById('alert-val-row');
+  typeEl.addEventListener('change', () => {
+    const t = _ALERT_TYPES.find(x => x.value === typeEl.value);
+    valRow.style.display = t?.unit === null ? 'none' : 'flex';
+  });
+
+  // 기존 알림 삭제
+  document.getElementById('alert-existing').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action="del-alert"]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const alerts = _getAlerts();
+    alerts.rules = alerts.rules.filter(r => r.id !== id);
+    _saveAlerts(alerts);
+    btn.closest('.alert-item')?.remove();
+  });
+}
+
+// ── 매매 체크리스트 ──
+function _showChecklist(code, name, market, action, onProceed) {
+  const items = [
+    ['시장 방향성 확인', 'KOSPI/S&P500 일봉이 20MA 위 상승 추세인가?'],
+    ['섹터 모멘텀 확인', '이 종목의 섹터가 최근 1주 수익률 상위인가?'],
+    ['개별 종목 추세', '20/60/120MA 정배열 또는 지지선 위에 있는가?'],
+    ['진입가·손절가·목표가 명확', '세 가격이 사전에 결정되어 있는가?'],
+    ['손익비 1:1.5 이상', '(목표가-진입가) ≥ (진입가-손절가) × 1.5 인가?'],
+    ['포지션 사이즈 계산', '계좌 2% 이내 손실 허용선으로 수량을 결정했는가?'],
+    ['분할매수 계획 수립', '1차/2차/3차 비중과 가격을 정했는가?'],
+  ];
+  const itemsHTML = items.map(([main, sub]) => `
+    <label class="cl-item">
+      <input type="checkbox" class="cl-cb">
+      <div><div class="cl-main">${_escHtml(main)}</div><div class="cl-sub">${_escHtml(sub)}</div></div>
+    </label>
+  `).join('');
+
+  const html = `
+    <div class="pf-modal-overlay" id="cl-overlay">
+      <div class="pf-modal" style="max-width:620px">
+        <div class="pf-modal-title">✅ ${action === 'buy' ? '매수' : '매도'} 체크리스트</div>
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:14px;line-height:1.6">
+          충동매매를 방지합니다. 7개 중 <b style="color:#FFD700">5개 이상</b>(70%) 체크해야 진행 가능.
+        </div>
+        <div class="cl-items" id="cl-items">${itemsHTML}</div>
+        <div class="cl-score">
+          체크율: <span id="cl-pct">0%</span>
+          <div class="cl-track"><div id="cl-fill" class="cl-fill"></div></div>
+        </div>
+        <div class="pf-modal-actions">
+          <button class="pf-cancel-btn" id="cl-cancel">취소</button>
+          <button class="pf-save-btn cl-proceed" id="cl-proceed" disabled>매매 진행</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+
+  const overlay = document.getElementById('cl-overlay');
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('cl-cancel').addEventListener('click', () => overlay.remove());
+
+  document.getElementById('cl-items').addEventListener('change', () => {
+    const cbs = document.querySelectorAll('#cl-items .cl-cb');
+    const checked = Array.from(cbs).filter(c => c.checked).length;
+    const pct = Math.round(checked / cbs.length * 100);
+    document.getElementById('cl-pct').textContent = pct + '%';
+    document.getElementById('cl-fill').style.width = pct + '%';
+    const btn = document.getElementById('cl-proceed');
+    btn.disabled = pct < 70;
+    btn.classList.toggle('enabled', pct >= 70);
+  });
+
+  document.getElementById('cl-proceed').addEventListener('click', () => {
+    overlay.remove();
+    if (onProceed) onProceed();
+  });
+}
+
+// ── 분할매수 계획기 ──
+function _renderSplitPlanner(container, code, name, market) {
+  const cur = market === 'us' ? '$' : '₩';
+  const html = `
+    <div class="split-section">
+      <div class="split-title">📋 분할매수 계획기</div>
+      <div class="split-grid">
+        <div class="split-row"><label>총 수량</label><input type="number" id="sp-qty" class="split-inp" placeholder="100" oninput="_calcSplit('${market}')"><span>주</span></div>
+        <div class="split-row"><label>1차 가격</label><input type="number" id="sp-p1" class="split-inp" placeholder="${cur}" oninput="_calcSplit('${market}')"><span>${cur}</span></div>
+        <div class="split-row"><label>1차 비중</label><input type="number" id="sp-w1" class="split-inp" value="40" oninput="_calcSplit('${market}')"><span>%</span></div>
+        <div class="split-row"><label>2차 조정</label><input type="number" id="sp-d2" class="split-inp" value="-2" step="0.5" oninput="_calcSplit('${market}')"><span>%</span></div>
+        <div class="split-row"><label>2차 비중</label><input type="number" id="sp-w2" class="split-inp" value="35" oninput="_calcSplit('${market}')"><span>%</span></div>
+        <div class="split-row"><label>3차 조정</label><input type="number" id="sp-d3" class="split-inp" value="-5" step="0.5" oninput="_calcSplit('${market}')"><span>%</span></div>
+        <div class="split-row"><label>3차 비중</label><input type="number" id="sp-w3" class="split-inp" value="25" oninput="_calcSplit('${market}')"><span>%</span></div>
+      </div>
+      <div id="sp-result" class="sp-result">수량·가격 입력 시 계산됩니다.</div>
+      <button class="split-save" id="sp-save-btn" style="display:none">💾 계획 저장</button>
+    </div>`;
+  container.insertAdjacentHTML('beforeend', html);
+  document.getElementById('sp-save-btn').addEventListener('click', () => {
+    const plans = JSON.parse(localStorage.getItem('split_plans') || '{"items":[]}');
+    const qty = parseInt(document.getElementById('sp-qty').value) || 0;
+    const p1 = parseFloat(document.getElementById('sp-p1').value) || 0;
+    plans.items.push({
+      id: 'plan_' + Date.now(), code, name, market,
+      total_qty: qty, price1: p1,
+      w1: parseFloat(document.getElementById('sp-w1').value),
+      w2: parseFloat(document.getElementById('sp-w2').value),
+      w3: parseFloat(document.getElementById('sp-w3').value),
+      d2: parseFloat(document.getElementById('sp-d2').value),
+      d3: parseFloat(document.getElementById('sp-d3').value),
+      created_at: new Date().toISOString(),
+    });
+    localStorage.setItem('split_plans', JSON.stringify(plans));
+    alert('분할매수 계획이 저장되었습니다.');
+  });
+}
+
+function _calcSplit(market) {
+  const qty = parseInt(document.getElementById('sp-qty')?.value) || 0;
+  const p1 = parseFloat(document.getElementById('sp-p1')?.value) || 0;
+  const w1 = parseFloat(document.getElementById('sp-w1')?.value) || 0;
+  const w2 = parseFloat(document.getElementById('sp-w2')?.value) || 0;
+  const w3 = parseFloat(document.getElementById('sp-w3')?.value) || 0;
+  const d2 = parseFloat(document.getElementById('sp-d2')?.value) || 0;
+  const d3 = parseFloat(document.getElementById('sp-d3')?.value) || 0;
+  const box = document.getElementById('sp-result');
+  const saveBtn = document.getElementById('sp-save-btn');
+  if (!qty || !p1) { box.textContent = '수량·가격을 입력하세요.'; saveBtn.style.display = 'none'; return; }
+  const total = w1 + w2 + w3;
+  if (Math.abs(total - 100) > 0.5) {
+    box.innerHTML = `<span style="color:#FF6B6B">비중 합계 ${total}% (100% 필요)</span>`;
+    saveBtn.style.display = 'none'; return;
+  }
+  const q1 = Math.floor(qty * w1 / 100);
+  const q2 = Math.floor(qty * w2 / 100);
+  const q3 = qty - q1 - q2;
+  const p2 = Math.round(p1 * (1 + d2 / 100));
+  const p3 = Math.round(p1 * (1 + d3 / 100));
+  const inv1 = q1 * p1, inv2 = q2 * p2, inv3 = q3 * p3;
+  const total_inv = inv1 + inv2 + inv3;
+  const avg = qty > 0 ? Math.round(total_inv / qty) : 0;
+  const cur = market === 'us' ? '$' : '₩';
+  const fmt = v => `${cur}${Math.round(v).toLocaleString()}`;
+  box.innerHTML = `
+    <table class="sp-table"><thead><tr>
+      <th>단계</th><th>가격</th><th>비중</th><th>수량</th><th>투자금</th>
+    </tr></thead><tbody>
+      <tr><td class="sp-stage">1차</td><td>${fmt(p1)}</td><td>${w1}%</td><td>${q1}주</td><td>${fmt(inv1)}</td></tr>
+      <tr><td class="sp-stage">2차 (${d2}%)</td><td>${fmt(p2)}</td><td>${w2}%</td><td>${q2}주</td><td>${fmt(inv2)}</td></tr>
+      <tr><td class="sp-stage">3차 (${d3}%)</td><td>${fmt(p3)}</td><td>${w3}%</td><td>${q3}주</td><td>${fmt(inv3)}</td></tr>
+      <tr class="sp-avg"><td colspan="2">평균 매수가</td><td colspan="3"><b>${fmt(avg)}</b> · 총 ${fmt(total_inv)}</td></tr>
+    </tbody></table>
+    <div class="sp-tip">💡 2차 ${fmt(p2)}, 3차 ${fmt(p3)}에 ⏰ 알림을 설정하면 자동 텔레그램 알림</div>`;
+  saveBtn.style.display = '';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ETF MAP (Phase 23) — 국내 주요 ETF 테마별 트리맵
@@ -7570,8 +8380,71 @@ const DISCOVER_STATE = {
   data: null,
   loading: false,
   pollTimer: null,
-  market: 'all',  // all | kr | us
+  market: 'all',
+  activeTags: [],         // 활성화된 태그 필터 (AND 조건)
+  sortKey: 'total_score', // 정렬 기준
+  sortDir: 'desc',        // asc | desc
 };
+
+// 태그 매핑: details.*_signal → 태그명 + 색상 카테고리
+const _TAG_MAP = {
+  // bb_signal
+  '과매수':     { color: 'bull' },
+  '과매도':     { color: 'bear' },
+  '중립 상향':  { color: 'neutral' },
+  '중립 하향':  { color: 'neutral' },
+  '스퀴즈':     { color: 'warn' },
+  '밴드 확장':  { color: 'neutral' },
+  // trend_signal
+  '지지선 위':  { color: 'bull' },
+  '저항선 돌파': { color: 'bull' },
+  '저항선 하':  { color: 'neutral' },
+  '지지선 이탈': { color: 'bear' },
+  // fib_signal
+  '깊은 조정':  { color: 'bear' },
+  '중간 조정':  { color: 'warn' },
+  '일반 조정':  { color: 'neutral' },
+  '약조정 구간': { color: 'warn' },
+  '신고가 근접': { color: 'bull' },
+  '추세 전환':  { color: 'bear' },
+  // vol_signal
+  '거래량 급증': { color: 'bull' },
+  '거래량 급감': { color: 'bear' },
+  // RSI / MACD 태그 (rsi_macd 필드 기반)
+  '과매수_RSI':     { color: 'bull' },
+  '상승진행_RSI':   { color: 'bull' },
+  '과매도_RSI':     { color: 'bear' },
+  '과매도회복_RSI': { color: 'warn' },
+  'MACD_골든크로스': { color: 'bull' },
+  'MACD_데드크로스': { color: 'bear' },
+  'MACD_양전환':    { color: 'warn' },
+};
+const _TAG_COLORS = {
+  bull:    { bg: '#FF333322', color: '#FF3333', border: '#FF333366' },
+  bear:    { bg: '#33AA3322', color: '#33AA33', border: '#33AA3366' },
+  neutral: { bg: '#3C3C3E',   color: '#aaa',    border: '#4C4C4E' },
+  warn:    { bg: '#FFD70022', color: '#FFD700', border: '#FFD70066' },
+};
+
+function _computeTags(it) {
+  const tags = [];
+  const d = it.details || {};
+  for (const key of ['bb_signal', 'trend_signal', 'fib_signal', 'vol_signal']) {
+    const sig = d[key];
+    if (sig && _TAG_MAP[sig]) tags.push(sig);
+  }
+  // RSI/MACD 태그 (백엔드 Stage 2가 생성)
+  for (const t of (d.rsi_macd_tags || [])) {
+    if (_TAG_MAP[t]) tags.push(t);
+  }
+  return tags;
+}
+
+function _tagStyle(tag) {
+  const cat = (_TAG_MAP[tag] || {}).color || 'neutral';
+  const c = _TAG_COLORS[cat];
+  return `background:${c.bg};color:${c.color};border:1px solid ${c.border}`;
+}
 
 async function renderDiscoverPage() {
   const root = document.getElementById('discover-view');
@@ -7598,6 +8471,22 @@ async function renderDiscoverPage() {
           <b>덜오른 보너스</b>란? 같은 섹터의 다른 종목들은 많이 올랐는데
           이 종목은 상대적으로 덜 올라, <b>따라잡기(catch-up) 가능성</b>이 있는
           종목에 최대 +10점을 부여합니다. 섹터 20일 평균 대비 격차가 클수록 높은 점수.
+        </div>
+
+        <div class="dc-filter-bar" id="dc-filter-bar">
+          <span class="dc-filter-label">태그 필터</span>
+          <button class="dc-tag-chip active" data-tag="">전체</button>
+        </div>
+
+        <div class="dc-sort-bar" id="dc-sort-bar">
+          <span class="dc-sort-label">정렬</span>
+          <button class="dc-sort-btn active" data-sort="total_score">총점 ▼</button>
+          <button class="dc-sort-btn" data-sort="momentum">모멘텀</button>
+          <button class="dc-sort-btn" data-sort="flow">수급</button>
+          <button class="dc-sort-btn" data-sort="valuation">밸류</button>
+          <button class="dc-sort-btn" data-sort="technical">기술</button>
+          <button class="dc-sort-btn" data-sort="sector">섹터</button>
+          <button class="dc-sort-btn" data-sort="undervalued_bonus">덜오른</button>
         </div>
 
         <div id="dc-progress-wrap" class="dc-progress-wrap" style="display:none;">
@@ -7647,6 +8536,41 @@ async function renderDiscoverPage() {
       // data-market 기반으로 차트 panel 시장 override (all 모드에서 KR/US 혼재)
       openChartPanel(card.dataset.code, card.dataset.name, card.dataset.market);
     });
+
+    // 태그 필터 바 클릭
+    document.getElementById('dc-filter-bar').addEventListener('click', (e) => {
+      const chip = e.target.closest('.dc-tag-chip');
+      if (!chip) return;
+      const tag = chip.dataset.tag;
+      if (tag === '') {
+        // "전체" → 모든 필터 초기화
+        DISCOVER_STATE.activeTags = [];
+      } else {
+        const idx = DISCOVER_STATE.activeTags.indexOf(tag);
+        if (idx >= 0) DISCOVER_STATE.activeTags.splice(idx, 1);
+        else DISCOVER_STATE.activeTags.push(tag);
+      }
+      _dcUpdateFilterUI();
+      if (DISCOVER_STATE.data) _dcRenderResults(DISCOVER_STATE.data);
+    });
+
+    // 정렬 바 클릭
+    document.getElementById('dc-sort-bar').addEventListener('click', (e) => {
+      const btn = e.target.closest('.dc-sort-btn');
+      if (!btn) return;
+      const key = btn.dataset.sort;
+      if (DISCOVER_STATE.sortKey === key) {
+        DISCOVER_STATE.sortDir = DISCOVER_STATE.sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        DISCOVER_STATE.sortKey = key;
+        DISCOVER_STATE.sortDir = 'desc';
+      }
+      _dcUpdateSortUI();
+      if (DISCOVER_STATE.data) _dcRenderResults(DISCOVER_STATE.data);
+    });
+
+    // URL에서 초기 필터/정렬 복원
+    _dcRestoreFromURL();
   }
 
   // 진행 중인 스캔이 있는지 폴링 재개
@@ -7781,9 +8705,44 @@ function _dcRenderResults(data) {
   btn.disabled = false;
 
   const box = document.getElementById('dc-results');
-  const items = data.items || [];
+  let items = (data.items || []).map(it => ({
+    ...it,
+    _tags: _computeTags(it),
+  }));
+
+  // 태그 필터 바 동적 칩 생성 (모든 종목의 태그를 수집)
+  _dcBuildTagChips(items);
+
+  // 태그 필터 적용 (AND 조건)
+  const activeTags = DISCOVER_STATE.activeTags;
+  if (activeTags.length > 0) {
+    items = items.filter(it => activeTags.every(t => it._tags.includes(t)));
+  }
+
+  // 정렬
+  const sortKey = DISCOVER_STATE.sortKey;
+  const sortDir = DISCOVER_STATE.sortDir === 'asc' ? 1 : -1;
+  items.sort((a, b) => {
+    let av, bv;
+    if (sortKey === 'total_score') {
+      av = a.total_score || 0; bv = b.total_score || 0;
+    } else {
+      av = (a.scores || {})[sortKey] ?? -999;
+      bv = (b.scores || {})[sortKey] ?? -999;
+    }
+    return (bv - av) * sortDir;
+  });
+
+  // URL 업데이트
+  _dcSaveToURL();
+
+  const statusSuffix = activeTags.length
+    ? ` · 필터: ${activeTags.join(', ')} (${items.length}건)`
+    : '';
+  statusEl.textContent += statusSuffix;
+
   if (!items.length) {
-    box.innerHTML = '<div class="pg-empty">결과 없음</div>';
+    box.innerHTML = '<div class="pg-empty">조건에 맞는 종목 없음 — 태그 필터를 확인하세요.</div>';
     return;
   }
 
@@ -7835,12 +8794,12 @@ function _dcRenderResults(data) {
 
     const tags = [];
     if (stage === 2) {
-      if (d.per != null)       tags.push(`<span class="dc-tag">PER ${d.per}</span>`);
-      if (d.pbr != null)       tags.push(`<span class="dc-tag">PBR ${d.pbr}</span>`);
-      if (d.bb_signal)         tags.push(`<span class="dc-tag bb">${_escHtml(d.bb_signal)}</span>`);
-      if (d.trend_signal)      tags.push(`<span class="dc-tag trend">${_escHtml(d.trend_signal)}</span>`);
-      if (d.fib_signal)        tags.push(`<span class="dc-tag fib">${_escHtml(d.fib_signal)}</span>`);
-      if (d.vol_signal)        tags.push(`<span class="dc-tag vol">${_escHtml(d.vol_signal)}</span>`);
+      if (d.per != null) tags.push(`<span class="dc-tag">PER ${d.per}</span>`);
+      if (d.pbr != null) tags.push(`<span class="dc-tag">PBR ${d.pbr}</span>`);
+    }
+    // 시그널 기반 스타일 태그 (색상 카테고리 반영)
+    for (const t of (it._tags || [])) {
+      tags.push(`<span class="dc-tag" style="${_tagStyle(t)}">${_escHtml(t)}</span>`);
     }
 
     const detailsPanelHtml = _dcBuildDetailsPanel(it, stage);
@@ -7924,6 +8883,76 @@ function _dcBuildDetailsPanel(it, stage) {
     html += '</div>';
   }
   return html;
+}
+
+// ── 태그 필터 헬퍼 ──
+function _dcBuildTagChips(items) {
+  const bar = document.getElementById('dc-filter-bar');
+  if (!bar) return;
+  // 모든 종목의 태그 수집 + 빈도 순 정렬
+  const freq = {};
+  items.forEach(it => (it._tags || []).forEach(t => freq[t] = (freq[t] || 0) + 1));
+  const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]);
+
+  let html = '<span class="dc-filter-label">태그 필터</span>';
+  html += `<button class="dc-tag-chip ${DISCOVER_STATE.activeTags.length === 0 ? 'active' : ''}" data-tag="">전체</button>`;
+  for (const [tag, cnt] of sorted) {
+    const isActive = DISCOVER_STATE.activeTags.includes(tag);
+    html += `<button class="dc-tag-chip ${isActive ? 'active' : ''}" data-tag="${_escHtml(tag)}" style="${isActive ? '' : _tagStyle(tag)}">${_escHtml(tag)} <span class="dc-chip-count">${cnt}</span></button>`;
+  }
+  bar.innerHTML = html;
+}
+
+function _dcUpdateFilterUI() {
+  const bar = document.getElementById('dc-filter-bar');
+  if (!bar) return;
+  bar.querySelectorAll('.dc-tag-chip').forEach(chip => {
+    const tag = chip.dataset.tag;
+    const isActive = tag === '' ? DISCOVER_STATE.activeTags.length === 0
+                                : DISCOVER_STATE.activeTags.includes(tag);
+    chip.classList.toggle('active', isActive);
+  });
+}
+
+function _dcUpdateSortUI() {
+  const bar = document.getElementById('dc-sort-bar');
+  if (!bar) return;
+  bar.querySelectorAll('.dc-sort-btn').forEach(btn => {
+    const key = btn.dataset.sort;
+    const isActive = key === DISCOVER_STATE.sortKey;
+    btn.classList.toggle('active', isActive);
+    if (isActive) {
+      const arrow = DISCOVER_STATE.sortDir === 'desc' ? ' ▼' : ' ▲';
+      const label = btn.textContent.replace(/\s*[▼▲]$/, '');
+      btn.textContent = label + arrow;
+    } else {
+      btn.textContent = btn.textContent.replace(/\s*[▼▲]$/, '');
+    }
+  });
+}
+
+function _dcSaveToURL() {
+  const params = new URLSearchParams(window.location.search);
+  if (DISCOVER_STATE.activeTags.length) params.set('tags', DISCOVER_STATE.activeTags.join(','));
+  else params.delete('tags');
+  if (DISCOVER_STATE.sortKey !== 'total_score') params.set('sort', DISCOVER_STATE.sortKey);
+  else params.delete('sort');
+  if (DISCOVER_STATE.sortDir !== 'desc') params.set('order', DISCOVER_STATE.sortDir);
+  else params.delete('order');
+  const qs = params.toString();
+  const newUrl = window.location.pathname + (qs ? '?' + qs : '');
+  history.replaceState(null, '', newUrl);
+}
+
+function _dcRestoreFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  const tags = params.get('tags');
+  if (tags) DISCOVER_STATE.activeTags = tags.split(',').filter(Boolean);
+  const sort = params.get('sort');
+  if (sort) DISCOVER_STATE.sortKey = sort;
+  const order = params.get('order');
+  if (order === 'asc') DISCOVER_STATE.sortDir = 'asc';
+  _dcUpdateSortUI();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

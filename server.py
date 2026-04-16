@@ -207,6 +207,114 @@ def _get_trading_date() -> str:
     return now_kst().strftime("%Y%m%d")
 
 
+def _calc_rsi_macd(closes: list) -> dict:
+    """RSI(14) + MACD(12,26,9) 순수 Python 계산. pandas 미사용."""
+    n = len(closes)
+    # RSI 14
+    rsi = [0.0] * n
+    if n >= 15:
+        gains = [0.0] * n
+        losses = [0.0] * n
+        for i in range(1, n):
+            diff = closes[i] - closes[i - 1]
+            if diff > 0:
+                gains[i] = diff
+            else:
+                losses[i] = -diff
+        avg_gain = sum(gains[1:15]) / 14
+        avg_loss = sum(losses[1:15]) / 14
+        for i in range(14, n):
+            if i > 14:
+                avg_gain = (avg_gain * 13 + gains[i]) / 14
+                avg_loss = (avg_loss * 13 + losses[i]) / 14
+            if avg_loss == 0:
+                rsi[i] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi[i] = round(100 - 100 / (1 + rs), 2)
+
+    # MACD (12, 26, 9) — EMA 계산
+    def _ema(data: list, span: int) -> list:
+        out = [0.0] * len(data)
+        if not data:
+            return out
+        k = 2 / (span + 1)
+        out[0] = data[0]
+        for i in range(1, len(data)):
+            out[i] = data[i] * k + out[i - 1] * (1 - k)
+        return out
+
+    ema12 = _ema(closes, 12)
+    ema26 = _ema(closes, 26)
+    macd_line = [round(ema12[i] - ema26[i], 3) for i in range(n)]
+    macd_signal = _ema(macd_line, 9)
+    macd_signal = [round(v, 3) for v in macd_signal]
+    macd_hist = [round(macd_line[i] - macd_signal[i], 3) for i in range(n)]
+
+    return {
+        "rsi":         rsi,
+        "macd":        macd_line,
+        "macd_signal": macd_signal,
+        "macd_hist":   macd_hist,
+    }
+
+
+def _calc_adx(highs: list, lows: list, closes: list, period: int = 14) -> dict | None:
+    """ADX(14) 순수 Python 계산. 추세 강도 지표."""
+    n = len(closes)
+    if n < period * 2 + 1:
+        return None
+    adx_arr = [0.0] * n
+    plus_di_arr = [0.0] * n
+    minus_di_arr = [0.0] * n
+
+    # True Range + DM
+    tr = [0.0] * n
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        h_diff = highs[i] - highs[i - 1]
+        l_diff = lows[i - 1] - lows[i]
+        plus_dm[i]  = h_diff if h_diff > l_diff and h_diff > 0 else 0
+        minus_dm[i] = l_diff if l_diff > h_diff and l_diff > 0 else 0
+        tr[i] = max(highs[i] - lows[i],
+                    abs(highs[i] - closes[i - 1]),
+                    abs(lows[i]  - closes[i - 1]))
+
+    # Wilder smoothing (SMA 초기 → EMA)
+    def _smooth(arr, p):
+        out = [0.0] * len(arr)
+        out[p] = sum(arr[1:p + 1]) / p
+        for i in range(p + 1, len(arr)):
+            out[i] = (out[i - 1] * (p - 1) + arr[i]) / p
+        return out
+
+    sm_tr = _smooth(tr, period)
+    sm_pdm = _smooth(plus_dm, period)
+    sm_mdm = _smooth(minus_dm, period)
+
+    dx = [0.0] * n
+    for i in range(period, n):
+        if sm_tr[i] == 0:
+            continue
+        pdi = sm_pdm[i] / sm_tr[i] * 100
+        mdi = sm_mdm[i] / sm_tr[i] * 100
+        plus_di_arr[i] = round(pdi, 2)
+        minus_di_arr[i] = round(mdi, 2)
+        denom = pdi + mdi
+        dx[i] = abs(pdi - mdi) / denom * 100 if denom > 0 else 0
+
+    adx_smoothed = _smooth(dx, period)
+    for i in range(period * 2, n):
+        adx_arr[i] = round(adx_smoothed[i], 2)
+
+    return {
+        "adx":       adx_arr,
+        "plus_di":   plus_di_arr,
+        "minus_di":  minus_di_arr,
+    }
+
+
 def _calc_bollinger(closes: list, period: int = 20, num_std: float = 2) -> dict:
     sma, upper, lower = [], [], []
     for i in range(len(closes)):
@@ -1084,6 +1192,8 @@ def api_us_chart(symbol: str):
         "fibonacci":  fibonacci,
         "trendlines": trendlines,
         "analysis":   analysis,
+        "rsi_macd":   _calc_rsi_macd(closes),
+        "adx":        _calc_adx(highs, lows, closes),
     }
     cache_file.parent.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps(result, ensure_ascii=False),
@@ -2883,6 +2993,8 @@ def api_chart(code: str):
         "fibonacci": fibonacci,
         "trendlines": trendlines,
         "analysis": analysis,
+        "rsi_macd": _calc_rsi_macd(closes),
+        "adx":      _calc_adx(highs, lows, closes),
     }
     cache_file.parent.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3421,6 +3533,161 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
     except Exception as exc:
         log.warning("[텔레그램] error: %s", exc)
         return False
+
+
+@app.route("/api/alerts/sync", methods=["POST"])
+def api_alerts_sync():
+    """프론트 알림 규칙 → 서버 파일 동기화."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+    rules = data.get("rules") or []
+    out = BASE_DIR / "cache" / "alert_rules.json"
+    try:
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(json.dumps({"rules": rules}, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"status": "ok", "count": len(rules)})
+
+
+@app.route("/api/alerts/list")
+def api_alerts_list():
+    f = BASE_DIR / "cache" / "alert_rules.json"
+    if not f.exists():
+        return jsonify({"rules": []})
+    try:
+        return Response(f.read_text(encoding="utf-8"),
+                        content_type="application/json; charset=utf-8")
+    except Exception:
+        return jsonify({"rules": []})
+
+
+def _format_rule_label(rtype: str, value) -> str:
+    m = {
+        "price_above":    f"₩{int(value or 0):,} 이상",
+        "price_below":    f"₩{int(value or 0):,} 이하",
+        "change_up":      f"당일 +{value}% 이상",
+        "change_down":    f"당일 {value}% 이하",
+        "rsi_oversold":   f"RSI {value or 30} 이하",
+        "rsi_overbought": f"RSI {value or 70} 이상",
+        "macd_golden":    "MACD 골든크로스",
+        "macd_dead":      "MACD 데드크로스",
+        "bb_upper":       "볼밴 상단 터치",
+        "bb_lower":       "볼밴 하단 터치",
+        "volume_spike":   f"거래량 {value or 2}배 이상",
+    }
+    return m.get(rtype, rtype)
+
+
+def check_alert_rules():
+    """활성 알림 규칙 체크 — 10분 간격 스케줄러 호출."""
+    f = BASE_DIR / "cache" / "alert_rules.json"
+    if not f.exists():
+        return
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    rules = data.get("rules") or []
+    if not rules:
+        return
+
+    today_str = now_kst().strftime("%Y-%m-%d")
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    updated = False
+
+    for rule in rules:
+        if not rule.get("enabled", True):
+            continue
+        if (rule.get("triggered_at") or "").startswith(today_str):
+            continue
+
+        code = rule.get("code", "")
+        market = rule.get("market", "kr")
+        rtype = rule.get("type", "")
+        value = rule.get("value")
+
+        triggered = False
+        detail = ""
+
+        try:
+            if market == "kr":
+                st = stocks.get(code) or {}
+                price = st.get("close") or 0
+                chg = st.get("change_pct") or 0
+            else:
+                us_data = _fetch_us_market_data()
+                sym_map = {s["symbol"]: s for s in (us_data.get("all_stocks") or [])}
+                st = sym_map.get(code, {})
+                price = st.get("price") or 0
+                chg = st.get("change_pct") or 0
+
+            if not price:
+                continue
+            cur = "$" if market == "us" else "₩"
+
+            if rtype == "price_above" and value and price >= value:
+                triggered = True
+                detail = f"현재가 {cur}{price:,}"
+            elif rtype == "price_below" and value and price <= value:
+                triggered = True
+                detail = f"현재가 {cur}{price:,}"
+            elif rtype == "change_up" and value and chg >= value:
+                triggered = True
+                detail = f"당일 +{chg}%"
+            elif rtype == "change_down" and value and chg <= value:
+                triggered = True
+                detail = f"당일 {chg}%"
+            elif rtype in ("rsi_oversold", "rsi_overbought", "macd_golden", "macd_dead"):
+                # 차트 캐시에서 RSI/MACD 읽기
+                chart_data = None
+                if market == "kr":
+                    chart_data = _call_api_internal(f"/api/chart/{code}") or {}
+                else:
+                    chart_data = _call_api_internal(f"/api/us/chart/{code}") or {}
+                rm = chart_data.get("rsi_macd") if isinstance(chart_data, dict) else None
+                if rm:
+                    rsi_vals = rm.get("rsi") or []
+                    rsi_cur = rsi_vals[-1] if rsi_vals else 50
+                    if rtype == "rsi_oversold" and rsi_cur <= (value or 30):
+                        triggered = True
+                        detail = f"RSI {rsi_cur}"
+                    elif rtype == "rsi_overbought" and rsi_cur >= (value or 70):
+                        triggered = True
+                        detail = f"RSI {rsi_cur}"
+                    macd_v = rm.get("macd") or []
+                    macd_s = rm.get("macd_signal") or []
+                    if len(macd_v) >= 2 and len(macd_s) >= 2:
+                        if rtype == "macd_golden" and macd_v[-2] <= macd_s[-2] and macd_v[-1] > macd_s[-1]:
+                            triggered = True
+                            detail = "MACD 골든크로스"
+                        elif rtype == "macd_dead" and macd_v[-2] >= macd_s[-2] and macd_v[-1] < macd_s[-1]:
+                            triggered = True
+                            detail = "MACD 데드크로스"
+        except Exception as exc:
+            log.debug("alert eval %s %s: %s", code, rtype, exc)
+            continue
+
+        if triggered:
+            flag = "🇺🇸" if market == "us" else "🇰🇷"
+            msg = (f"🔔 <b>알림 트리거</b>\n"
+                   f"{flag} <b>{rule.get('name', code)}</b> ({code})\n"
+                   f"조건: {_format_rule_label(rtype, value)}\n"
+                   f"{detail}")
+            if rule.get("message"):
+                msg += f"\n메모: {rule['message']}"
+            send_telegram(msg)
+            rule["triggered_at"] = now_kst().strftime("%Y-%m-%dT%H:%M:%S")
+            updated = True
+
+    if updated:
+        try:
+            f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
 
 @app.route("/api/telegram/test", methods=["POST"])
@@ -4085,7 +4352,11 @@ def _startup():
             _scheduler.add_job(refresh_us_options_signal, "cron",
                                day_of_week="mon-fri", hour=22, minute=0,
                                id="refresh_options")
-            log.info("[텔레그램] 알림 스케줄 6개 등록 (4 alert + overnight + refresh_options)")
+            # 종목별 맞춤 알림 — 장중 10분 간격
+            _scheduler.add_job(check_alert_rules, "cron",
+                               day_of_week="mon-fri", hour="9-15", minute="*/10",
+                               id="tg_custom_alerts", max_instances=1)
+            log.info("[텔레그램] 알림 스케줄 7개 등록 (5 alert + overnight + refresh + custom_alerts)")
         else:
             log.info("[텔레그램] 토큰 미설정 — 알림 비활성화")
 
@@ -6755,6 +7026,33 @@ def _run_stage2_kr() -> list | None:
             "vol_signal":   _find_signal(comments, "volume"),
             "foreign_5d":   sum((flow.get("foreign_value") or [])[-5:]) if flow else None,
         }
+        # RSI/MACD 태그 자동 생성
+        rsi_macd_tags = []
+        rm = chart.get("rsi_macd") if isinstance(chart, dict) else None
+        if rm:
+            rsi_vals = rm.get("rsi") or []
+            macd_vals = rm.get("macd") or []
+            macd_sig  = rm.get("macd_signal") or []
+            macd_hist_vals = rm.get("macd_hist") or []
+            if rsi_vals:
+                rsi_cur = rsi_vals[-1]
+                if rsi_cur >= 70:   rsi_macd_tags.append("과매수_RSI")
+                elif rsi_cur >= 60: rsi_macd_tags.append("상승진행_RSI")
+                elif rsi_cur <= 30: rsi_macd_tags.append("과매도_RSI")
+                elif rsi_cur <= 40: rsi_macd_tags.append("과매도회복_RSI")
+                it["details"]["rsi"] = round(rsi_cur, 2)
+            if len(macd_vals) >= 2 and len(macd_sig) >= 2:
+                m_cur, m_prev = macd_vals[-1], macd_vals[-2]
+                s_cur, s_prev = macd_sig[-1],  macd_sig[-2]
+                if m_prev <= s_prev and m_cur > s_cur:
+                    rsi_macd_tags.append("MACD_골든크로스")
+                elif m_prev >= s_prev and m_cur < s_cur:
+                    rsi_macd_tags.append("MACD_데드크로스")
+            if len(macd_hist_vals) >= 2:
+                h_cur, h_prev = macd_hist_vals[-1], macd_hist_vals[-2]
+                if h_cur > 0 and h_prev <= 0:
+                    rsi_macd_tags.append("MACD_양전환")
+        it["details"]["rsi_macd_tags"] = rsi_macd_tags
         it["total_score"] = (
             it["scores"]["momentum"] + it["scores"]["sector"] +
             flow_score + val_score + tech_score + bonus
