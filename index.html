@@ -1300,6 +1300,19 @@ select:focus { border-color: var(--accent); }
   font-variant-numeric: tabular-nums;
 }
 
+/* ── DIVERGENCE + ADX ANALYSIS ─────────────────────────── */
+.div-warning {
+  padding: 10px 12px; border-radius: 6px;
+  margin-bottom: 10px; font-size: 12px; font-weight: 600;
+}
+.div-warning.bearish { background: #FF000015; color: #FF6B6B; border-left: 3px solid #FF3333; }
+.div-warning.bullish { background: #00CC0015; color: #33AA33; border-left: 3px solid #33AA33; }
+.div-item {
+  padding: 6px 10px; margin-bottom: 4px;
+  background: var(--surface2); border-radius: 4px;
+  font-size: 11px; color: var(--text);
+}
+
 /* ── JOURNAL REVIEW (복기) ─────────────────────────────── */
 .jn-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 .jn-tab {
@@ -4772,6 +4785,38 @@ function _setupCrosshair(data, W, HC, HV) {
     document.getElementById('ohlcv-chg').innerHTML     =
       `<span style="color:${chgCol}">${chgSign}${chg.toLocaleString()} (${chgSign}${chgPct.toFixed(2)}%)</span>`;
     document.getElementById('ohlcv-vol').textContent   = _fmtVolShort(V[idx]);
+
+    // RSI/MACD 값 표시 (Phase 26)
+    const rm = data.rsi_macd;
+    if (rm) {
+      const rsiVal = (rm.rsi || [])[idx];
+      const macdVal = (rm.macd || [])[idx];
+      const rsiStr = rsiVal != null ? ` | RSI ${rsiVal.toFixed(0)}` : '';
+      const macdStr = macdVal != null ? ` | MACD ${macdVal.toFixed(0)}` : '';
+      document.getElementById('ohlcv-vol').textContent += rsiStr + macdStr;
+    }
+
+    // RSI/MACD 캔버스 수직선 동기화
+    const rsiCv = document.getElementById('cv-rsi');
+    const macdCv = document.getElementById('cv-macd');
+    if (rsiCv) {
+      const rCtx = rsiCv.getContext('2d');
+      // RSI 재그리기 후 수직선
+      _drawRSI(rsiCv, data, rsiCv.width, rsiCv.height);
+      rCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+      rCtx.lineWidth = 1; rCtx.setLineDash([4, 4]);
+      rCtx.beginPath(); rCtx.moveTo(x, 6); rCtx.lineTo(x, rsiCv.height - 16); rCtx.stroke();
+      rCtx.setLineDash([]);
+    }
+    if (macdCv) {
+      const mCtx = macdCv.getContext('2d');
+      _drawMACD(macdCv, data, macdCv.width, macdCv.height);
+      mCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+      mCtx.lineWidth = 1; mCtx.setLineDash([4, 4]);
+      mCtx.beginPath(); mCtx.moveTo(x, 6); mCtx.lineTo(x, macdCv.height - 16); mCtx.stroke();
+      mCtx.setLineDash([]);
+    }
+
     ohlcvBar.style.display = 'flex';
 
     // ── 축 라벨 ──
@@ -4808,6 +4853,18 @@ function _setupCrosshair(data, W, HC, HV) {
   volOv.addEventListener('mousemove',    e => onMove(e, volOv,    volH));
   candleOv.addEventListener('mouseleave', clear);
   volOv.addEventListener('mouseleave',    clear);
+
+  // RSI/MACD 캔버스에서도 마우스 이벤트 → 크로스헤어 동기화
+  const rsiCv = document.getElementById('cv-rsi');
+  const macdCv = document.getElementById('cv-macd');
+  if (rsiCv) {
+    rsiCv.addEventListener('mousemove', e => onMove(e, rsiCv, rsiCv.height));
+    rsiCv.addEventListener('mouseleave', clear);
+  }
+  if (macdCv) {
+    macdCv.addEventListener('mousemove', e => onMove(e, macdCv, macdCv.height));
+    macdCv.addEventListener('mouseleave', clear);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5256,10 +5313,56 @@ function _renderAnalysis(container, analysis) {
       <p class="analysis-detail">${c.detail}</p>
     </div>`;
   }).join('');
+
+  // 다이버전스 경고 (rsi_macd.divergences)
+  let divHTML = '';
+  const divs = (CHART_STATE.data?.rsi_macd?.divergences) || [];
+  if (divs.length) {
+    const bearish = divs.filter(d => d.type === 'bearish');
+    const bullish = divs.filter(d => d.type === 'bullish');
+    if (bearish.length >= 2) {
+      divHTML += `<div class="div-warning bearish">⚠️ 다중 베어리시 다이버전스 (${bearish.map(d=>d.indicator).join('+')} — 추세 전환 가능)</div>`;
+    } else if (bullish.length >= 2) {
+      divHTML += `<div class="div-warning bullish">✨ 다중 불리시 다이버전스 (${bullish.map(d=>d.indicator).join('+')} — 반등 가능)</div>`;
+    }
+    divs.forEach(d => {
+      const icon = d.type === 'bearish' ? '⚠️' : '✨';
+      const col = d.type === 'bearish' ? '#FF6B6B' : '#33AA33';
+      const label = d.type === 'bearish' ? '베어리시' : '불리시';
+      divHTML += `<div class="div-item" style="border-left:3px solid ${col}">
+        ${icon} <b>${d.indicator} ${label} 다이버전스</b>
+        <span style="color:var(--text-muted);font-size:10px;margin-left:6px">
+          가격 ${d.type === 'bearish' ? '신고가' : '신저가'} ↔ 지표 ${d.type === 'bearish' ? '저하' : '상승'}
+        </span>
+      </div>`;
+    });
+  }
+
+  // ADX 지표
+  let adxHTML = '';
+  const adxData = CHART_STATE.data?.adx;
+  if (adxData) {
+    const adxVal = adxData.adx?.[adxData.adx.length - 1];
+    const pdi = adxData.plus_di?.[adxData.plus_di.length - 1];
+    const mdi = adxData.minus_di?.[adxData.minus_di.length - 1];
+    if (adxVal) {
+      const adxCol = adxVal > 40 ? '#FFD700' : adxVal > 25 ? '#FF6B6B' : '#888';
+      const adxLabel = adxVal > 40 ? '강한 추세' : adxVal > 25 ? '추세 형성' : '횡보장';
+      const diLabel = pdi > mdi ? '상승 우세 (+DI>-DI)' : '하락 우세 (-DI>+DI)';
+      adxHTML = `<div class="analysis-item">
+        <span class="analysis-tag" style="background:${adxCol}22;color:${adxCol};border:1px solid ${adxCol}55">ADX</span>
+        <span class="analysis-signal">${adxLabel} (${adxVal.toFixed(1)})</span>
+        <p class="analysis-detail">+DI ${pdi?.toFixed(1)} / -DI ${mdi?.toFixed(1)} · ${diLabel}</p>
+      </div>`;
+    }
+  }
+
   container.innerHTML = `
     <div class="analysis-box">
       <div class="analysis-title">기술적 분석</div>
+      ${divHTML}
       ${items}
+      ${adxHTML}
       <div class="analysis-summary">${analysis.summary}</div>
     </div>`;
 }

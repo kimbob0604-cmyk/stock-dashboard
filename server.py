@@ -251,12 +251,78 @@ def _calc_rsi_macd(closes: list) -> dict:
     macd_signal = [round(v, 3) for v in macd_signal]
     macd_hist = [round(macd_line[i] - macd_signal[i], 3) for i in range(n)]
 
+    # 다이버전스 감지 (최근 40봉)
+    divergences = _detect_divergences(closes, rsi, macd_line)
+
     return {
         "rsi":         rsi,
         "macd":        macd_line,
         "macd_signal": macd_signal,
         "macd_hist":   macd_hist,
+        "divergences": divergences,
     }
+
+
+def _detect_divergences(closes: list, rsi: list, macd: list) -> list:
+    """
+    RSI/MACD 기반 다이버전스 감지.
+    베어리시: 가격 신고가 but 지표 저하
+    불리시: 가격 신저가 but 지표 상승
+    최근 40봉 내 2개 피크/밸리 비교.
+    """
+    n = len(closes)
+    if n < 40:
+        return []
+    lookback = min(40, n)
+    window = slice(n - lookback, n)
+    cs = closes[window]
+    rs = rsi[window]
+    mc = macd[window]
+    divs: list[dict] = []
+
+    def _find_peaks(arr: list, is_max: bool = True) -> list[int]:
+        """단순 피크/밸리 인덱스 (3봉 기준 로컬 극값)."""
+        peaks = []
+        for i in range(2, len(arr) - 2):
+            if arr[i] == 0:
+                continue
+            if is_max and arr[i] >= arr[i-1] and arr[i] >= arr[i-2] and arr[i] >= arr[i+1] and arr[i] >= arr[i+2]:
+                peaks.append(i)
+            elif not is_max and arr[i] <= arr[i-1] and arr[i] <= arr[i-2] and arr[i] <= arr[i+1] and arr[i] <= arr[i+2]:
+                peaks.append(i)
+        return peaks
+
+    # 가격 고점들
+    price_highs = _find_peaks(cs, True)
+    price_lows  = _find_peaks(cs, False)
+
+    # 베어리시 다이버전스: 가격 신고가 but RSI/MACD 저하
+    if len(price_highs) >= 2:
+        p1, p2 = price_highs[-2], price_highs[-1]
+        if cs[p2] > cs[p1]:
+            for label, ind in [("RSI", rs), ("MACD", mc)]:
+                if ind[p2] < ind[p1] and ind[p2] != 0 and ind[p1] != 0:
+                    divs.append({
+                        "type": "bearish",
+                        "indicator": label,
+                        "idx1": p1 + (n - lookback),
+                        "idx2": p2 + (n - lookback),
+                    })
+
+    # 불리시 다이버전스: 가격 신저가 but RSI/MACD 상승
+    if len(price_lows) >= 2:
+        p1, p2 = price_lows[-2], price_lows[-1]
+        if cs[p2] < cs[p1]:
+            for label, ind in [("RSI", rs), ("MACD", mc)]:
+                if ind[p2] > ind[p1] and ind[p2] != 0 and ind[p1] != 0:
+                    divs.append({
+                        "type": "bullish",
+                        "indicator": label,
+                        "idx1": p1 + (n - lookback),
+                        "idx2": p2 + (n - lookback),
+                    })
+
+    return divs
 
 
 def _calc_adx(highs: list, lows: list, closes: list, period: int = 14) -> dict | None:
@@ -3533,6 +3599,134 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
     except Exception as exc:
         log.warning("[텔레그램] error: %s", exc)
         return False
+
+
+@app.route("/api/volume_profile/<code>")
+def api_volume_profile(code: str):
+    """거래량 프로파일 (POC + Value Area) + VWAP + 저항/지지선. 4시간 캐시."""
+    market = (request.args.get("market") or "kr").lower()
+    cache_file = BASE_DIR / "cache" / f"vp_{market}_{code}.json"
+    cached = _read_fresh_json(cache_file, 240)
+    if cached:
+        return jsonify(cached)
+
+    # 차트 데이터 로드 (in-process)
+    chart_url = f"/api/us/chart/{code}" if market == "us" else f"/api/chart/{code}"
+    chart = _call_api_internal(chart_url) or {}
+    if chart.get("error") or not chart.get("close"):
+        return jsonify({"error": chart.get("error") or "차트 데이터 없음"}), 404
+
+    highs  = chart.get("high")  or []
+    lows   = chart.get("low")   or []
+    closes = chart.get("close") or []
+    volumes = chart.get("volume") or []
+    n = len(closes)
+    if n < 20:
+        return jsonify({"error": "데이터 부족"}), 404
+
+    # 거래량 프로파일 (30 bins)
+    price_max = max(highs)
+    price_min = min(lows)
+    num_bins = 30
+    bin_size = (price_max - price_min) / num_bins if price_max > price_min else 1
+    bins: list[dict] = []
+    for bi in range(num_bins):
+        bl = price_min + bi * bin_size
+        bh = bl + bin_size
+        vol_in = 0.0
+        for i in range(n):
+            if lows[i] <= bh and highs[i] >= bl:
+                overlap = min(highs[i], bh) - max(lows[i], bl)
+                bar_range = highs[i] - lows[i]
+                if bar_range > 0:
+                    vol_in += volumes[i] * (overlap / bar_range)
+        bins.append({
+            "price_mid": round((bl + bh) / 2, 2),
+            "volume":    int(round(vol_in)),
+        })
+
+    # POC
+    poc_bin = max(bins, key=lambda b: b["volume"])
+    poc = poc_bin["price_mid"]
+
+    # Value Area (70%)
+    sorted_bins = sorted(bins, key=lambda b: b["volume"], reverse=True)
+    total_vol = sum(b["volume"] for b in bins)
+    target = total_vol * 0.7
+    acc = 0
+    va_prices = []
+    for b in sorted_bins:
+        acc += b["volume"]
+        va_prices.append(b["price_mid"])
+        if acc >= target:
+            break
+    va_high = max(va_prices) + bin_size / 2 if va_prices else price_max
+    va_low  = min(va_prices) - bin_size / 2 if va_prices else price_min
+
+    # VWAP (최근 60봉)
+    vwap_list = []
+    cum_tpv = 0.0
+    cum_vol = 0.0
+    start = max(0, n - 60)
+    for i in range(start, n):
+        tp = (highs[i] + lows[i] + closes[i]) / 3
+        cum_tpv += tp * volumes[i]
+        cum_vol += volumes[i]
+        vwap_list.append(round(cum_tpv / cum_vol, 2) if cum_vol else 0)
+
+    # 저항/지지 (클러스터링)
+    extremes = sorted(highs[-60:] + lows[-60:])
+    clusters: list[dict] = []
+    if extremes:
+        cur_cluster = [extremes[0]]
+        thresh = 0.02
+        for p in extremes[1:]:
+            if (p - cur_cluster[-1]) / cur_cluster[-1] < thresh:
+                cur_cluster.append(p)
+            else:
+                if len(cur_cluster) >= 3:
+                    clusters.append({
+                        "price": round(sum(cur_cluster) / len(cur_cluster), 2),
+                        "touches": len(cur_cluster),
+                    })
+                cur_cluster = [p]
+        if len(cur_cluster) >= 3:
+            clusters.append({
+                "price": round(sum(cur_cluster) / len(cur_cluster), 2),
+                "touches": len(cur_cluster),
+            })
+
+    cur_price = closes[-1]
+    resistance = sorted(
+        [c for c in clusters if c["price"] > cur_price],
+        key=lambda c: c["price"],
+    )[:3]
+    support = sorted(
+        [c for c in clusters if c["price"] < cur_price],
+        key=lambda c: -c["price"],
+    )[:3]
+
+    result = {
+        "code":       code,
+        "market":     market,
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "volume_profile": {
+            "bins": bins,
+            "poc":     round(poc, 2),
+            "va_high": round(va_high, 2),
+            "va_low":  round(va_low, 2),
+        },
+        "vwap_current":   vwap_list[-1] if vwap_list else None,
+        "vwap_series":    vwap_list,
+        "resistance":     resistance,
+        "support":        support,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify(result)
 
 
 @app.route("/api/portfolio/sync", methods=["POST"])
