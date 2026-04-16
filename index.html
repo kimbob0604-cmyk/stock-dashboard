@@ -3942,6 +3942,11 @@ async function openChartPanel(code, hintName, marketOverride) {
   _drawVolume(document.getElementById('cv-volume'),  data, W, HV, null);
   _drawRSI(document.getElementById('cv-rsi'), data, W, HV);
   _drawMACD(document.getElementById('cv-macd'), data, W, HV);
+  // 크로스헤어 최적화: 초기 렌더 결과를 이미지로 저장 (매번 재그리기 방지)
+  for (const cvId of ['cv-rsi', 'cv-macd']) {
+    const cv = document.getElementById(cvId);
+    if (cv) cv._savedImg = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+  }
 
   // Phase 10/11: 차트 패널 상태 + 기본 '기술적 분석' + 크로스헤어 + 가격 polling
   CHART_STATE.code        = code;
@@ -4889,25 +4894,21 @@ function _setupCrosshair(data, W, HC, HV) {
       document.getElementById('ohlcv-vol').textContent += rsiStr + macdStr;
     }
 
-    // RSI/MACD 캔버스 수직선 동기화
+    // RSI/MACD 서브차트에 세로선만 그리기 (전체 재그리기 ❌ → 성능 최적화)
+    // 이전 세로선을 지우기 위해 저장/복원 방식 사용
     const rsiCv = document.getElementById('cv-rsi');
     const macdCv = document.getElementById('cv-macd');
-    if (rsiCv) {
-      const rCtx = rsiCv.getContext('2d');
-      // RSI 재그리기 후 수직선
-      _drawRSI(rsiCv, data, rsiCv.width, rsiCv.height);
-      rCtx.strokeStyle = 'rgba(255,255,255,0.35)';
-      rCtx.lineWidth = 1; rCtx.setLineDash([4, 4]);
-      rCtx.beginPath(); rCtx.moveTo(x, 6); rCtx.lineTo(x, rsiCv.height - 16); rCtx.stroke();
-      rCtx.setLineDash([]);
-    }
-    if (macdCv) {
-      const mCtx = macdCv.getContext('2d');
-      _drawMACD(macdCv, data, macdCv.width, macdCv.height);
-      mCtx.strokeStyle = 'rgba(255,255,255,0.35)';
-      mCtx.lineWidth = 1; mCtx.setLineDash([4, 4]);
-      mCtx.beginPath(); mCtx.moveTo(x, 6); mCtx.lineTo(x, macdCv.height - 16); mCtx.stroke();
-      mCtx.setLineDash([]);
+    for (const cv of [rsiCv, macdCv]) {
+      if (!cv) continue;
+      const c = cv.getContext('2d');
+      // 저장된 이미지 복원 (첫 호출 시 현재 상태 저장)
+      if (!cv._savedImg) cv._savedImg = c.getImageData(0, 0, cv.width, cv.height);
+      c.putImageData(cv._savedImg, 0, 0);
+      // 세로선만 그리기
+      c.strokeStyle = 'rgba(255,255,255,0.35)';
+      c.lineWidth = 1; c.setLineDash([4, 4]);
+      c.beginPath(); c.moveTo(x, 6); c.lineTo(x, cv.height - 16); c.stroke();
+      c.setLineDash([]);
     }
 
     ohlcvBar.style.display = 'flex';
@@ -5202,14 +5203,17 @@ function _drawRSI(canvas, data, W, H) {
   ctx.fillRect(PAD.left, toY(30), cw, toY(0) - toY(30));
   ctx.globalAlpha = 1;
 
-  // RSI 라인
+  // RSI 라인 — 첫 14개(=0)는 스킵, 유효값부터 시작
   ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
   ctx.beginPath();
+  let started = false;
   for (let i = 0; i < len; i++) {
+    if (rsi[i] === 0) continue;  // RSI(14) 초기 0값 스킵
     const x = toX(i), y = toY(rsi[i]);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else ctx.lineTo(x, y);
   }
-  ctx.stroke();
+  if (started) ctx.stroke();
 
   // 현재값 라벨
   const cur = rsi[len - 1];
@@ -5235,9 +5239,11 @@ function _drawMACD(canvas, data, W, H) {
   const ch = H - PAD.top - PAD.bottom;
   const toX = i => PAD.left + (len > 1 ? (i / (len - 1)) * cw : cw / 2);
 
-  // Y범위 자동
-  const allVals = [...macd, ...macd_signal, ...macd_hist].filter(v => v !== 0);
-  const yMax = Math.max(...allVals.map(Math.abs), 1);
+  // Y범위 자동 — 초기 수렴 제외한 유효 구간에서 계산
+  const skipN2 = Math.min(26, Math.floor(len * 0.15));
+  const validSlice = (arr) => arr.slice(skipN2).filter(v => v !== 0);
+  const allVals = [...validSlice(macd), ...validSlice(macd_signal), ...validSlice(macd_hist)];
+  const yMax = allVals.length ? Math.max(...allVals.map(Math.abs), 1) : 1;
   const toY = v => PAD.top + ch / 2 - (v / yMax) * (ch / 2);
 
   ctx.clearRect(0, 0, W, H);
@@ -5267,23 +5273,21 @@ function _drawMACD(canvas, data, W, H) {
     }
   }
 
-  // MACD 라인 (파랑)
-  ctx.strokeStyle = '#4488FF'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (let i = 0; i < len; i++) {
-    const x = toX(i), y = toY(macd[i]);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  // MACD/Signal 라인 — 초기 수렴(~26봉) 후부터 그리기
+  const skipN = Math.min(26, Math.floor(len * 0.15)); // 15% 또는 26봉 중 작은 것
+  function _drawLine(arr, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let s = false;
+    for (let i = skipN; i < len; i++) {
+      const x = toX(i), y = toY(arr[i]);
+      if (!s) { ctx.moveTo(x, y); s = true; }
+      else ctx.lineTo(x, y);
+    }
+    if (s) ctx.stroke();
   }
-  ctx.stroke();
-
-  // Signal 라인 (주황)
-  ctx.strokeStyle = '#FF9500'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (let i = 0; i < len; i++) {
-    const x = toX(i), y = toY(macd_signal[i]);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
+  _drawLine(macd, '#4488FF');
+  _drawLine(macd_signal, '#FF9500');
 
   // 현재값 라벨
   const curM = macd[len - 1], curS = macd_signal[len - 1], curH = macd_hist[len - 1];
