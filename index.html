@@ -1286,6 +1286,20 @@ select:focus { border-color: var(--accent); }
   font-size: 12px; font-weight: 600; margin-top: 8px;
 }
 
+/* ── TRAILING STOP ─────────────────────────────────────── */
+.trail-on { color: #FFD700; font-weight: 600; font-size: 11px; }
+.trail-off { color: var(--text-muted); }
+.trail-info {
+  background: #151516; border-radius: 6px; padding: 8px 10px;
+  color: var(--text-sub); font-size: 11px; margin-bottom: 12px;
+  line-height: 1.6;
+}
+.trail-hist {
+  padding: 4px 0; font-size: 10px; color: var(--text-sub);
+  border-bottom: 1px solid #2C2C2E;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── JOURNAL REVIEW (복기) ─────────────────────────────── */
 .jn-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 .jn-tab {
@@ -6690,6 +6704,13 @@ function _savePortfolio(d) {
   _pfCache = d;
   try { localStorage.setItem(_PF_KEY, JSON.stringify(d)); }
   catch (e) { console.warn('[portfolio] save failed', e); }
+  // 서버 동기화 (트레일링 스톱 체크용)
+  try {
+    fetch('/api/portfolio/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ positions: d.positions || [] }),
+    }).catch(() => {});
+  } catch {}
 }
 function _getJournal() {
   if (_jnCache) return _jnCache;
@@ -6837,9 +6858,16 @@ async function renderPortfolioPage() {
         <td class="r">${_fmtMoney(p.current, p.market)}</td>
         <td class="r" style="color:${pnlCol}">${sign}${_fmtMoney(p.pnl, p.market)}</td>
         <td class="r" style="color:${pnlCol};font-weight:700">${sign}${p.pnlPct.toFixed(2)}%</td>
+        <td class="r">${(() => {
+          const tr = p.trailing || {};
+          if (!tr.enabled) return '<span class="trail-off">—</span>';
+          const stopStr = tr.current_stop ? `${cur}${Number(tr.current_stop).toLocaleString(undefined,{minimumFractionDigits:pricePrec,maximumFractionDigits:pricePrec})}` : '계산중';
+          return `<span class="trail-on">${stopStr}</span>`;
+        })()}</td>
         <td class="pf-memo-cell" title="${_escHtml(p.memo || '')}">${_escHtml(p.memo || '')}</td>
         <td class="pf-action-cell">
           <button class="pf-edit-btn" data-action="edit" data-id="${_escHtml(p.id)}">✏️</button>
+          <button class="pf-edit-btn" data-action="trailing" data-id="${_escHtml(p.id)}" title="트레일링 스톱">⚙</button>
           <button class="pf-delete-btn" data-action="delete" data-id="${_escHtml(p.id)}">🗑️</button>
         </td>
       </tr>`;
@@ -6848,8 +6876,8 @@ async function renderPortfolioPage() {
       <thead><tr>
         <th></th><th>종목</th>
         <th class="r">매수가</th><th class="r">현재가</th><th class="r">수량</th>
-        <th class="r">투자금</th><th class="r">평가금</th>
         <th class="r">손익</th><th class="r">수익률</th>
+        <th class="r">🎯 손절가</th>
         <th>메모</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
@@ -6873,8 +6901,9 @@ async function renderPortfolioPage() {
       if (btn) {
         e.stopPropagation();
         const id = btn.dataset.id;
-        if (btn.dataset.action === 'edit')   _showPfModal(id);
-        if (btn.dataset.action === 'delete') _deletePosition(id);
+        if (btn.dataset.action === 'edit')     _showPfModal(id);
+        if (btn.dataset.action === 'delete')   _deletePosition(id);
+        if (btn.dataset.action === 'trailing') _showTrailingModal(id);
         return;
       }
       const tr = e.target.closest('tr.pf-row');
@@ -7807,6 +7836,105 @@ function _showAlertModal(code, name, market) {
     alerts.rules = alerts.rules.filter(r => r.id !== id);
     _saveAlerts(alerts);
     btn.closest('.alert-item')?.remove();
+  });
+}
+
+// ── 트레일링 스톱 모달 ──
+function _showTrailingModal(posId) {
+  const pf = _getPortfolio();
+  const pos = (pf.positions || []).find(p => p.id === posId);
+  if (!pos) return;
+  const tr = pos.trailing || {};
+  const cur = pos.market === 'us' ? '$' : '₩';
+
+  const histHTML = (tr.stop_history || []).slice(-10).reverse().map(h =>
+    `<div class="trail-hist">${_escHtml(h.date)} · 현재가 ${cur}${Number(h.price).toLocaleString()} → 손절 ${cur}${Number(h.stop).toLocaleString()}</div>`
+  ).join('') || '<div class="trail-hist" style="color:var(--text-muted)">이력 없음</div>';
+
+  const html = `
+    <div class="pf-modal-overlay" id="trail-overlay">
+      <div class="pf-modal" style="max-width:480px">
+        <div class="pf-modal-title">🎯 트레일링 스톱 설정</div>
+        <div style="color:#FFD700;font-size:13px;margin-bottom:12px">${_escHtml(pos.name)} (${_escHtml(pos.code)})</div>
+        <div class="trail-info">
+          매수가 ${cur}${pos.buy_price?.toLocaleString()} ·
+          현재 손절가 ${tr.current_stop ? cur + Number(tr.current_stop).toLocaleString() : '미설정'} ·
+          최고가 ${tr.highest_since_entry ? cur + Number(tr.highest_since_entry).toLocaleString() : '—'}
+        </div>
+        <div class="pf-modal-row">
+          <label>활성화</label>
+          <input type="checkbox" id="trail-enabled" ${tr.enabled ? 'checked' : ''} style="width:18px;height:18px">
+        </div>
+        <div class="pf-modal-row">
+          <label>방식</label>
+          <select id="trail-type" class="pf-input">
+            <option value="fixed_pct" ${(tr.type || 'fixed_pct') === 'fixed_pct' ? 'selected' : ''}>고정 비율 (-X%)</option>
+            <option value="atr" ${tr.type === 'atr' ? 'selected' : ''}>ATR × N (변동성)</option>
+            <option value="chandelier" ${tr.type === 'chandelier' ? 'selected' : ''}>샹들리에</option>
+          </select>
+        </div>
+        <div class="pf-modal-row" id="trail-pct-row">
+          <label>하락 허용</label>
+          <input type="number" id="trail-pct" class="pf-input" value="${tr.fixed_pct || 5}" step="0.5" min="1" max="20" style="width:80px">
+          <span style="color:var(--text-muted);font-size:11px">% (고점 대비)</span>
+        </div>
+        <div class="pf-modal-row" id="trail-atr-row" style="display:none">
+          <label>ATR 배수</label>
+          <input type="number" id="trail-mult" class="pf-input" value="${tr.atr_multiplier || 2}" step="0.5" min="1" max="5" style="width:80px">
+          <span style="color:var(--text-muted);font-size:11px">× ATR</span>
+        </div>
+        <div class="pf-modal-row">
+          <label>텔레그램 알림</label>
+          <input type="checkbox" id="trail-alert" ${tr.alert_on_trigger !== false ? 'checked' : ''} style="width:18px;height:18px">
+        </div>
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">손절가 이력 (최근 10일)</div>
+          ${histHTML}
+        </div>
+        <div class="pf-modal-actions">
+          <button class="pf-cancel-btn" id="trail-cancel">취소</button>
+          <button class="pf-save-btn" id="trail-save">저장</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+
+  const overlay = document.getElementById('trail-overlay');
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('trail-cancel').addEventListener('click', () => overlay.remove());
+
+  // 방식 변경 시 입력 토글
+  const typeEl = document.getElementById('trail-type');
+  const toggle = () => {
+    document.getElementById('trail-pct-row').style.display = typeEl.value === 'fixed_pct' ? 'flex' : 'none';
+    document.getElementById('trail-atr-row').style.display = typeEl.value === 'atr' ? 'flex' : 'none';
+  };
+  typeEl.addEventListener('change', toggle);
+  toggle();
+
+  document.getElementById('trail-save').addEventListener('click', () => {
+    const pf2 = _getPortfolio();
+    const idx = pf2.positions.findIndex(p => p.id === posId);
+    if (idx < 0) return;
+    const oldTrail = pf2.positions[idx].trailing || {};
+    pf2.positions[idx].trailing = {
+      ...oldTrail,
+      enabled: document.getElementById('trail-enabled').checked,
+      type: document.getElementById('trail-type').value,
+      fixed_pct: parseFloat(document.getElementById('trail-pct').value) || 5,
+      atr_multiplier: parseFloat(document.getElementById('trail-mult').value) || 2,
+      alert_on_trigger: document.getElementById('trail-alert').checked,
+    };
+    // 초기 손절가 설정 (아직 없으면)
+    if (!oldTrail.current_stop && pf2.positions[idx].trailing.enabled) {
+      const bp = pf2.positions[idx].buy_price || 0;
+      const pct = pf2.positions[idx].trailing.fixed_pct || 5;
+      pf2.positions[idx].trailing.current_stop = Math.round(bp * (1 - pct / 100));
+      pf2.positions[idx].trailing.highest_since_entry = bp;
+    }
+    _savePortfolio(pf2);
+    overlay.remove();
+    renderPortfolioPage();
   });
 }
 

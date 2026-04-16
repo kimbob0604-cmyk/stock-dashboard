@@ -3535,6 +3535,117 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
         return False
 
 
+@app.route("/api/portfolio/sync", methods=["POST"])
+def api_portfolio_sync():
+    """프론트 포트폴리오 → 서버 파일 동기화 (트레일링 스톱 체크용)."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+    positions = data.get("positions") or []
+    out = BASE_DIR / "cache" / "server_portfolio.json"
+    try:
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(json.dumps({"positions": positions}, ensure_ascii=False),
+                        encoding="utf-8")
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"status": "ok", "count": len(positions)})
+
+
+def _check_trailing_stops():
+    """포트폴리오 포지션의 트레일링 스톱 갱신 + 트리거 체크. 장중 30분."""
+    pf_file = BASE_DIR / "cache" / "server_portfolio.json"
+    if not pf_file.exists():
+        return
+    try:
+        pf = json.loads(pf_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    positions = pf.get("positions") or []
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    updated = False
+    today_str = now_kst().strftime("%Y-%m-%d")
+
+    for pos in positions:
+        tr = pos.get("trailing") or {}
+        if not tr.get("enabled"):
+            continue
+        code = pos.get("code", "")
+        market = pos.get("market", "kr")
+        buy_price = pos.get("buy_price") or 0
+
+        # 현재가
+        if market == "kr":
+            st = stocks.get(code) or {}
+            cur_price = st.get("close") or 0
+        else:
+            us_data = _fetch_us_market_data()
+            sym_map = {s["symbol"]: s for s in (us_data.get("all_stocks") or [])}
+            cur_price = (sym_map.get(code) or {}).get("price") or 0
+        if not cur_price:
+            continue
+
+        highest = max(tr.get("highest_since_entry") or buy_price, cur_price)
+        old_stop = tr.get("current_stop") or (buy_price * 0.97)
+
+        # 새 손절가 계산
+        trail_type = tr.get("type", "fixed_pct")
+        if trail_type == "fixed_pct":
+            pct = tr.get("fixed_pct") or 5
+            new_stop = highest * (1 - pct / 100)
+        elif trail_type == "atr":
+            # ATR 근사: 최근 change_pct 절대값의 평균 × buy_price
+            # 정확한 ATR은 chart OHLCV가 필요하지만 비용이 큼. 단순 근사.
+            mult = tr.get("atr_multiplier") or 2
+            new_stop = highest - (buy_price * 0.02 * mult)  # 2% × mult 근사
+        else:
+            new_stop = highest * 0.95  # chandelier 근사
+
+        new_stop = max(new_stop, buy_price * 0.93)  # 최대 -7% 손절
+        new_stop = max(new_stop, old_stop)           # 절대 내려가지 않음
+        new_stop = round(new_stop, 2)
+
+        if new_stop != old_stop:
+            tr["current_stop"] = new_stop
+            tr["highest_since_entry"] = round(highest, 2)
+            hist = tr.setdefault("stop_history", [])
+            if not hist or not hist[-1].get("date", "").startswith(today_str):
+                hist.append({"date": today_str, "stop": new_stop, "price": cur_price})
+                if len(hist) > 30:
+                    tr["stop_history"] = hist[-30:]
+            updated = True
+
+        # 트리거 체크
+        if cur_price <= new_stop and tr.get("alert_on_trigger", True):
+            last_alert = tr.get("last_alert_date", "")
+            if not last_alert.startswith(today_str):
+                flag = "🇺🇸" if market == "us" else "🇰🇷"
+                cur_sym = "$" if market == "us" else "₩"
+                pnl = (cur_price - buy_price) * (pos.get("quantity") or 0)
+                pnl_pct = ((cur_price / buy_price - 1) * 100) if buy_price else 0
+                sign = "+" if pnl >= 0 else ""
+                msg = (
+                    f"🛑 <b>트레일링 스톱 도달</b>\n"
+                    f"{flag} <b>{pos.get('name', code)}</b> ({code})\n\n"
+                    f"현재가: {cur_sym}{cur_price:,.0f}\n"
+                    f"손절가: {cur_sym}{new_stop:,.0f}\n"
+                    f"매수가: {cur_sym}{buy_price:,.0f}\n"
+                    f"예상 손익: {sign}{cur_sym}{pnl:,.0f} ({sign}{pnl_pct:.2f}%)\n\n"
+                    f"⚠️ 자동 청산 없음 — 수동 매도 필요"
+                )
+                send_telegram(msg)
+                tr["last_alert_date"] = now_kst().strftime("%Y-%m-%dT%H:%M:%S")
+                updated = True
+
+    if updated:
+        try:
+            pf_file.write_text(json.dumps(pf, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+
 @app.route("/api/alerts/sync", methods=["POST"])
 def api_alerts_sync():
     """프론트 알림 규칙 → 서버 파일 동기화."""
@@ -4356,7 +4467,11 @@ def _startup():
             _scheduler.add_job(check_alert_rules, "cron",
                                day_of_week="mon-fri", hour="9-15", minute="*/10",
                                id="tg_custom_alerts", max_instances=1)
-            log.info("[텔레그램] 알림 스케줄 7개 등록 (5 alert + overnight + refresh + custom_alerts)")
+            # 트레일링 스톱 — 장중 30분 간격
+            _scheduler.add_job(_check_trailing_stops, "cron",
+                               day_of_week="mon-fri", hour="9-15", minute="0,30",
+                               id="tg_trailing", max_instances=1)
+            log.info("[텔레그램] 알림 스케줄 8개 등록")
         else:
             log.info("[텔레그램] 토큰 미설정 — 알림 비활성화")
 
