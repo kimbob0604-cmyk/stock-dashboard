@@ -1137,6 +1137,81 @@ select:focus { border-color: var(--accent); }
 }
 .kr-fut-err { color: var(--text-sub); }
 
+/* ── GLOBAL SEARCH (Ctrl+K) ──────────────────────────────── */
+.gsearch-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); font-size: 14px;
+  width: 32px; height: 32px; border-radius: 8px;
+  cursor: pointer; transition: border-color 0.1s, color 0.1s;
+  margin-right: 6px;
+}
+.gsearch-btn:hover { color: var(--text); border-color: var(--accent); }
+
+#gsearch-overlay {
+  position: fixed; inset: 0; z-index: 99999;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; justify-content: center;
+  padding-top: 80px;
+  animation: chartOverlayFade 0.1s ease-out;
+}
+.gsearch-box {
+  width: 600px; max-width: 92vw;
+  background: #1C1C1E;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  overflow: hidden;
+  animation: chartPanelSlide 0.12s ease-out;
+  align-self: flex-start;
+}
+.gsearch-input-wrap {
+  display: flex; align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.gsearch-icon { font-size: 18px; margin-right: 10px; opacity: 0.5; }
+.gsearch-input {
+  flex: 1;
+  background: transparent; border: none; outline: none;
+  color: var(--text); font-size: 18px; font-family: inherit;
+  caret-color: var(--accent);
+}
+.gsearch-input::placeholder { color: var(--text-muted); font-size: 14px; }
+.gsearch-hint {
+  color: var(--text-muted); font-size: 10px;
+  border: 1px solid var(--border); padding: 2px 6px;
+  border-radius: 4px;
+}
+.gsearch-results {
+  max-height: 400px; overflow-y: auto;
+}
+.gsearch-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px;
+  cursor: pointer;
+  transition: background 0.06s;
+  border-bottom: 1px solid #2C2C2E;
+}
+.gsearch-item:hover, .gsearch-item.active {
+  background: #2C2C2E;
+}
+.gsearch-item.active {
+  border-left: 3px solid var(--accent);
+  padding-left: 15px;
+}
+.gsearch-flag { font-size: 16px; width: 22px; text-align: center; }
+.gsearch-name { color: var(--text); font-size: 14px; font-weight: 600; flex: 1; }
+.gsearch-code { color: var(--text-muted); font-size: 12px; }
+.gsearch-sector {
+  color: #FFD700; font-size: 10px;
+  background: #3C3C3E; padding: 2px 7px;
+  border-radius: 8px;
+}
+.gsearch-empty {
+  color: var(--text-muted); font-size: 13px;
+  text-align: center; padding: 24px;
+}
+
 /* ── NEW HIGHS (Phase 19) ──────────────────────────────────────── */
 .nh-guide {
   background: var(--surface2); border: 1px solid var(--border);
@@ -2392,7 +2467,6 @@ body.chart-modal-open { overflow: hidden; }
     <li class="sidebar-item active" data-page="thememap"><span class="mi">🗺️</span>테마맵</li>
     <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
     <li class="sidebar-item"        data-page="market"><span class="mi">📈</span>시황분석</li>
-    <li class="sidebar-item"        data-page="compare"><span class="mi">🔍</span>종목비교</li>
     <li class="sidebar-item"        data-page="screener"><span class="mi">🔎</span>종목스크리너</li>
     <li class="sidebar-item"        data-page="flow"><span class="mi">💰</span>수급동향</li>
     <li class="sidebar-item"        data-page="sector"><span class="mi">🏭</span>업종별맵</li>
@@ -2447,6 +2521,7 @@ body.chart-modal-open { overflow: hidden; }
       <button class="refresh-btn" id="refresh-btn" title="데이터 새로고침">↺</button>
       <span class="fetch-badge" id="fetch-badge" style="display:none;"></span>
     </div>
+    <button class="gsearch-btn" id="gsearch-btn" title="종목 검색 (Ctrl+K)">🔍</button>
     <span class="updated-at" id="updated-at">—</span>
     <span class="live-wrap" id="live-indicator">
       <span class="live-dot offline" id="live-dot"></span>
@@ -2641,6 +2716,20 @@ body.chart-modal-open { overflow: hidden; }
       <button class="sm-cancel-btn" id="sm-cancel">취소</button>
       <button class="sm-save-btn"   id="sm-save">저장</button>
     </div>
+  </div>
+</div>
+
+<!-- GLOBAL SEARCH OVERLAY -->
+<div id="gsearch-overlay" style="display:none;">
+  <div class="gsearch-box">
+    <div class="gsearch-input-wrap">
+      <span class="gsearch-icon">🔍</span>
+      <input type="text" id="gsearch-input" class="gsearch-input"
+             placeholder="종목명, 코드, 티커 검색... (Ctrl+K)"
+             autocomplete="off" spellcheck="false">
+      <span class="gsearch-hint">ESC</span>
+    </div>
+    <div id="gsearch-results" class="gsearch-results"></div>
   </div>
 </div>
 
@@ -2925,12 +3014,16 @@ function switchMarket(market) {
 // WATCHLIST (Phase 12-2) — localStorage 기반, 서버 불필요
 // ─────────────────────────────────────────────────────────────────────────────
 const _WATCHLIST_KEY = 'watchlist';
+let _wlCache = null;
 
 function getWatchlist() {
-  try { return JSON.parse(localStorage.getItem(_WATCHLIST_KEY) || '[]'); }
-  catch { return []; }
+  if (_wlCache) return _wlCache;
+  try { _wlCache = JSON.parse(localStorage.getItem(_WATCHLIST_KEY) || '[]'); }
+  catch { _wlCache = []; }
+  return _wlCache;
 }
 function _saveWatchlist(list) {
+  _wlCache = list;
   try { localStorage.setItem(_WATCHLIST_KEY, JSON.stringify(list)); }
   catch (e) { console.warn('[watchlist] save failed', e); }
   // Phase 23: 서버에 동기화 (텔레그램 알림용). 실패해도 무해.
@@ -5678,7 +5771,7 @@ function navigateTo(page) {
     el.classList.toggle('active', el.dataset.page === page);
   });
 
-  document.body.classList.remove('page-thememap','page-market','page-compare',
+  document.body.classList.remove('page-thememap','page-market',
                                   'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend');
   document.body.classList.add(`page-${page}`);
 
@@ -6254,16 +6347,32 @@ const _JN_KEY = 'trade_journal';
 let _pfModalMarket = 'kr';
 let _journalType   = 'buy';
 
+// localStorage 메모리 캐시 — 매번 JSON.parse 하지 않고 변경 시에만 쓰기
+let _pfCache = null;
+let _jnCache = null;
+
 function _getPortfolio() {
-  try { return JSON.parse(localStorage.getItem(_PF_KEY) || '{"positions":[]}'); }
-  catch { return { positions: [] }; }
+  if (_pfCache) return _pfCache;
+  try { _pfCache = JSON.parse(localStorage.getItem(_PF_KEY) || '{"positions":[]}'); }
+  catch { _pfCache = { positions: [] }; }
+  return _pfCache;
 }
-function _savePortfolio(d) { localStorage.setItem(_PF_KEY, JSON.stringify(d)); }
+function _savePortfolio(d) {
+  _pfCache = d;
+  try { localStorage.setItem(_PF_KEY, JSON.stringify(d)); }
+  catch (e) { console.warn('[portfolio] save failed', e); }
+}
 function _getJournal() {
-  try { return JSON.parse(localStorage.getItem(_JN_KEY) || '{"entries":[]}'); }
-  catch { return { entries: [] }; }
+  if (_jnCache) return _jnCache;
+  try { _jnCache = JSON.parse(localStorage.getItem(_JN_KEY) || '{"entries":[]}'); }
+  catch { _jnCache = { entries: [] }; }
+  return _jnCache;
 }
-function _saveJournal(d) { localStorage.setItem(_JN_KEY, JSON.stringify(d)); }
+function _saveJournal(d) {
+  _jnCache = d;
+  try { localStorage.setItem(_JN_KEY, JSON.stringify(d)); }
+  catch (e) { console.warn('[journal] save failed', e); }
+}
 
 function _fmtMoney(val, market) {
   if (val == null) return '—';
@@ -6887,6 +6996,145 @@ function _deleteJournal(id) {
   _saveJournal(j);
   renderJournalPage();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GLOBAL SEARCH (Ctrl+K / 🔍)
+// ─────────────────────────────────────────────────────────────────────────────
+(function setupGlobalSearch() {
+  const overlay = document.getElementById('gsearch-overlay');
+  const input   = document.getElementById('gsearch-input');
+  const results  = document.getElementById('gsearch-results');
+  if (!overlay || !input) return;
+  let _timer = null;
+  let _idx = -1;    // keyboard selection index
+  let _items = [];   // current result items
+
+  function openSearch() {
+    overlay.style.display = 'flex';
+    input.value = '';
+    results.innerHTML = '';
+    _idx = -1;
+    _items = [];
+    setTimeout(() => input.focus(), 50);
+  }
+  function closeSearch() {
+    overlay.style.display = 'none';
+    input.blur();
+    _items = [];
+    _idx = -1;
+  }
+
+  // 돋보기 버튼
+  document.getElementById('gsearch-btn').addEventListener('click', openSearch);
+
+  // Ctrl+K 또는 / 키
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      openSearch();
+    }
+    if (e.key === '/' && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) {
+      e.preventDefault();
+      openSearch();
+    }
+  });
+
+  // overlay backdrop 클릭 닫기
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeSearch();
+  });
+
+  // ESC 닫기
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); return; }
+    // 방향키 + Enter
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _idx = Math.min(_idx + 1, _items.length - 1);
+      _highlightItem();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _idx = Math.max(_idx - 1, 0);
+      _highlightItem();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (_idx >= 0 && _idx < _items.length) _selectItem(_items[_idx]);
+    }
+  });
+
+  // 입력 debounce
+  input.addEventListener('input', () => {
+    clearTimeout(_timer);
+    const q = input.value.trim();
+    if (q.length < 1) { results.innerHTML = ''; _items = []; _idx = -1; return; }
+    _timer = setTimeout(() => _doSearch(q), 150);
+  });
+
+  async function _doSearch(q) {
+    try {
+      // KR + US 병렬
+      const [krRes, usRes] = await Promise.all([
+        fetch(`/api/stock_search?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => []),
+        fetch(`/api/us/search?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => []),
+      ]);
+      const kr = (Array.isArray(krRes) ? krRes : []).map(it => ({ ...it, market: 'kr' }));
+      const us = (Array.isArray(usRes) ? usRes : []).map(it => ({ ...it, market: 'us' }));
+      _items = [...kr, ...us].slice(0, 10);
+      _idx = -1;
+      _renderResults();
+    } catch { _items = []; }
+  }
+
+  function _renderResults() {
+    if (!_items.length) {
+      results.innerHTML = '<div class="gsearch-empty">결과 없음</div>';
+      return;
+    }
+    results.innerHTML = _items.map((it, i) => {
+      const flag = it.market === 'us' ? '🇺🇸' : '🇰🇷';
+      const code = _escHtml(it.code || it.symbol || '');
+      const name = _escHtml(it.name || '');
+      const sector = _escHtml(it.sector || '');
+      return `<div class="gsearch-item ${i === _idx ? 'active' : ''}" data-i="${i}">
+        <span class="gsearch-flag">${flag}</span>
+        <span class="gsearch-name">${name}</span>
+        <span class="gsearch-code">${code}</span>
+        ${sector ? `<span class="gsearch-sector">${sector}</span>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  function _highlightItem() {
+    results.querySelectorAll('.gsearch-item').forEach((el, i) => {
+      el.classList.toggle('active', i === _idx);
+      if (i === _idx) el.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function _selectItem(item) {
+    closeSearch();
+    const code = item.code || item.symbol;
+    const name = item.name || code;
+    const market = item.market || 'kr';
+    openChartPanel(code, name, market);
+  }
+
+  // 결과 클릭
+  results.addEventListener('click', (e) => {
+    const el = e.target.closest('.gsearch-item');
+    if (!el) return;
+    const i = parseInt(el.dataset.i);
+    if (i >= 0 && i < _items.length) _selectItem(_items[i]);
+  });
+
+  // 결과 호버
+  results.addEventListener('mousemove', (e) => {
+    const el = e.target.closest('.gsearch-item');
+    if (!el) return;
+    _idx = parseInt(el.dataset.i);
+    _highlightItem();
+  });
+})();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ETF MAP (Phase 23) — 국내 주요 ETF 테마별 트리맵

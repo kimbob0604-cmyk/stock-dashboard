@@ -2132,16 +2132,51 @@ def _build_naver_universe_background():
         except Exception: pass
 
 
+_UNI_CACHE: dict = {"data": None, "mtime": 0, "path": None}
+
+
 def _load_naver_universe() -> dict:
-    """오늘자 naver_universe 캐시 로드 (없으면 빈 dict)."""
+    """
+    naver_universe 캐시 로드 (메모리 캐싱).
+    파일 mtime 비교해서 변경됐을 때만 재로드. 오늘자 우선, 없으면 최근 파일 fallback.
+    """
     today = _get_trading_date()
-    f = BASE_DIR / "cache" / f"naver_universe_{today}.json"
-    if not f.exists():
+    today_f = BASE_DIR / "cache" / f"naver_universe_{today}.json"
+
+    # 후보 파일 결정
+    target: Path | None = None
+    if today_f.exists():
+        target = today_f
+    else:
+        try:
+            import glob as _glob
+            files = sorted(
+                _glob.glob(str(BASE_DIR / "cache" / "naver_universe_*.json")),
+                reverse=True,
+            )
+            if files:
+                target = Path(files[0])
+        except Exception:
+            pass
+
+    if target is None:
         return {}
+
+    # mtime 비교 — 변경 없으면 메모리 캐시 반환
     try:
-        return json.loads(f.read_text(encoding="utf-8"))
+        mt = target.stat().st_mtime
     except Exception:
-        return {}
+        return _UNI_CACHE["data"] or {}
+
+    if _UNI_CACHE["path"] == str(target) and _UNI_CACHE["mtime"] == mt and _UNI_CACHE["data"]:
+        return _UNI_CACHE["data"]
+
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        _UNI_CACHE.update({"data": data, "mtime": mt, "path": str(target)})
+        return data
+    except Exception:
+        return _UNI_CACHE["data"] or {}
 
 
 @app.route("/api/sectors")
@@ -3957,11 +3992,38 @@ def api_dividend():
     return jsonify(result)
 
 
+def _cleanup_old_cache(max_days: int = 7):
+    """서버 시작 시 max_days 이상 된 캐시 JSON 파일 자동 삭제."""
+    cache_dir = BASE_DIR / "cache"
+    if not cache_dir.exists():
+        return
+    import glob as _glob
+    cutoff = time.time() - max_days * 86400
+    removed = 0
+    # 날짜가 포함된 일별 캐시만 삭제 (매핑 파일은 보존)
+    preserve = {"dart_corp_codes.json", "sp500_tickers.json",
+                "sectors_naver_landing.json", "server_watchlist.json"}
+    for f in _glob.glob(str(cache_dir / "*.json")):
+        fname = Path(f).name
+        if fname in preserve:
+            continue
+        try:
+            if os.path.getmtime(f) < cutoff:
+                os.remove(f)
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        log.info("캐시 클린업: %d개 파일 삭제 (>%d일)", removed, max_days)
+
+
 def _startup():
     global _startup_done, _scheduler
     if _startup_done:
         return
     _startup_done = True
+
+    _cleanup_old_cache(7)
 
     if not FETCHER.exists():
         log.error("data_fetcher.py 를 찾을 수 없습니다: %s", FETCHER)
