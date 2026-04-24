@@ -3748,6 +3748,26 @@ def api_health():
     })
 
 
+@app.route("/api/db/backup", methods=["POST", "GET"])
+def api_db_backup():
+    """수동 DB 백업 (Gist). GET·POST 모두 허용."""
+    try:
+        from db_backup import backup_db as _bk
+        return jsonify(_bk())
+    except Exception as exc:
+        return jsonify({"ok": False, "reason": str(exc)}), 500
+
+
+@app.route("/api/db/restore", methods=["POST"])
+def api_db_restore():
+    """수동 DB 복원 (Gist 가장 최신). POST만."""
+    try:
+        from db_backup import restore_db as _rs
+        return jsonify(_rs())
+    except Exception as exc:
+        return jsonify({"ok": False, "reason": str(exc)}), 500
+
+
 @app.route("/api/test_telegram")
 def api_test_telegram_get():
     """텔레그램 전송 테스트 (GET — 브라우저로 바로 호출 가능)."""
@@ -5592,6 +5612,16 @@ def _startup():
             log.info("[SQLite] DB 초기화 완료")
         except Exception as exc:
             log.warning("[SQLite] DB 초기화 실패: %s → JSON 폴백", exc)
+        # Render 재배포 후 핵심 데이터 복원 (Gist) — 첫 부팅 시
+        try:
+            from db_backup import restore_db as _restore_db
+            r = _restore_db()
+            if r.get("ok"):
+                log.info("[DB복원] %s (raw=%dKB)", r.get("merged"), r.get("raw_kb", 0))
+            else:
+                log.info("[DB복원] skip: %s", r.get("reason"))
+        except Exception as exc:
+            log.debug("[DB복원] 모듈 로드 실패: %s", exc)
         # 추천 이력 테이블 + 과거 discover 스냅샷 소급 (최초 1회)
         try:
             _init_recommendation_history()
@@ -5783,6 +5813,22 @@ def _startup():
         _scheduler.add_job(_self_keep_alive, "interval", minutes=4,
                            id="self_keepalive", max_instances=1)
         log.info("[Keep-Alive] 자체 핑 스케줄 등록 (4분 간격)")
+
+        # ── DB 핵심 테이블 백업 (매시 30분) ──
+        def _hourly_db_backup():
+            try:
+                from db_backup import backup_db as _bk
+                r = _bk()
+                if r.get("ok"):
+                    log.info("[DB백업] OK gist=%s, %dKB",
+                             r.get("gist_id"), r.get("size_kb"))
+                else:
+                    log.debug("[DB백업] skip: %s", r.get("reason"))
+            except Exception as exc:
+                log.debug("[DB백업] %s", exc)
+        _scheduler.add_job(_hourly_db_backup, "cron", minute=30,
+                           id="db_backup_hourly", max_instances=1)
+        log.info("[DB백업] 매시 30분 스케줄 등록")
 
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
