@@ -3705,6 +3705,98 @@ def static_file(filename: str):
 # 시작 루틴 (gunicorn import / 직접 실행 양쪽 모두에서 호출)
 # ─────────────────────────────────────────────────────────────────────────────
 _startup_done = False
+_start_time = time.time()
+_last_scheduler_check = 0.0
+
+
+def _self_keep_alive():
+    """Render 슬립 방지 — 자기 자신의 /api/health 호출. 외부 핑(cron-job.org/UptimeRobot)이
+    1차 방어, 이건 2차 방어. 슬립 후 재시작되면 외부 핑이 깨우고 이 잡이 유지."""
+    import urllib.request as _ur
+    base = (os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if not base:
+        # 로컬에서는 자체 핑 불필요
+        return
+    try:
+        req = _ur.Request(f"{base}/api/health",
+                          headers={"User-Agent": "self-keepalive"})
+        with _ur.urlopen(req, timeout=15) as r:
+            if r.status == 200:
+                log.debug("[Keep-Alive] self-ping OK")
+    except Exception as exc:
+        log.debug("[Keep-Alive] self-ping fail: %s", exc)
+
+
+@app.route("/api/health")
+def api_health():
+    """헬스체크 — 외부 cron(cron-job.org/UptimeRobot)이 5분 간격 호출 권장."""
+    sched_running = False
+    job_count = 0
+    try:
+        if _scheduler is not None:
+            sched_running = bool(_scheduler.running)
+            job_count = len(_scheduler.get_jobs())
+    except Exception:
+        pass
+    return jsonify({
+        "status": "ok",
+        "uptime_sec": round(time.time() - _start_time),
+        "uptime_hours": round((time.time() - _start_time) / 3600, 2),
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "scheduler_running": sched_running,
+        "scheduler_jobs": job_count,
+    })
+
+
+@app.route("/api/test_telegram")
+def api_test_telegram_get():
+    """텔레그램 전송 테스트 (GET — 브라우저로 바로 호출 가능)."""
+    try:
+        sched_running = False
+        job_count = 0
+        if _scheduler is not None:
+            sched_running = bool(_scheduler.running)
+            job_count = len(_scheduler.get_jobs())
+        msg = ("✅ <b>서버 정상 동작 확인</b>\n\n"
+               f"⏰ {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST\n"
+               f"🔄 스케줄러: {'실행중' if sched_running else '⚠️ 멈춤'}\n"
+               f"📋 잡 수: {job_count}개\n"
+               f"🕐 가동: {(time.time() - _start_time) / 3600:.1f}시간")
+        ok = send_telegram(msg)
+        return jsonify({"status": "sent" if ok else "failed",
+                        "scheduler_running": sched_running,
+                        "scheduler_jobs": job_count})
+    except Exception as exc:
+        return jsonify({"status": "failed", "error": str(exc)}), 500
+
+
+@app.before_request
+def _check_scheduler_health():
+    """요청 들어올 때마다 스케줄러 상태 점검. 10분 간격으로만 체크 (오버헤드 최소화)."""
+    global _last_scheduler_check
+    try:
+        now = time.time()
+        if now - _last_scheduler_check < 600:
+            return
+        _last_scheduler_check = now
+        if _scheduler is None:
+            return
+        if not _scheduler.running:
+            log.warning("[Scheduler] 멈춤 감지 — 재시작 시도")
+            try:
+                _scheduler.start()
+                log.info("[Scheduler] 재시작 성공")
+            except Exception as exc:
+                log.warning("[Scheduler] 재시작 실패: %s", exc)
+        # 잡 개수 확인 (정상이면 20+개)
+        try:
+            n = len(_scheduler.get_jobs())
+            if n < 5:
+                log.warning("[Scheduler] 잡 부족 (%d개) — _startup 재호출 필요할 수 있음", n)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────
 # PHASE 24 Step 2 — 국내 야간선물 + 옵션 PCR (best-effort)
@@ -5686,6 +5778,11 @@ def _startup():
                                hour=3, minute=0,
                                id="dart_corp_map_update", max_instances=1)
             log.info("[DART] 공시 폴링 + corp_map 갱신 스케줄 등록")
+
+        # ── Render 슬립 방지: 자체 핑 4분 간격 ──
+        _scheduler.add_job(_self_keep_alive, "interval", minutes=4,
+                           id="self_keepalive", max_instances=1)
+        log.info("[Keep-Alive] 자체 핑 스케줄 등록 (4분 간격)")
 
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
