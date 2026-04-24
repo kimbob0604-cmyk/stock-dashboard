@@ -258,6 +258,17 @@ async function openChartPanel(code, hintName, marketOverride) {
   _wsSubscribeChart(code, isUS ? 'us' : 'kr');
   if (isUS) _loadUsExtended(code);
   else _loadAfterHours(code);
+  // 공시 이벤트 (KR만) — 로드 후 캔들 재그리기
+  CHART_STATE.disclosureEvents = null;
+  CHART_STATE.disclosureCode = null;
+  if (!isUS) {
+    _loadDisclosureEvents(code).then(events => {
+      if (CHART_STATE.code !== code) return;
+      if (events && events.length) {
+        _drawCandles(document.getElementById('cv-candle'), CHART_STATE.data, W, HC);
+      }
+    });
+  }
   _renderAnalysis(document.getElementById('chart-tab-content'), data.analysis);
 
   // 기본 선택된 기간 버튼 하이라이트
@@ -576,7 +587,7 @@ async function _toggleFlowOverlay() {
 }
 
 // Phase 10: chart panel 3-tab (analysis/reports/news) controller
-const CHART_STATE = { code: null, market: 'kr', data: null, dataDaily: null, tab: 'analysis', days: 180, tf: 'D', flowVisible: false, flowData: null };
+const CHART_STATE = { code: null, market: 'kr', data: null, dataDaily: null, tab: 'analysis', days: 180, tf: 'D', flowVisible: false, flowData: null, disclosureEvents: null, disclosureCode: null };
 
 function _chartTabClick(e) {
   const btn = e.target.closest('.chart-tab-btn');
@@ -1300,6 +1311,8 @@ function closeChartPanel() {
   CHART_STATE.code       = null;
   CHART_STATE.market     = 'kr';
   CHART_STATE.data       = null;
+  CHART_STATE.disclosureEvents = null;
+  CHART_STATE.disclosureCode   = null;
   CHART_STATE.tab        = 'analysis';
   CHART_STATE.chartType  = 'day';
   CHART_STATE.intradayDays = 1;
@@ -1692,6 +1705,85 @@ function _drawCandles(canvas, data, W, H) {
     ctx.fillStyle = col;
     ctx.fillRect(x - bw / 2, bt, bw, Math.max(bb2 - bt, 1));
   }
+
+  // ── 공시 이벤트 마커 (차트 상단) ──
+  _drawDisclosureMarkers(ctx, data, sc);
+}
+
+// ── 공시 이벤트 마커 (차트 상단에 삼각형/원) ──
+function _drawDisclosureMarkers(ctx, data, sc) {
+  const events = CHART_STATE.disclosureEvents;
+  if (!events || !events.length) return;
+  const dates = data.dates || [];
+  if (!dates.length) return;
+
+  // 날짜 → 인덱스 맵
+  const dateIdx = {};
+  for (let i = 0; i < dates.length; i++) {
+    const norm = String(dates[i]).replace(/-/g, '').slice(0, 8);
+    dateIdx[norm] = i;
+  }
+
+  const markerY = sc.PAD.top + 6;  // 차트 상단
+  for (const ev of events) {
+    const key = (ev.date || '').replace(/-/g, '').slice(0, 8);
+    const idx = dateIdx[key];
+    if (idx === undefined) continue;
+    const x = sc.toX(idx);
+
+    // 점수별 색상/모양
+    let color, size, shape;
+    if (ev.score >= 10)      { color = '#ef4444'; size = 8; shape = 'tri'; }
+    else if (ev.score >= 8)  { color = '#f59e0b'; size = 7; shape = 'tri'; }
+    else if (ev.score >= 6)  { color = '#f59e0b'; size = 5; shape = 'tri'; }
+    else                     { color = 'rgba(136,136,150,0.6)'; size = 4; shape = 'dot'; }
+
+    ctx.save();
+    if (shape === 'tri') {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x, markerY + size);
+      ctx.lineTo(x - size * 0.7, markerY);
+      ctx.lineTo(x + size * 0.7, markerY);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, markerY + size / 2, size / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 점수 8+ 이벤트는 세로 점선
+    if (ev.score >= 8) {
+      ctx.strokeStyle = color.length === 7 ? color + '22' : color.replace(/[\d.]+\)$/, '0.13)');
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, sc.PAD.top + size + 6);
+      ctx.lineTo(x, sc.PAD.top + sc.ch);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+}
+
+// ── 공시 이벤트 fetch + 캐시 + 재렌더 ──
+async function _loadDisclosureEvents(code) {
+  if (!code || !/^\d{6}$/.test(code)) return [];
+  if (CHART_STATE.disclosureCode === code && CHART_STATE.disclosureEvents) {
+    return CHART_STATE.disclosureEvents;
+  }
+  try {
+    const r = await fetch(`/api/disclosure_events/${code}`);
+    const d = await r.json();
+    CHART_STATE.disclosureEvents = d.events || [];
+    CHART_STATE.disclosureCode = code;
+    return CHART_STATE.disclosureEvents;
+  } catch {
+    CHART_STATE.disclosureEvents = [];
+    return [];
+  }
 }
 
 // ── RSI 서브차트 ──
@@ -2002,12 +2094,50 @@ function _renderAnalysis(container, analysis) {
       ${items}
       ${adxHTML}
       <div class="analysis-summary">${analysis.summary}</div>
+      <div id="analysis-disclosure-section"></div>
       <div id="analysis-sentiment-section"></div>
       <div id="analysis-vp-section"></div>
     </div>`;
 
-  // 센티먼트 비동기 로드 (KR만)
+  // 공시 이력 섹션 (KR만 — 이미 로드된 CHART_STATE.disclosureEvents 사용 or fetch)
   const _code = CHART_STATE.code, _mkt = CHART_STATE.market || 'kr';
+  if (_code && _mkt === 'kr') {
+    const _renderDiscSec = (events) => {
+      const box = document.getElementById('analysis-disclosure-section');
+      if (!box) return;
+      if (!events || !events.length) {
+        box.innerHTML = '<div class="disc-sec-empty">📋 최근 6주 공시 없음</div>';
+        return;
+      }
+      let h = '<div class="disc-sec-title">📋 최근 공시</div><div class="disc-sec-list">';
+      for (const e of events.slice(0, 10)) {
+        let col, emoji;
+        if (e.score >= 10)      { col = '#ef4444'; emoji = '🚨'; }
+        else if (e.score >= 8)  { col = '#ef4444'; emoji = '📢'; }
+        else if (e.score >= 6)  { col = '#f59e0b'; emoji = '📋'; }
+        else                    { col = 'var(--text-tertiary)'; emoji = '·'; }
+        const title = (e.title || '').length > 42
+          ? _escHtml((e.title || '').slice(0, 42)) + '…'
+          : _escHtml(e.title || '');
+        h += `<div class="disc-sec-row">
+          <span class="disc-sec-date">${_escHtml(e.date || '')}</span>
+          <span class="disc-sec-score" style="color:${col}">${emoji} ${e.score}점</span>
+          <span class="disc-sec-title-text">${title}</span>
+        </div>`;
+      }
+      h += '</div>';
+      box.innerHTML = h;
+    };
+    if (CHART_STATE.disclosureEvents && CHART_STATE.disclosureCode === _code) {
+      _renderDiscSec(CHART_STATE.disclosureEvents);
+    } else {
+      _loadDisclosureEvents(_code).then(ev => {
+        if (CHART_STATE.code === _code) _renderDiscSec(ev);
+      });
+    }
+  }
+
+  // 센티먼트 비동기 로드 (KR만)
   if (_code && _mkt === 'kr') {
     fetch(`/api/sentiment/${_code}`).then(r => r.json()).then(sd => {
       if (CHART_STATE.code !== _code) return;

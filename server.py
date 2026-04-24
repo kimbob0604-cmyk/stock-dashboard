@@ -7728,6 +7728,92 @@ def recalc_disclosure_scores(only_zero: bool = True) -> dict:
     return {"scanned": scanned, "updated": updated}
 
 
+@app.route("/api/disclosure_bonus/<code>")
+def api_disclosure_bonus(code: str):
+    """종목의 최근 7일 공시 보너스 (Stage 2 가산점 단위 + 샘플)."""
+    if not (_SQLITE_OK and USE_SQLITE):
+        return jsonify({"bonus": 0, "disclosures": []})
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code or ""):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+    try:
+        with _get_db() as conn:
+            rows = conn.execute(
+                "SELECT score, title, rcept_dt, importance "
+                "FROM disclosure_history "
+                "WHERE stock_code = ? AND score >= 6 "
+                "AND rcept_dt >= strftime('%Y%m%d','now','-7 day') "
+                "ORDER BY score DESC, rcept_dt DESC", (code,)
+            ).fetchall()
+        if not rows:
+            return jsonify({"code": code, "bonus": 0, "max_score": 0,
+                            "count": 0, "disclosures": []})
+        ms = max(r["score"] or 0 for r in rows)
+        bonus = 10 if ms >= 10 else (7 if ms >= 8 else 4)
+        return jsonify({
+            "code": code,
+            "bonus": bonus,
+            "max_score": ms,
+            "count": len(rows),
+            "disclosures": [dict(r) for r in rows[:5]],
+        })
+    except Exception as exc:
+        log.debug("[disclosure_bonus] %s: %s", code, exc)
+        return jsonify({"bonus": 0, "error": str(exc)}), 500
+
+
+@app.route("/api/disclosure_events/<code>")
+def api_disclosure_events(code: str):
+    """종목 공시 이력 (차트 마커용). 10분 캐시."""
+    if not (_SQLITE_OK and USE_SQLITE):
+        return jsonify({"events": []})
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code or ""):
+        return jsonify({"error": "잘못된 종목코드"}), 400
+    cache_file = BASE_DIR / "cache" / f"disc_events_{code}.json"
+    try:
+        if cache_file.exists():
+            age_min = (now_kst().timestamp() - cache_file.stat().st_mtime) / 60
+            if age_min < 10:
+                return Response(cache_file.read_text(encoding="utf-8"),
+                                content_type="application/json; charset=utf-8")
+    except Exception:
+        pass
+    try:
+        with _get_db() as conn:
+            rows = conn.execute(
+                "SELECT rcept_dt, title, score, importance, keywords_json "
+                "FROM disclosure_history "
+                "WHERE stock_code = ? AND score >= 4 "
+                "ORDER BY rcept_dt DESC LIMIT 50", (code,)
+            ).fetchall()
+        events = []
+        for r in rows:
+            dt = (r["rcept_dt"] or "").strip()
+            date_str = (f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}" if len(dt) == 8 else dt)
+            try:
+                kws = json.loads(r["keywords_json"] or "[]")
+            except Exception:
+                kws = []
+            events.append({
+                "date": date_str,
+                "title": r["title"] or "",
+                "score": r["score"] or 0,
+                "importance": r["importance"] or "",
+                "keywords": kws,
+            })
+        result = {"code": code, "events": events, "count": len(events)}
+        try:
+            cache_file.parent.mkdir(exist_ok=True)
+            cache_file.write_text(json.dumps(result, ensure_ascii=False),
+                                  encoding="utf-8")
+        except Exception:
+            pass
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"error": str(exc), "events": []}), 500
+
+
 @app.route("/api/disclosures/recalc", methods=["POST"])
 def api_disclosures_recalc():
     only_zero = request.args.get("all", "0") != "1"
@@ -9425,6 +9511,31 @@ def _run_stage2_kr() -> list | None:
     # ── Phase B: 스코어링 ──
     _discover_set(phase="kr_scoring", progress=0, message="🇰🇷 스코어링 중…")
     _scoring_total = len(candidates)
+    # 공시 보너스 일괄 조회 (종목별 최근 7일 최고 점수) — 단일 SQL로 N개 처리
+    _disclosure_bonus_map: dict = {}
+    try:
+        if _SQLITE_OK and USE_SQLITE:
+            with _get_db() as _dconn:
+                rows = _dconn.execute(
+                    "SELECT stock_code, MAX(score) AS max_score "
+                    "FROM disclosure_history "
+                    "WHERE score >= 6 "
+                    "  AND rcept_dt >= strftime('%Y%m%d', 'now', '-7 day') "
+                    "  AND stock_code IS NOT NULL "
+                    "GROUP BY stock_code"
+                ).fetchall()
+            for r in rows:
+                ms = r["max_score"] or 0
+                if ms >= 10:
+                    _disclosure_bonus_map[r["stock_code"]] = (10, "공시_핵심이벤트", ms)
+                elif ms >= 8:
+                    _disclosure_bonus_map[r["stock_code"]] = (7, "공시_주요이벤트", ms)
+                elif ms >= 6:
+                    _disclosure_bonus_map[r["stock_code"]] = (4, "공시_참고이벤트", ms)
+            log.info("[Stage2 KR] 공시 보너스 로드: %d종목", len(_disclosure_bonus_map))
+    except Exception as exc:
+        log.debug("[Stage2 KR] 공시 보너스 조회 실패: %s", exc)
+
     for idx, it in enumerate(candidates):
         # 스코어링 진행률도 tick 갱신 (stall 감지 방어)
         if idx % 100 == 0 or idx == _scoring_total - 1:
@@ -9551,10 +9662,17 @@ def _run_stage2_kr() -> list | None:
                 elif dtype == "bullish":
                     rsi_macd_tags.append(f"불리시_{ind}_다이버전스")
             it["details"]["divergences"] = divs
+        # 공시 보너스 (최근 7일 점수 6+ 있는 종목에 가산점)
+        disc_bonus_pts, disc_tag, disc_max = _disclosure_bonus_map.get(code, (0, None, 0))
+        if disc_tag:
+            rsi_macd_tags.append(disc_tag)
         it["details"]["rsi_macd_tags"] = rsi_macd_tags + foreign_tags
+        it["details"]["disclosure_bonus"] = disc_bonus_pts
+        it["details"]["disclosure_max_score"] = disc_max
+        it["scores"]["disclosure_bonus"] = disc_bonus_pts
         it["total_score"] = (
             it["scores"]["momentum"] + it["scores"]["sector"] +
-            flow_score + val_score + tech_score + bonus
+            flow_score + val_score + tech_score + bonus + disc_bonus_pts
         )
         _discover_set(progress=idx + 1)
 

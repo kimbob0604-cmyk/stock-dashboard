@@ -4291,6 +4291,10 @@ const _TAG_MAP = {
   '외국인_집중매수': { color: 'bull',  buy: true  },
   '외국인_대량매수': { color: 'bull',  buy: true  },
   '쌍끌이_매수':    { color: 'bull',   buy: true  },
+  // 공시 이벤트 태그
+  '공시_핵심이벤트': { color: 'gold',   buy: false },
+  '공시_주요이벤트': { color: 'gold',   buy: true  },
+  '공시_참고이벤트': { color: 'gold',   buy: false },
 };
 
 // 복합 필터 프리셋
@@ -4308,6 +4312,7 @@ const _TAG_COLORS = {
   bear:    { bg: '#33AA3322', color: '#33AA33', border: '#33AA3366' },
   neutral: { bg: '#3C3C3E',   color: '#aaa',    border: '#4C4C4E' },
   warn:    { bg: '#FFD70022', color: '#FFD700', border: '#FFD70066' },
+  gold:    { bg: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: 'rgba(245,158,11,0.3)' },
 };
 
 function _computeTags(it) {
