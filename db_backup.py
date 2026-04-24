@@ -1,16 +1,24 @@
 """
 db_backup.py — Render 재배포 대비 DB 백업/복원 (GitHub Gist)
 
-전략: 사용자 입력 + 누적 데이터만 추출해서 미니 DB로 Gist 보관.
-재생성 가능한 데이터(OHLCV·chart_cache·stocks·flow_cache 등)는 재부팅 후 자동 채워짐.
+전략: 사용자 입력 + 재생성 불가 데이터만 추출해서 Gist 보관.
+재생성 가능한 데이터는 재부팅 후 자동 채워짐.
 
-핵심 보존 테이블:
-  - recommendation_history (추천 이력)
-  - trade_journal           (사용자 매매 저널)
-  - disclosure_history      (DART 공시 + score)
+▶ 백업 대상 — DB 테이블:
+  - trade_journal           (사용자 매매 기록 — 재생성 불가)
+  - recommendation_history  (과거 추천 스냅샷 — 시점 데이터)
+  - disclosure_history      (공시 + 매겨진 점수 — 점수 재계산 비용)
   - alert_rules             (사용자 알림 규칙)
-  - alert_history           (알림 발송 이력)
-  - dart_corp_map           (DART 종목 매핑)
+
+▶ 백업 대상 — JSON 파일 (cache/):
+  - server_watchlist.json   (관심종목)
+  - server_portfolio.json   (포트폴리오)
+  - alert_rules.json        (프론트 동기화용)
+
+▶ 백업 제외 (재생성 가능):
+  - stocks, ohlcv, chart_cache, flow_cache, financial, yinfo_cache (전부 재수집)
+  - dart_corp_map (DART API로 매일 갱신)
+  - alert_history (쿨다운 임시 데이터, 손실 무방)
 """
 from __future__ import annotations
 import os
@@ -30,13 +38,19 @@ DB_PATH = BASE_DIR / "db" / "dashboard.db"
 GIST_FILE_NAME = "dashboard_core.db.gz.b64"
 
 CORE_TABLES = [
-    "recommendation_history",
-    "trade_journal",
-    "disclosure_history",
-    "alert_rules",
-    "alert_history",
-    "dart_corp_map",
+    "trade_journal",            # 매매 기록 (수동 입력)
+    "recommendation_history",   # 추천 스냅샷
+    "disclosure_history",       # 공시 + 점수
+    "alert_rules",              # 알림 규칙 (DB)
 ]
+
+# 사용자 설정/입력이 들어있는 JSON 캐시 파일도 함께 백업
+CORE_JSON_FILES = [
+    "cache/server_watchlist.json",
+    "cache/server_portfolio.json",
+    "cache/alert_rules.json",   # 프론트 동기화 사본
+]
+CACHE_BUNDLE_FILE = "dashboard_cache.json"
 
 
 def _gh_headers() -> dict | None:
@@ -147,15 +161,28 @@ def backup_db() -> dict:
         return {"ok": False, "reason": f"크기 초과 ({size_kb}KB)"}
 
     summary = _table_summary(DB_PATH)
+
+    # JSON 파일 번들 (관심종목·포트폴리오·알림설정)
+    cache_bundle = {}
+    for rel in CORE_JSON_FILES:
+        p = BASE_DIR / rel
+        if p.exists():
+            try:
+                cache_bundle[rel] = p.read_text(encoding="utf-8")
+            except Exception as exc:
+                log.debug("[DB백업] %s 읽기 실패: %s", rel, exc)
+
     payload = {
         "description": f"stock-dashboard core backup {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "files": {
             GIST_FILE_NAME: {"content": encoded},
+            CACHE_BUNDLE_FILE: {"content": json.dumps(cache_bundle, ensure_ascii=False, indent=2)},
             "backup_info.json": {"content": json.dumps({
                 "timestamp": datetime.now().isoformat(),
                 "raw_bytes": len(raw),
                 "compressed_bytes": len(compressed),
                 "tables": summary,
+                "json_files": list(cache_bundle.keys()),
             }, indent=2, ensure_ascii=False)},
         },
     }
@@ -173,10 +200,11 @@ def backup_db() -> dict:
         return {"ok": False, "reason": "Gist API 실패"}
 
     new_id = res["id"]
-    log.info("[DB백업] 성공 — gist=%s, %dKB, tables=%s",
-             new_id, size_kb, summary)
+    log.info("[DB백업] 성공 — gist=%s, %dKB, tables=%s, json=%d",
+             new_id, size_kb, summary, len(cache_bundle))
     return {"ok": True, "gist_id": new_id, "size_kb": size_kb,
-            "raw_kb": len(raw) // 1024, "tables": summary}
+            "raw_kb": len(raw) // 1024, "tables": summary,
+            "json_files": list(cache_bundle.keys())}
 
 
 def _find_backup_gist() -> str | None:
@@ -280,6 +308,36 @@ def restore_db() -> dict:
         try: mini_path.unlink()
         except Exception: pass
 
-    log.info("[DB복원] 병합 완료: %s", merged)
+    # JSON 캐시 파일 복원 (관심종목/포트폴리오/알림설정)
+    restored_json: list = []
+    cache_node = (res.get("files") or {}).get(CACHE_BUNDLE_FILE) or {}
+    cache_content = cache_node.get("content") or ""
+    if cache_node.get("truncated") and cache_node.get("raw_url"):
+        try:
+            req2 = urllib.request.Request(cache_node["raw_url"],
+                headers={"User-Agent": "stock-dashboard-backup"})
+            with urllib.request.urlopen(req2, timeout=30) as r:
+                cache_content = r.read().decode("utf-8")
+        except Exception:
+            pass
+    if cache_content:
+        try:
+            cache_data = json.loads(cache_content)
+            for rel, body in (cache_data or {}).items():
+                target = BASE_DIR / rel
+                # 이미 같은 내용이면 skip
+                if target.exists():
+                    try:
+                        if target.read_text(encoding="utf-8") == body:
+                            continue
+                    except Exception:
+                        pass
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+                restored_json.append(rel)
+        except Exception as exc:
+            log.debug("[DB복원] cache bundle 파싱 실패: %s", exc)
+
+    log.info("[DB복원] DB 병합=%s, JSON 복원=%s", merged, restored_json)
     return {"ok": True, "gist_id": gist_id, "merged": merged,
-            "raw_kb": len(raw) // 1024}
+            "json_restored": restored_json, "raw_kb": len(raw) // 1024}
