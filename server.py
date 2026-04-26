@@ -11930,6 +11930,119 @@ def api_journal_delete(trade_id):
         return jsonify({"error": str(exc)}), 500
 
 
+# ── 🔗 밸류체인 맵 (산업별 레이어 + 뉴스 heat) ──────────────
+@app.route("/api/valuechain")
+def api_valuechain():
+    """밸류체인 5개 테마 + 레이어별 heat + 종목 실시간가 + 외국인 수급."""
+    try:
+        from valuechain import VALUECHAIN_MAP, calculate_layer_heat
+    except Exception as exc:
+        return jsonify({"error": f"valuechain 모듈 로드 실패: {exc}"}), 500
+
+    theme_filter = (request.args.get("theme") or "").strip()
+    heat = calculate_layer_heat() or {}
+
+    # 모든 종목 코드 수집 (실시간 가격 일괄 조회용)
+    all_codes: set = set()
+    for tdata in VALUECHAIN_MAP.values():
+        for layer in tdata["layers"]:
+            for seg in layer["segments"]:
+                for c in seg.get("companies", []):
+                    if c.get("code"):
+                        all_codes.add(c["code"])
+
+    # SQLite 일괄 조회 — 가격 + 외국인 일별 net (flow_cache)
+    price_map: dict = {}
+    flow_map: dict = {}
+    if _SQLITE_OK and USE_SQLITE and all_codes:
+        try:
+            with _get_db() as conn:
+                qmarks = ",".join(["?"] * len(all_codes))
+                rows = conn.execute(
+                    f"SELECT code, name, close, change_pct, market FROM stocks "
+                    f"WHERE code IN ({qmarks})", list(all_codes)
+                ).fetchall()
+                for r in rows:
+                    price_map[r["code"]] = dict(r)
+                # KR 종목만 외국인 net (flow_cache)
+                kr_codes = [c for c in all_codes if c.isdigit() and len(c) == 6]
+                if kr_codes:
+                    qm2 = ",".join(["?"] * len(kr_codes))
+                    fr = conn.execute(
+                        f"SELECT code, foreign_value_json, foreign_sum_20 "
+                        f"FROM flow_cache WHERE code IN ({qm2})", kr_codes
+                    ).fetchall()
+                    for f in fr:
+                        try:
+                            fv = json.loads(f["foreign_value_json"] or "[]")
+                            today_net = (fv[-1] / 1e8) if fv else 0  # 억원 단위
+                        except Exception:
+                            today_net = 0
+                        flow_map[f["code"]] = {
+                            "today_net_eok": round(today_net, 1),
+                            "sum20_eok": round((f["foreign_sum_20"] or 0) / 1e8, 1),
+                        }
+        except Exception as exc:
+            log.debug("[valuechain] DB query: %s", exc)
+
+    # 결과 빌드
+    out: dict = {}
+    for theme_id, tdata in VALUECHAIN_MAP.items():
+        if theme_filter and theme_filter != theme_id:
+            continue
+        # heat 매핑
+        theme_heat = heat.get(theme_id) or {}
+        heat_by_layer = {lh["layer_id"]: lh for lh in (theme_heat.get("layers") or [])}
+
+        layers_out = []
+        for layer in tdata["layers"]:
+            lh = heat_by_layer.get(layer["id"], {})
+            segs_out = []
+            for seg in layer["segments"]:
+                comps_out = []
+                # 세그먼트 외국인 net 합계
+                seg_foreign_today = 0
+                for c in seg.get("companies", []):
+                    p = price_map.get(c["code"]) or {}
+                    f = flow_map.get(c["code"]) or {}
+                    if f.get("today_net_eok"):
+                        seg_foreign_today += f["today_net_eok"]
+                    comps_out.append({
+                        **c,
+                        "price": p.get("close"),
+                        "change_pct": p.get("change_pct"),
+                        "name_db": p.get("name") or c["name"],
+                        "foreign_today_eok": f.get("today_net_eok"),
+                        "foreign_sum20_eok": f.get("sum20_eok"),
+                    })
+                segs_out.append({
+                    **seg,
+                    "companies": comps_out,
+                    "foreign_today_eok": round(seg_foreign_today, 1) if seg_foreign_today else 0,
+                })
+            layers_out.append({
+                "id":      layer["id"],
+                "title":   layer["title"],
+                "subtitle": layer["subtitle"],
+                "color":   layer["color"],
+                "segments": segs_out,
+                "heat":              lh.get("heat", 0),
+                "bottleneck_alert":  lh.get("bottleneck_alert", False),
+                "matched_keywords":  lh.get("matched_keywords", []),
+                "bottleneck_matched": lh.get("bottleneck_matched", []),
+                "top_headlines":     lh.get("top_headlines", []),
+            })
+
+        out[theme_id] = {
+            "theme": tdata["theme"], "icon": tdata["icon"],
+            "layers": layers_out,
+            "total_heat": theme_heat.get("total_heat", 0),
+        }
+
+    out["_meta"] = heat.get("_meta", {})
+    return jsonify(out)
+
+
 # ── 🌍 글로벌 매크로 대시보드 ──────────────
 @app.route("/api/global_macro")
 def api_global_macro():

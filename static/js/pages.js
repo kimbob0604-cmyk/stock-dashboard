@@ -886,6 +886,7 @@ const PAGE_RENDERERS = {
   dashboard:  () => { renderDashboardHome(); },
   pnljournal: () => { renderPnlJournalPage(); },
   globalmacro:() => { renderGlobalMacroPage(); },
+  valuechain: () => { renderValuechainPage(); },
 };
 
 function navigateTo(page) {
@@ -911,7 +912,7 @@ function navigateTo(page) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro');
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain');
   document.body.classList.add(`page-${page}`);
 
   try { PAGE_RENDERERS[page](); }
@@ -6132,4 +6133,146 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initMobileMenu);
 } else {
   initMobileMenu();
+}
+
+
+// ============================================================
+// 🔗 밸류체인 맵
+// ============================================================
+let _VC_THEME = 'ai_semiconductor';
+
+async function renderValuechainPage() {
+  const root = document.getElementById('valuechain-view');
+  root.innerHTML = `<div class="pg-wrap">
+    <div class="pg-title">🔗 밸류체인 맵</div>
+    <div class="pg-sub">5개 산업 × 레이어 종목 매핑 + 뉴스 키워드 기반 실시간 heat (30분 캐시)</div>
+    <div id="vc-content"><div class="bt-loading">⏳ 밸류체인 + 뉴스 분석 중…</div></div>
+  </div>`;
+  const box = document.getElementById('vc-content');
+  try {
+    const r = await fetch('/api/valuechain');
+    const d = await r.json();
+    if (d.error) { box.innerHTML = `<div class="bt-error">${_escHtml(d.error)}</div>`; return; }
+    _renderValuechain(d, box);
+  } catch(e) {
+    box.innerHTML = `<div class="bt-error">로드 실패: ${_escHtml(e.message)}</div>`;
+  }
+}
+
+function _renderValuechain(data, box) {
+  const meta = data._meta || {};
+  delete data._meta;
+  const themes = Object.entries(data);
+  if (!themes.length) { box.innerHTML = '<div class="pg-empty">데이터 없음</div>'; return; }
+
+  // 첫 진입 시 _VC_THEME 초기화
+  if (!themes.find(([id]) => id === _VC_THEME)) _VC_THEME = themes[0][0];
+
+  let html = `<div class="vc-meta">📰 뉴스 ${meta.total_headlines || 0}건 분석 · ${_escHtml(meta.calculated_at || '')}</div>`;
+
+  // 테마 탭
+  html += '<div class="vc-theme-tabs" id="vc-theme-tabs">';
+  for (const [id, t] of themes) {
+    const active = id === _VC_THEME ? 'active' : '';
+    html += `<button class="vc-theme-tab ${active}" data-vct="${_escHtml(id)}">
+      ${_escHtml(t.icon)} ${_escHtml(t.theme)}
+      <span class="vc-heat-badge">${t.total_heat}</span>
+    </button>`;
+  }
+  html += '</div>';
+
+  // 선택된 테마 컨텐츠
+  const cur = data[_VC_THEME] || themes[0][1];
+  html += '<div class="vc-theme-body">';
+  for (let li = 0; li < cur.layers.length; li++) {
+    const layer = cur.layers[li];
+    const heatPct = Math.min(100, layer.heat || 0);
+    const heatCol = heatPct >= 70 ? 'var(--color-up)'
+                   : heatPct >= 40 ? 'var(--color-gold)'
+                   : 'var(--text-tertiary)';
+    const alertCls = layer.bottleneck_alert ? 'vc-layer-alert' : '';
+
+    html += `<div class="vc-layer ${alertCls}" style="--vc-color:${_escHtml(layer.color || '#888')}">
+      <div class="vc-layer-header">
+        <div class="vc-layer-text">
+          <div class="vc-layer-title">${_escHtml(layer.title)}</div>
+          <div class="vc-layer-subtitle">${_escHtml(layer.subtitle)}</div>
+        </div>
+        <div class="vc-heat-gauge">
+          <div class="vc-heat-bar"><div class="vc-heat-fill" style="width:${heatPct}%;background:${heatCol}"></div></div>
+          <span class="vc-heat-score" style="color:${heatCol}">${layer.heat}</span>
+          ${layer.bottleneck_alert ? `<span class="vc-alert">⚠ 병목</span>` : ''}
+        </div>
+      </div>`;
+
+    // 매칭 키워드 칩
+    if ((layer.matched_keywords || []).length) {
+      html += '<div class="vc-keywords">';
+      for (const kw of layer.matched_keywords) {
+        html += `<span class="vc-kw">${_escHtml(kw)}</span>`;
+      }
+      html += '</div>';
+    }
+
+    // 매칭 헤드라인 (drill-through)
+    if ((layer.top_headlines || []).length) {
+      html += '<div class="vc-headlines">';
+      for (const h of layer.top_headlines.slice(0, 3)) {
+        html += `<div class="vc-headline">📰 ${_escHtml(h)}</div>`;
+      }
+      html += '</div>';
+    }
+
+    // 세그먼트 카드들
+    html += '<div class="vc-segments">';
+    for (const seg of (layer.segments || [])) {
+      const segCls = seg.bottleneck ? 'vc-seg vc-seg-bottleneck' : 'vc-seg';
+      html += `<div class="${segCls}">
+        <div class="vc-seg-name">${_escHtml(seg.name)}</div>`;
+      // 외국인 net 배지
+      if (seg.foreign_today_eok) {
+        const fc = seg.foreign_today_eok > 0 ? 'var(--color-up)' : 'var(--color-down)';
+        const fs = seg.foreign_today_eok > 0 ? '+' : '';
+        html += `<div class="vc-seg-flow" style="color:${fc}">외인 ${fs}${seg.foreign_today_eok}억</div>`;
+      }
+      for (const c of (seg.companies || [])) {
+        const badge = _marketBadge(c.market || 'kr');
+        const pct = c.change_pct;
+        const pCol = pct == null ? 'var(--text-tertiary)'
+                    : pct >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+        const sign = pct != null && pct >= 0 ? '+' : '';
+        const priceStr = c.price ? (c.market === 'us'
+          ? '$' + Number(c.price).toFixed(2)
+          : '₩' + Number(c.price).toLocaleString()) : '—';
+        html += `<div class="vc-company" data-code="${_escHtml(c.code)}" data-name="${_escHtml(c.name_db || c.name)}" data-mkt="${_escHtml(c.market || 'kr')}">
+          <span class="vc-comp-name">${_escHtml(c.name)} ${badge}</span>
+          <span class="vc-comp-price">${priceStr}</span>
+          <span class="vc-comp-pct" style="color:${pCol}">${pct != null ? sign + pct.toFixed(2) + '%' : ''}</span>
+        </div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // 레이어 사이 화살표
+    if (li < cur.layers.length - 1) {
+      html += '<div class="vc-arrow">↓</div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+
+  // 이벤트
+  document.getElementById('vc-theme-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('.vc-theme-tab'); if (!b) return;
+    _VC_THEME = b.dataset.vct;
+    renderValuechainPage();
+  });
+  box.querySelectorAll('.vc-company').forEach(el => {
+    el.addEventListener('click', () => {
+      const c = el.dataset.code, n = el.dataset.name, m = el.dataset.mkt;
+      if (c) openChartPanel(c, n, m);
+    });
+  });
 }
