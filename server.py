@@ -1325,7 +1325,81 @@ def _fetch_us_market_data(force: bool = False) -> dict:
     cache_file.write_text(json.dumps(result, ensure_ascii=False),
                           encoding="utf-8")
     print(f"[US] 완료: {len(stocks)} stocks, {len(sector_list)} sectors")
+    # 캐시 → DB 동기화 (사용자가 보는 모든 화면이 stocks 테이블을 참조)
+    try:
+        _sync_us_stocks_to_db(stocks)
+    except Exception as exc:
+        log.debug("[US] DB sync fail: %s", exc)
     return result
+
+
+def _sync_us_stocks_to_db(stocks: list) -> int:
+    """us_market 캐시의 all_stocks 를 stocks 테이블에 INSERT OR REPLACE.
+    호출처: _fetch_us_market_data (캐시 빌드 후), _startup (부팅 시), 매시간 cron."""
+    if not (_SQLITE_OK and USE_SQLITE) or not stocks:
+        return 0
+    n = 0
+    try:
+        with _get_db() as conn:
+            for s in stocks:
+                sym = (s.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                sect = s.get("sector") or ""
+                conn.execute(
+                    "INSERT INTO stocks "
+                    "(code, name, market, sector, market_cap, close, change_pct, "
+                    " volume_mn, sectors_json, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?, datetime('now')) "
+                    "ON CONFLICT(code) DO UPDATE SET "
+                    "  name = excluded.name, "
+                    "  market = excluded.market, "
+                    "  sector = excluded.sector, "
+                    "  market_cap = COALESCE(excluded.market_cap, stocks.market_cap), "
+                    "  close = excluded.close, "
+                    "  change_pct = excluded.change_pct, "
+                    "  volume_mn = excluded.volume_mn, "
+                    "  sectors_json = excluded.sectors_json, "
+                    "  updated_at = datetime('now')",
+                    (sym, s.get("name") or sym, "US", sect,
+                     s.get("market_cap"), s.get("price"), s.get("change_pct"),
+                     s.get("volume_mn"),
+                     json.dumps([sect] if sect else [], ensure_ascii=False))
+                )
+                n += 1
+            conn.commit()
+        log.info("[US sync] %d종목 DB upsert", n)
+    except Exception as exc:
+        log.warning("[US sync] %s", exc)
+    return n
+
+
+def sync_us_market_to_db_from_cache() -> dict:
+    """오늘자 us_market 캐시 → DB 일괄 동기화. 스케줄러용."""
+    today = now_kst().strftime("%Y%m%d")
+    cache_file = BASE_DIR / "cache" / f"us_market_{today}.json"
+    if not cache_file.exists():
+        # 가장 최근 캐시
+        try:
+            files = sorted(BASE_DIR.glob("cache/us_market_*.json"), reverse=True)
+            cache_file = files[0] if files else None
+        except Exception:
+            cache_file = None
+    if not cache_file or not cache_file.exists():
+        return {"ok": False, "reason": "us_market 캐시 없음"}
+    try:
+        d = json.loads(cache_file.read_text(encoding="utf-8"))
+        n = _sync_us_stocks_to_db(d.get("all_stocks") or [])
+        return {"ok": True, "synced": n, "cache": cache_file.name,
+                "cache_updated_at": d.get("updated_at")}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+@app.route("/api/us/sync_db", methods=["POST", "GET"])
+def api_us_sync_db():
+    """수동 트리거: us_market 캐시 → DB 동기화."""
+    return jsonify(sync_us_market_to_db_from_cache())
 
 
 def _build_us_market_background():
@@ -5622,6 +5696,13 @@ def _startup():
                 log.info("[DB복원] skip: %s", r.get("reason"))
         except Exception as exc:
             log.debug("[DB복원] 모듈 로드 실패: %s", exc)
+        # US 캐시 → DB 동기화 (재시작 시 stocks 테이블 stale 방지)
+        try:
+            r = sync_us_market_to_db_from_cache()
+            if r.get("ok"):
+                log.info("[US sync] 부팅 시 %d종목 DB 동기화", r.get("synced", 0))
+        except Exception as exc:
+            log.debug("[US sync] 부팅 시 실패: %s", exc)
         # 추천 이력 테이블 + 과거 discover 스냅샷 소급 (최초 1회)
         try:
             _init_recommendation_history()
@@ -5813,6 +5894,11 @@ def _startup():
         _scheduler.add_job(_self_keep_alive, "interval", minutes=4,
                            id="self_keepalive", max_instances=1)
         log.info("[Keep-Alive] 자체 핑 스케줄 등록 (4분 간격)")
+
+        # ── US 시장 캐시 → DB 동기화 (US 장중·장외 모두 1시간 간격) ──
+        _scheduler.add_job(sync_us_market_to_db_from_cache, "interval",
+                           minutes=60, id="us_db_sync", max_instances=1)
+        log.info("[US sync] 60분 간격 DB 동기화 스케줄 등록")
 
         # ── DB 핵심 테이블 백업 (매시 30분) ──
         def _hourly_db_backup():
