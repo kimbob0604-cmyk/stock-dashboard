@@ -1402,6 +1402,16 @@ def api_us_sync_db():
     return jsonify(sync_us_market_to_db_from_cache())
 
 
+@app.route("/api/refresh_all", methods=["POST", "GET"])
+def api_refresh_all():
+    """수동 트리거: 모든 글로벌 데이터(매크로·야간선물·옵션·F&G·밸류체인) 즉시 갱신."""
+    try:
+        _refresh_global_data_periodic()
+        return jsonify({"ok": True, "message": "글로벌 데이터 갱신 완료"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 def _build_us_market_background():
     """
     서버 부팅 시 백그라운드로 S&P 500 전 종목 batch 를 돌린다.
@@ -5236,15 +5246,59 @@ def _refresh_briefing_data():
 
 
 def refresh_us_options_signal():
-    """미국장 시작 전(KST 22:00) 옵션 시그널 캐시 무효화 — 다음 조회 시 재수집."""
+    """옵션 시그널 캐시 삭제 + 즉시 재빌드 + 캐시 저장."""
     for sym in ("SPY", "QQQ"):
         f = BASE_DIR / "cache" / f"options_signal_{sym}.json"
         try:
             if f.exists():
                 f.unlink()
-                log.info("[옵션] %s 캐시 삭제", sym)
         except Exception as exc:
-            log.debug("refresh_us_options %s: %s", sym, exc)
+            log.debug("refresh_us_options del %s: %s", sym, exc)
+        try:
+            result = _compute_options_signal(sym)
+            if result and "error" not in result:
+                f.parent.mkdir(exist_ok=True)
+                f.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+                log.info("[옵션] %s 재빌드 + 캐시 저장 OK", sym)
+            else:
+                log.debug("[옵션] %s skip: %s", sym, result.get("error") if result else "no result")
+        except Exception as exc:
+            log.debug("refresh_us_options build %s: %s", sym, exc)
+
+
+def _refresh_global_data_periodic():
+    """텔레그램 토큰 유무와 무관하게 4시간마다 매크로·야간선물·옵션·공포탐욕 갱신."""
+    log.info("[자동갱신] 시작")
+    # macro
+    try:
+        _call_api_internal("/api/macro")
+    except Exception as exc:
+        log.debug("[자동갱신] macro: %s", exc)
+    # night_futures
+    try:
+        _call_api_internal("/api/night_futures")
+    except Exception as exc:
+        log.debug("[자동갱신] night: %s", exc)
+    # options (compute + 캐시 저장 둘 다 처리하는 refresh_us_options_signal 활용)
+    try:
+        refresh_us_options_signal()
+    except Exception as exc:
+        log.debug("[자동갱신] options: %s", exc)
+    # fear_greed
+    try:
+        _call_api_internal("/api/fear_greed")
+    except Exception as exc:
+        log.debug("[자동갱신] fg: %s", exc)
+    # valuechain heat (뉴스 기반)
+    try:
+        from valuechain import calculate_layer_heat
+        # 강제 갱신: 캐시 만료 처리
+        from valuechain import _heat_cache as _vch
+        _vch["ts"] = 0
+        calculate_layer_heat()
+    except Exception as exc:
+        log.debug("[자동갱신] valuechain: %s", exc)
+    log.info("[자동갱신] 완료")
 
 
 # ── 알림 5: 장 마감 요약 (평일 15:40) ──
@@ -5703,6 +5757,13 @@ def _startup():
                 log.info("[US sync] 부팅 시 %d종목 DB 동기화", r.get("synced", 0))
         except Exception as exc:
             log.debug("[US sync] 부팅 시 실패: %s", exc)
+        # 글로벌 데이터 부팅 시 1회 백그라운드 갱신 (stale 즉시 해소)
+        try:
+            import threading as _th
+            _th.Thread(target=_refresh_global_data_periodic,
+                       daemon=True, name="boot-data-refresh").start()
+        except Exception as exc:
+            log.debug("[부팅 자동갱신] %s", exc)
         # 추천 이력 테이블 + 과거 discover 스냅샷 소급 (최초 1회)
         try:
             _init_recommendation_history()
@@ -5899,6 +5960,36 @@ def _startup():
         _scheduler.add_job(sync_us_market_to_db_from_cache, "interval",
                            minutes=60, id="us_db_sync", max_instances=1)
         log.info("[US sync] 60분 간격 DB 동기화 스케줄 등록")
+
+        # ── 글로벌 데이터 자동 갱신 (텔레그램 토큰 무관) — 4시간 간격 ──
+        # macro_data / night_futures / options_signal_SPY,QQQ / fear_greed / valuechain heat
+        _scheduler.add_job(_refresh_global_data_periodic, "interval",
+                           hours=4, id="global_data_refresh", max_instances=1)
+        log.info("[자동갱신] 4시간 간격 글로벌 데이터 cron 등록")
+
+        # ── 매일 KR 종목 유니버스 빌드 (08:00 — 장 시작 1시간 전) ──
+        def _daily_naver_universe_build():
+            try:
+                _build_naver_universe_background()
+            except Exception as exc:
+                log.warning("[KR universe] daily build: %s", exc)
+        _scheduler.add_job(_daily_naver_universe_build, "cron",
+                           hour=8, minute=0, id="kr_universe_daily",
+                           max_instances=1)
+        log.info("[KR universe] 매일 08:00 자동 빌드 cron 등록")
+
+        # ── 매일 US 시장 데이터 빌드 (07:00 KST — US 정규장 마감 후) ──
+        def _daily_us_market_build():
+            try:
+                _fetch_us_market_data(force=True)
+                # 빌드 후 즉시 DB 동기화
+                sync_us_market_to_db_from_cache()
+            except Exception as exc:
+                log.warning("[US market] daily build: %s", exc)
+        _scheduler.add_job(_daily_us_market_build, "cron",
+                           day_of_week="tue-sat", hour=7, minute=0,
+                           id="us_market_daily", max_instances=1)
+        log.info("[US market] 화~토 07:00 자동 빌드 + DB 동기화 cron 등록")
 
         # ── DB 핵심 테이블 백업 (매시 30분) ──
         def _hourly_db_backup():
