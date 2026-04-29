@@ -1,0 +1,2017 @@
+{
+  "version": "2.0",
+  "updated_at": "2026-04-26",
+  "themes": {
+    "AI_SEMI": {
+      "name": "AI/반도체",
+      "color": "#3b82f6",
+      "layers": {
+        "L1_silicon": {
+          "name_kr": "실리콘",
+          "name_en": "Silicon",
+          "order": 1,
+          "segments": {
+            "gpu_accelerator": {
+              "name_kr": "GPU/AI가속기",
+              "name_en": "GPU/AI Accelerator",
+              "is_bottleneck": false,
+              "keywords": [
+                "GPU",
+                "AI가속기",
+                "엔비디아",
+                "NVDA",
+                "H100",
+                "H200",
+                "Blackwell",
+                "B200",
+                "B300",
+                "Rubin",
+                "AMD",
+                "MI300",
+                "MI325",
+                "MI350",
+                "Instinct",
+                "Hopper",
+                "CUDA",
+                "TensorRT",
+                "NVLink",
+                "HGX",
+                "DGX"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "NVDA",
+                "AMD"
+              ]
+            },
+            "cpu": {
+              "name_kr": "CPU",
+              "name_en": "CPU",
+              "is_bottleneck": false,
+              "keywords": [
+                "CPU",
+                "제온",
+                "Xeon",
+                "EPYC",
+                "코어",
+                "Core",
+                "서버CPU",
+                "인텔",
+                "Intel",
+                "AMD CPU",
+                "x86",
+                "ARM",
+                "그래비톤",
+                "Graviton",
+                "랩터레이크",
+                "에메랄드",
+                "사파이어",
+                "그래나이트",
+                "팬텀",
+                "Diamond Rapids"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "INTC",
+                "AMD"
+              ]
+            },
+            "memory_hbm": {
+              "name_kr": "HBM/메모리",
+              "name_en": "HBM/Memory",
+              "is_bottleneck": true,
+              "keywords": [
+                "HBM",
+                "HBM3",
+                "HBM3E",
+                "HBM4",
+                "DRAM",
+                "DDR5",
+                "LPDDR5",
+                "GDDR6",
+                "GDDR7",
+                "낸드",
+                "NAND",
+                "SK하이닉스",
+                "마이크론",
+                "Micron",
+                "고대역폭",
+                "TSV",
+                "스택",
+                "KV캐시",
+                "CXL",
+                "KV cache",
+                "12단",
+                "16단"
+              ],
+              "stocks_kr": [
+                "005930",
+                "000660"
+              ],
+              "stocks_us": [
+                "MU"
+              ]
+            },
+            "npu_asic": {
+              "name_kr": "NPU/ASIC",
+              "name_en": "NPU/ASIC",
+              "is_bottleneck": false,
+              "keywords": [
+                "NPU",
+                "ASIC",
+                "TPU",
+                "리벨리온",
+                "Rebellions",
+                "Groq",
+                "Cerebras",
+                "Tenstorrent",
+                "구글TPU",
+                "아마존Trainium",
+                "Trainium",
+                "Inferentia",
+                "Maia",
+                "Athena",
+                "사피온",
+                "Sapeon",
+                "뉴런",
+                "뉴로모픽",
+                "에지AI",
+                "온디바이스AI"
+              ],
+              "stocks_kr": [
+                "017670"
+              ],
+              "stocks_us": [
+                "GOOG",
+                "AMZN",
+                "MSFT",
+                "AVGO"
+              ],
+              "stocks_metadata": {
+                "017670": {
+                  "exposure_type": "subsidiary",
+                  "exposure_via": "리벨리온 지분 + 사피온 매각",
+                  "primary_business": "통신/포털",
+                  "weight": 0.3
+                }
+              }
+            },
+            "fc_bga_mlb": {
+              "name_kr": "패키징기판 FC-BGA/MLB",
+              "name_en": "FC-BGA/MLB Substrate",
+              "is_bottleneck": true,
+              "keywords": [
+                "FC-BGA",
+                "FCBGA",
+                "MLB",
+                "패키지기판",
+                "반도체기판",
+                "플립칩",
+                "BGA",
+                "이비덴",
+                "신코",
+                "유니마이크론",
+                "난야",
+                "서브스트레이트",
+                "substrate",
+                "layer",
+                "고다층",
+                "18층",
+                "글라스기판",
+                "유리기판",
+                "ABF",
+                "빌드업"
+              ],
+              "stocks_kr": [
+                "007660",
+                "009150",
+                "353200",
+                "011070",
+                "007810"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L2_soboojang": {
+          "name_kr": "반도체 소부장",
+          "name_en": "Semi Materials/Parts/Equipment",
+          "order": 2,
+          "segments": {
+            "front_end_equipment": {
+              "name_kr": "전공정 장비",
+              "name_en": "Front-end Equipment",
+              "is_bottleneck": true,
+              "keywords": [
+                "EUV",
+                "ASML",
+                "노광",
+                "리소그래피",
+                "식각",
+                "etch",
+                "증착",
+                "ALD",
+                "CVD",
+                "PECVD",
+                "HPA",
+                "고압어닐링",
+                "HPSP",
+                "원익IPS",
+                "주성",
+                "유진테크",
+                "테스",
+                "피에스케이",
+                "케이씨텍",
+                "CMP",
+                "스퍼터",
+                "sputter",
+                "드라이스트립"
+              ],
+              "stocks_kr": [
+                "403870",
+                "240810",
+                "036930",
+                "095610",
+                "319660",
+                "281820"
+              ],
+              "stocks_us": [
+                "AMAT",
+                "LRCX",
+                "KLAC"
+              ]
+            },
+            "back_end_equipment": {
+              "name_kr": "후공정 장비",
+              "name_en": "Back-end Equipment",
+              "is_bottleneck": true,
+              "keywords": [
+                "TC본더",
+                "TCB",
+                "본딩",
+                "다이본더",
+                "외관검사",
+                "AOI",
+                "웨이퍼검사",
+                "프로브",
+                "probe",
+                "테스터",
+                "tester",
+                "한미반도체",
+                "인텍플러스",
+                "이오테크닉스",
+                "리노공업",
+                "ISC",
+                "번인",
+                "burn-in",
+                "핸들러",
+                "레이저",
+                "드릴",
+                "마킹"
+              ],
+              "stocks_kr": [
+                "042700",
+                "064290",
+                "039030",
+                "058470",
+                "095340"
+              ],
+              "stocks_us": []
+            },
+            "materials_chemicals": {
+              "name_kr": "소재/케미칼",
+              "name_en": "Materials/Chemicals",
+              "is_bottleneck": false,
+              "keywords": [
+                "포토레지스트",
+                "PR",
+                "감광액",
+                "슬러리",
+                "slurry",
+                "CMP슬러리",
+                "불화수소",
+                "HF",
+                "에칭액",
+                "박막",
+                "프리커서",
+                "precursor",
+                "솔브레인",
+                "동진쎄미켐",
+                "한솔케미칼",
+                "SK머티리얼즈",
+                "원익QnC",
+                "티씨케이",
+                "쿼츠",
+                "quartz",
+                "링",
+                "ring",
+                "일렉트로드"
+              ],
+              "stocks_kr": [
+                "357780",
+                "014680",
+                "240810",
+                "064760"
+              ],
+              "stocks_us": []
+            },
+            "inspection_cleaning": {
+              "name_kr": "검사/세정",
+              "name_en": "Inspection/Cleaning",
+              "is_bottleneck": false,
+              "keywords": [
+                "세정",
+                "cleaning",
+                "코팅",
+                "coating",
+                "파티클",
+                "particle",
+                "결함검사",
+                "defect",
+                "계측",
+                "metrology",
+                "코미코",
+                "파크시스템스",
+                "원익QnC",
+                "에스앤에스텍",
+                "블랭크마스크",
+                "마스크",
+                "reticle",
+                "수율",
+                "yield",
+                "웨이퍼",
+                "리퍼브"
+              ],
+              "stocks_kr": [
+                "183300",
+                "140860",
+                "095610"
+              ],
+              "stocks_us": [
+                "KLAC"
+              ]
+            },
+            "specialty_gas": {
+              "name_kr": "특수가스",
+              "name_en": "Specialty Gas",
+              "is_bottleneck": false,
+              "keywords": [
+                "특수가스",
+                "NF3",
+                "SF6",
+                "WF6",
+                "원자층",
+                "고순도가스",
+                "가스",
+                "불화수소가스",
+                "에칭가스",
+                "증착가스",
+                "원익머트리얼즈",
+                "후성",
+                "SK머티리얼즈",
+                "에어프로덕츠",
+                "린데",
+                "Linde",
+                "머크",
+                "불소",
+                "희유가스",
+                "CF4",
+                "NH3"
+              ],
+              "stocks_kr": [
+                "104830",
+                "093370"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L3_optical": {
+          "name_kr": "광통신/인터커넥트",
+          "name_en": "Optical/Interconnect",
+          "order": 3,
+          "segments": {
+            "fiber_preform": {
+              "name_kr": "광섬유/모재",
+              "name_en": "Fiber/Preform",
+              "is_bottleneck": true,
+              "keywords": [
+                "광섬유",
+                "preform",
+                "모재",
+                "fiber",
+                "optical fiber",
+                "대한광통신",
+                "Corning",
+                "코닝",
+                "스미토모",
+                "후지쿠라",
+                "OFS",
+                "HMT",
+                "수직통합",
+                "증설",
+                "리드타임",
+                "lead time",
+                "공급부족",
+                "shortage",
+                "BEAD",
+                "해저",
+                "submarine",
+                "drawing",
+                "멀티모드",
+                "싱글모드"
+              ],
+              "stocks_kr": [
+                "010170"
+              ],
+              "stocks_us": [
+                "GLW"
+              ]
+            },
+            "transceiver_eml": {
+              "name_kr": "광트랜시버/EML",
+              "name_en": "Transceiver/EML",
+              "is_bottleneck": true,
+              "keywords": [
+                "EML",
+                "광트랜시버",
+                "transceiver",
+                "800G",
+                "1.6T",
+                "CPO",
+                "co-packaged",
+                "Lumentum",
+                "Coherent",
+                "Marvell",
+                "오이솔루션",
+                "100G",
+                "400G",
+                "DSP",
+                "silicon photonics",
+                "실리콘포토닉스",
+                "modulator",
+                "변조기",
+                "laser",
+                "DR8",
+                "FR4",
+                "retimer"
+              ],
+              "stocks_kr": [
+                "138080"
+              ],
+              "stocks_us": [
+                "LITE",
+                "COHR",
+                "MRVL"
+              ]
+            },
+            "submarine_cable": {
+              "name_kr": "해저케이블",
+              "name_en": "Submarine Cable",
+              "is_bottleneck": false,
+              "keywords": [
+                "해저케이블",
+                "submarine",
+                "subsea",
+                "KT서브마린",
+                "Prysmian",
+                "NKT",
+                "SubCom",
+                "해저공사",
+                "cable",
+                "HVDC해저",
+                "interconnector",
+                "대륙간",
+                "cable repair",
+                "케이블선",
+                "프리즘",
+                "installation",
+                "poseidon",
+                "equiano",
+                "2Africa",
+                "SEA-ME-WE"
+              ],
+              "stocks_kr": [
+                "060370"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L4_server_idc": {
+          "name_kr": "AI서버/IDC",
+          "name_en": "AI Server/IDC",
+          "order": 4,
+          "segments": {
+            "server_odm": {
+              "name_kr": "서버 ODM",
+              "name_en": "Server ODM",
+              "is_bottleneck": false,
+              "keywords": [
+                "서버",
+                "ODM",
+                "Supermicro",
+                "SMCI",
+                "Dell",
+                "HPE",
+                "Quanta",
+                "Foxconn",
+                "Wistron",
+                "Inventec",
+                "랙",
+                "rack",
+                "Gen10",
+                "Gen11",
+                "리퀴드",
+                "liquid",
+                "수랭",
+                "ODM-direct",
+                "whitebox",
+                "제조",
+                "조립",
+                "blade"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "SMCI",
+                "DELL",
+                "HPE"
+              ]
+            },
+            "cooling": {
+              "name_kr": "냉각/액침",
+              "name_en": "Cooling/Immersion",
+              "is_bottleneck": true,
+              "keywords": [
+                "냉각",
+                "cooling",
+                "액침",
+                "immersion",
+                "수랭",
+                "liquid cooling",
+                "DLC",
+                "CDU",
+                "열관리",
+                "Vertiv",
+                "GST",
+                "케이엔솔",
+                "Submer",
+                "서브머",
+                "유니셈",
+                "신성이엔지",
+                "인성정보",
+                "칠러",
+                "chiller",
+                "fluorinert",
+                "PUE",
+                "TDP",
+                "heat sink",
+                "fan"
+              ],
+              "stocks_kr": [
+                "083450",
+                "053080",
+                "036200",
+                "011930",
+                "033230"
+              ],
+              "stocks_us": [
+                "VRT"
+              ]
+            },
+            "cloud_idc": {
+              "name_kr": "클라우드/IDC",
+              "name_en": "Cloud/IDC",
+              "is_bottleneck": false,
+              "keywords": [
+                "클라우드",
+                "cloud",
+                "AWS",
+                "Azure",
+                "GCP",
+                "오라클",
+                "Oracle",
+                "IDC",
+                "데이터센터",
+                "data center",
+                "하이퍼스케일",
+                "hyperscale",
+                "리전",
+                "region",
+                "colocation",
+                "Equinix",
+                "Digital Realty",
+                "삼성SDS",
+                "NHN",
+                "KT",
+                "네이버"
+              ],
+              "stocks_kr": [
+                "018260",
+                "035420",
+                "030200"
+              ],
+              "stocks_us": [
+                "MSFT",
+                "AMZN",
+                "GOOG",
+                "ORCL",
+                "EQIX",
+                "DLR"
+              ],
+              "stocks_metadata": {
+                "035420": {
+                  "exposure_type": "subsidiary",
+                  "exposure_via": "NAVER Cloud",
+                  "primary_business": "검색/광고/커머스",
+                  "weight": 0.4
+                },
+                "030200": {
+                  "exposure_type": "subsidiary",
+                  "exposure_via": "KT Cloud",
+                  "primary_business": "통신/IPTV",
+                  "weight": 0.3
+                }
+              }
+            }
+          }
+        },
+        "L5_model_runtime": {
+          "name_kr": "모델/런타임",
+          "name_en": "Model/Runtime",
+          "order": 5,
+          "segments": {
+            "foundation_llm": {
+              "name_kr": "파운데이션 LLM",
+              "name_en": "Foundation LLM",
+              "is_bottleneck": false,
+              "keywords": [
+                "LLM",
+                "GPT",
+                "Claude",
+                "Gemini",
+                "Llama",
+                "Mistral",
+                "파운데이션",
+                "foundation",
+                "OpenAI",
+                "Anthropic",
+                "DeepSeek",
+                "Qwen",
+                "파라미터",
+                "parameter",
+                "컨텍스트",
+                "context",
+                "reasoning",
+                "멀티모달",
+                "multimodal",
+                "RAG",
+                "fine-tuning",
+                "instruction"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "MSFT",
+                "GOOG",
+                "META"
+              ]
+            },
+            "orchestration": {
+              "name_kr": "오케스트레이션",
+              "name_en": "Orchestration",
+              "is_bottleneck": false,
+              "keywords": [
+                "오케스트레이션",
+                "orchestration",
+                "워크플로우",
+                "workflow",
+                "에이전트",
+                "agent",
+                "ServiceNow",
+                "UiPath",
+                "RPA",
+                "BPM",
+                "automation",
+                "tool calling",
+                "function calling",
+                "langchain",
+                "langgraph",
+                "pipeline",
+                "trigger",
+                "scheduler",
+                "reasoning loop",
+                "planner",
+                "executor"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "NOW",
+                "PATH"
+              ]
+            },
+            "observability_llmops": {
+              "name_kr": "관측성/LLMOps",
+              "name_en": "Observability/LLMOps",
+              "is_bottleneck": false,
+              "keywords": [
+                "관측성",
+                "observability",
+                "LLMOps",
+                "MLOps",
+                "Datadog",
+                "monitoring",
+                "tracing",
+                "evaluation",
+                "평가",
+                "prompt management",
+                "drift",
+                "hallucination",
+                "모니터링",
+                "Splunk",
+                "New Relic",
+                "Dynatrace",
+                "Grafana",
+                "logging",
+                "metrics",
+                "Arize",
+                "Weights"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "DDOG",
+                "SPLK",
+                "NEWR",
+                "DT"
+              ]
+            }
+          }
+        },
+        "L6_agent_app": {
+          "name_kr": "에이전트 앱",
+          "name_en": "Agent Application",
+          "order": 6,
+          "segments": {
+            "enterprise_agent": {
+              "name_kr": "엔터프라이즈 에이전트",
+              "name_en": "Enterprise Agent",
+              "is_bottleneck": false,
+              "keywords": [
+                "Salesforce",
+                "CRM",
+                "Agentforce",
+                "Copilot",
+                "엔터프라이즈",
+                "enterprise",
+                "SaaS",
+                "Workday",
+                "SAP",
+                "Oracle",
+                "seat",
+                "좌석",
+                "ARR",
+                "subscription",
+                "구독",
+                "SDR",
+                "sales agent",
+                "customer support",
+                "서비스나우",
+                "DocuSign",
+                "HR agent"
+              ],
+              "stocks_kr": [
+                "018260"
+              ],
+              "stocks_us": [
+                "CRM",
+                "MSFT",
+                "ORCL",
+                "WDAY"
+              ]
+            },
+            "game_creative": {
+              "name_kr": "게임/창작 AI",
+              "name_en": "Game/Creative AI",
+              "is_bottleneck": false,
+              "keywords": [
+                "크래프톤",
+                "Krafton",
+                "Studio Agent",
+                "Orak",
+                "게임AI",
+                "NPC",
+                "procedural",
+                "creative",
+                "Adobe",
+                "Firefly",
+                "Runway",
+                "Stable Diffusion",
+                "Midjourney",
+                "creator",
+                "creator economy",
+                "UGC",
+                "metaverse",
+                "unity",
+                "unreal",
+                "ICLR",
+                "ICML"
+              ],
+              "stocks_kr": [
+                "259960"
+              ],
+              "stocks_us": [
+                "ADBE",
+                "TTWO",
+                "EA"
+              ]
+            },
+            "security_governance": {
+              "name_kr": "보안/거버넌스",
+              "name_en": "Security/Governance",
+              "is_bottleneck": false,
+              "keywords": [
+                "보안",
+                "security",
+                "CrowdStrike",
+                "Palo Alto",
+                "CRWD",
+                "PANW",
+                "SentinelOne",
+                "governance",
+                "compliance",
+                "prompt injection",
+                "jailbreak",
+                "alignment",
+                "red team",
+                "XDR",
+                "EDR",
+                "SIEM",
+                "Zscaler",
+                "Okta",
+                "identity",
+                "zero trust"
+              ],
+              "stocks_kr": [],
+              "stocks_us": [
+                "CRWD",
+                "PANW",
+                "ZS",
+                "S",
+                "OKTA"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "BATTERY_ESS": {
+      "name": "이차전지/ESS",
+      "color": "#22c55e",
+      "layers": {
+        "L1_minerals": {
+          "name_kr": "광물/소재",
+          "name_en": "Minerals/Materials",
+          "order": 1,
+          "segments": {
+            "cathode": {
+              "name_kr": "양극재",
+              "name_en": "Cathode",
+              "is_bottleneck": false,
+              "keywords": [
+                "양극재",
+                "cathode",
+                "NCM",
+                "NCA",
+                "LFP",
+                "에코프로비엠",
+                "엘앤에프",
+                "포스코퓨처엠",
+                "코스모신소재",
+                "니켈",
+                "코발트",
+                "망간",
+                "리튬인산철",
+                "하이니켈",
+                "single crystal",
+                "단결정",
+                "전구체",
+                "precursor",
+                "수산화리튬",
+                "니켈코발트",
+                "CAM"
+              ],
+              "stocks_kr": [
+                "247540",
+                "066970",
+                "003670",
+                "005070"
+              ],
+              "stocks_us": []
+            },
+            "anode": {
+              "name_kr": "음극재",
+              "name_en": "Anode",
+              "is_bottleneck": false,
+              "keywords": [
+                "음극재",
+                "anode",
+                "흑연",
+                "graphite",
+                "실리콘",
+                "silicon anode",
+                "SiOx",
+                "천연흑연",
+                "인조흑연",
+                "포스코퓨처엠",
+                "대주전자재료",
+                "엠케이전자",
+                "나노카본",
+                "CNT",
+                "SWCNT",
+                "팽창흑연",
+                "고용량",
+                "에너지밀도",
+                "사이클",
+                "수명"
+              ],
+              "stocks_kr": [
+                "003670",
+                "078600"
+              ],
+              "stocks_us": []
+            },
+            "electrolyte_separator": {
+              "name_kr": "전해질/분리막",
+              "name_en": "Electrolyte/Separator",
+              "is_bottleneck": false,
+              "keywords": [
+                "전해질",
+                "electrolyte",
+                "분리막",
+                "separator",
+                "SKIET",
+                "엔켐",
+                "천보",
+                "솔브레인",
+                "LiPF6",
+                "고체전해질",
+                "solid state",
+                "황화물",
+                "sulfide",
+                "폴리머",
+                "oxide",
+                "산화물",
+                "wet",
+                "dry",
+                "코팅",
+                "ceramic",
+                "피막"
+              ],
+              "stocks_kr": [
+                "361610",
+                "348370",
+                "278280",
+                "357780"
+              ],
+              "stocks_us": [],
+              "stocks_metadata": {
+                "357780": {
+                  "exposure_type": "side_business",
+                  "exposure_via": "2차전지 화학소재 (메인은 반도체)",
+                  "primary_business": "반도체 화학",
+                  "weight": 0.4
+                }
+              }
+            },
+            "lithium_nickel": {
+              "name_kr": "리튬/니켈 광물",
+              "name_en": "Lithium/Nickel",
+              "is_bottleneck": true,
+              "keywords": [
+                "리튬",
+                "lithium",
+                "니켈",
+                "nickel",
+                "코발트",
+                "cobalt",
+                "리튬가격",
+                "spodumene",
+                "brine",
+                "염호",
+                "제련",
+                "refining",
+                "Albemarle",
+                "SQM",
+                "Pilbara",
+                "호주",
+                "칠레",
+                "인도네시아",
+                "Vale",
+                "Glencore",
+                "수직통합"
+              ],
+              "stocks_kr": [
+                "003670",
+                "066970"
+              ],
+              "stocks_us": [
+                "ALB",
+                "SQM"
+              ]
+            }
+          }
+        },
+        "L2_cell": {
+          "name_kr": "셀",
+          "name_en": "Battery Cell",
+          "order": 2,
+          "segments": {
+            "ncm_cell": {
+              "name_kr": "NCM 셀",
+              "name_en": "NCM Cell",
+              "is_bottleneck": false,
+              "keywords": [
+                "LG에너지솔루션",
+                "LG엔솔",
+                "삼성SDI",
+                "SK온",
+                "NCM",
+                "NCA",
+                "파우치",
+                "원통형",
+                "21700",
+                "4680",
+                "각형",
+                "prismatic",
+                "지그",
+                "파일럿",
+                "capa",
+                "증설",
+                "마더팩토리",
+                "북미",
+                "유럽",
+                "폴란드",
+                "헝가리",
+                "오토셀"
+              ],
+              "stocks_kr": [
+                "373220",
+                "006400",
+                "096770"
+              ],
+              "stocks_us": [],
+              "stocks_metadata": {
+                "096770": {
+                  "exposure_type": "subsidiary",
+                  "exposure_via": "SK On",
+                  "primary_business": "정유/화학/LNG",
+                  "weight": 0.6
+                }
+              }
+            },
+            "lfp_cell": {
+              "name_kr": "LFP 셀",
+              "name_en": "LFP Cell",
+              "is_bottleneck": false,
+              "keywords": [
+                "LFP",
+                "리튬인산철",
+                "CATL",
+                "BYD",
+                "에너지밀도",
+                "저가",
+                "ESS",
+                "ESS용",
+                "중국",
+                "Tesla",
+                "megapack",
+                "cell to pack",
+                "CTP",
+                "blade battery",
+                "cell to chassis",
+                "CTC",
+                "폼팩터",
+                "상용차",
+                "트럭"
+              ],
+              "stocks_kr": [
+                "006400"
+              ],
+              "stocks_us": [
+                "TSLA"
+              ]
+            }
+          }
+        },
+        "L3_pack_bms": {
+          "name_kr": "팩/BMS/ESS",
+          "name_en": "Pack/BMS/ESS",
+          "order": 3,
+          "segments": {
+            "bms": {
+              "name_kr": "BMS/모듈",
+              "name_en": "BMS/Module",
+              "is_bottleneck": false,
+              "keywords": [
+                "BMS",
+                "battery management",
+                "모듈",
+                "module",
+                "팩",
+                "pack",
+                "인버터",
+                "inverter",
+                "현대모비스",
+                "LG이노텍",
+                "상아프론테크",
+                "센서",
+                "sensor",
+                "온도",
+                "cell balancing",
+                "SOC",
+                "SOH",
+                "열관리",
+                "열폭주",
+                "thermal runaway",
+                "안전",
+                "safety"
+              ],
+              "stocks_kr": [
+                "012330"
+              ],
+              "stocks_us": []
+            },
+            "ess_system": {
+              "name_kr": "ESS 시스템",
+              "name_en": "ESS System",
+              "is_bottleneck": true,
+              "keywords": [
+                "ESS",
+                "에너지저장",
+                "energy storage",
+                "피크저감",
+                "peak shaving",
+                "주파수조정",
+                "FR",
+                "LG엔솔ESS",
+                "Megapack",
+                "Tesla ESS",
+                "Fluence",
+                "Wartsila",
+                "UPS",
+                "AI데이터센터ESS",
+                "계통연계",
+                "grid",
+                "비상전원",
+                "backup",
+                "ITC",
+                "IRA",
+                "RNG",
+                "RPS"
+              ],
+              "stocks_kr": [
+                "373220",
+                "006400"
+              ],
+              "stocks_us": [
+                "TSLA",
+                "FLNC"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "SHIPBUILDING": {
+      "name": "조선",
+      "color": "#06b6d4",
+      "layers": {
+        "L1_shipyard": {
+          "name_kr": "조선소 빅3",
+          "name_en": "Shipyard Big 3",
+          "order": 1,
+          "segments": {
+            "lng_tanker": {
+              "name_kr": "LNG선/탱커",
+              "name_en": "LNG Carrier/Tanker",
+              "is_bottleneck": true,
+              "keywords": [
+                "LNG선",
+                "LNG carrier",
+                "탱커",
+                "tanker",
+                "VLCC",
+                "수주",
+                "backlog",
+                "수주잔고",
+                "HD현대중공업",
+                "삼성중공업",
+                "한화오션",
+                "멤브레인",
+                "membrane",
+                "Mark III",
+                "Q-Max",
+                "NO96",
+                "발주",
+                "slot",
+                "슬롯",
+                "2027",
+                "tonne-mile",
+                "호르무즈",
+                "수에즈",
+                "우회",
+                "Yamal",
+                "Arctic"
+              ],
+              "stocks_kr": [
+                "329180",
+                "010140",
+                "042660"
+              ],
+              "stocks_us": []
+            },
+            "naval_warship": {
+              "name_kr": "군함/잠수함",
+              "name_en": "Naval/Submarine",
+              "is_bottleneck": false,
+              "keywords": [
+                "잠수함",
+                "submarine",
+                "KSS-III",
+                "장보고",
+                "호위함",
+                "FFX",
+                "KDX",
+                "구축함",
+                "destroyer",
+                "HD현대중공업",
+                "한화오션",
+                "폴란드",
+                "호주",
+                "캐나다",
+                "NATO",
+                "수출",
+                "Arrowhead",
+                "T-26",
+                "frigate",
+                "Type 209",
+                "Type 214",
+                "AIP"
+              ],
+              "stocks_kr": [
+                "329180",
+                "042660"
+              ],
+              "stocks_us": []
+            },
+            "offshore_fpso": {
+              "name_kr": "해양플랜트/FPSO",
+              "name_en": "Offshore/FPSO",
+              "is_bottleneck": false,
+              "keywords": [
+                "FPSO",
+                "해양플랜트",
+                "offshore",
+                "drillship",
+                "드릴십",
+                "semi-submersible",
+                "subsea",
+                "Petrobras",
+                "CNOOC",
+                "엑손모빌",
+                "Modec",
+                "BP",
+                "Equinor",
+                "Brazil",
+                "Guyana",
+                "Stabroek",
+                "topside",
+                "hull",
+                "integration",
+                "shuttle"
+              ],
+              "stocks_kr": [
+                "010140",
+                "329180"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L2_components": {
+          "name_kr": "핵심 기자재",
+          "name_en": "Key Components",
+          "order": 2,
+          "segments": {
+            "engine": {
+              "name_kr": "선박엔진",
+              "name_en": "Marine Engine",
+              "is_bottleneck": true,
+              "keywords": [
+                "엔진",
+                "engine",
+                "HSD엔진",
+                "두산엔진",
+                "현대중공업엔진",
+                "2행정",
+                "4행정",
+                "two-stroke",
+                "four-stroke",
+                "MAN",
+                "WinGD",
+                "ME-GA",
+                "ME-GI",
+                "ME-LGI",
+                "DF",
+                "듀얼퓨얼",
+                "dual fuel",
+                "X-DF",
+                "암모니아",
+                "ammonia",
+                "메탄올",
+                "methanol",
+                "RPS",
+                "CII",
+                "EEXI"
+              ],
+              "stocks_kr": [
+                "082740"
+              ],
+              "stocks_us": []
+            },
+            "lng_insulation": {
+              "name_kr": "LNG화물창/단열재",
+              "name_en": "LNG Cargo Tank/Insulation",
+              "is_bottleneck": true,
+              "keywords": [
+                "LNG화물창",
+                "cargo tank",
+                "단열재",
+                "insulation",
+                "한국카본",
+                "동성화인텍",
+                "Mark III",
+                "NO96",
+                "GTT",
+                "폴리우레탄",
+                "perlite",
+                "invar",
+                "스테인리스",
+                "cryogenic",
+                "극저온",
+                "BOG",
+                "boil off",
+                "membrane",
+                "ROYALTY",
+                "로열티",
+                "containment",
+                "leak"
+              ],
+              "stocks_kr": [
+                "017960",
+                "033500"
+              ],
+              "stocks_us": []
+            },
+            "scrubber_eco": {
+              "name_kr": "환경설비/스크러버",
+              "name_en": "Environmental/Scrubber",
+              "is_bottleneck": false,
+              "keywords": [
+                "스크러버",
+                "scrubber",
+                "파나시아",
+                "SOx",
+                "NOx",
+                "SCR",
+                "EGCS",
+                "desulfurization",
+                "탈황",
+                "탈질",
+                "CO2",
+                "carbon capture",
+                "CCUS",
+                "ballast",
+                "BWMS",
+                "평형수",
+                "IMO 2020",
+                "IMO Tier III",
+                "emission",
+                "retrofit",
+                "retrofit",
+                "규제",
+                "개조"
+              ],
+              "stocks_kr": [],
+              "stocks_us": []
+            }
+          }
+        },
+        "L3_steel_paint": {
+          "name_kr": "후방 (강재/도료)",
+          "name_en": "Steel/Paint",
+          "order": 3,
+          "segments": {
+            "thick_plate": {
+              "name_kr": "후판",
+              "name_en": "Thick Plate",
+              "is_bottleneck": false,
+              "keywords": [
+                "후판",
+                "thick plate",
+                "고장력",
+                "high tensile",
+                "POSCO",
+                "현대제철",
+                "동국제강",
+                "steel",
+                "조선용강재",
+                "강재",
+                "slab",
+                "plate mill",
+                "DH36",
+                "EH36",
+                "쇄빙",
+                "arctic",
+                "극저온",
+                "cryogenic",
+                "열연",
+                "압연",
+                "수입",
+                "공급",
+                "협상"
+              ],
+              "stocks_kr": [
+                "005490",
+                "004020",
+                "001230"
+              ],
+              "stocks_us": []
+            },
+            "marine_paint": {
+              "name_kr": "선박도료",
+              "name_en": "Marine Paint",
+              "is_bottleneck": false,
+              "keywords": [
+                "도료",
+                "paint",
+                "KCC",
+                "노루",
+                "조선도료",
+                "anti-fouling",
+                "방오",
+                "epoxy",
+                "폴리우레탄",
+                "silicone",
+                "코팅",
+                "coating",
+                "cargo hold",
+                "ballast",
+                "topside",
+                "emission",
+                "연료절감",
+                "fuel saving",
+                "biocide",
+                "TBT free",
+                "ECA"
+              ],
+              "stocks_kr": [
+                "002380",
+                "000320"
+              ],
+              "stocks_us": []
+            }
+          }
+        }
+      }
+    },
+    "DEFENSE": {
+      "name": "방산",
+      "color": "#f59e0b",
+      "layers": {
+        "L1_systems": {
+          "name_kr": "체계/완성품",
+          "name_en": "Systems/Platforms",
+          "order": 1,
+          "segments": {
+            "artillery_mlrs": {
+              "name_kr": "자주포/다연장",
+              "name_en": "Artillery/MLRS",
+              "is_bottleneck": false,
+              "keywords": [
+                "K9",
+                "자주포",
+                "천무",
+                "다연장",
+                "MLRS",
+                "한화에어로스페이스",
+                "화포",
+                "곡사포",
+                "howitzer",
+                "SPH",
+                "로켓",
+                "rocket",
+                "폴란드",
+                "Poland",
+                "호주",
+                "Australia",
+                "루마니아",
+                "이집트",
+                "수출",
+                "납품",
+                "계약",
+                "훈련"
+              ],
+              "stocks_kr": [
+                "012450"
+              ],
+              "stocks_us": []
+            },
+            "tank_apc": {
+              "name_kr": "전차/장갑차",
+              "name_en": "Tank/APC",
+              "is_bottleneck": false,
+              "keywords": [
+                "K2",
+                "흑표",
+                "전차",
+                "tank",
+                "현대로템",
+                "K21",
+                "장갑차",
+                "APC",
+                "K808",
+                "차륜형",
+                "tracked",
+                "MBT",
+                "main battle",
+                "폴란드K2",
+                "노르웨이",
+                "Leopard",
+                "Abrams",
+                "수출",
+                "ROK Army",
+                "RP3",
+                "K2PL"
+              ],
+              "stocks_kr": [
+                "064350"
+              ],
+              "stocks_us": []
+            },
+            "aircraft": {
+              "name_kr": "항공기/UAV",
+              "name_en": "Aircraft/UAV",
+              "is_bottleneck": false,
+              "keywords": [
+                "FA-50",
+                "경공격기",
+                "KF-21",
+                "보라매",
+                "KAI",
+                "한국항공우주",
+                "수리온",
+                "KUH",
+                "T-50",
+                "훈련기",
+                "trainer",
+                "폴란드KAI",
+                "말레이시아",
+                "페루",
+                "UAV",
+                "드론",
+                "drone",
+                "무인기",
+                "loitering munition",
+                "자폭"
+              ],
+              "stocks_kr": [
+                "047810"
+              ],
+              "stocks_us": []
+            },
+            "missile_guided": {
+              "name_kr": "유도무기",
+              "name_en": "Guided Missile",
+              "is_bottleneck": false,
+              "keywords": [
+                "유도무기",
+                "missile",
+                "천궁",
+                "천궁II",
+                "KM-SAM",
+                "해궁",
+                "현무",
+                "현무-II",
+                "현무-III",
+                "cruise",
+                "순항",
+                "탄도",
+                "ballistic",
+                "LIG넥스원",
+                "장거리",
+                "AAW",
+                "함대공",
+                "지대공",
+                "ATGM",
+                "대전차",
+                "ground",
+                "사거리",
+                "UAE",
+                "사우디"
+              ],
+              "stocks_kr": [
+                "079550"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L2_subsystems": {
+          "name_kr": "핵심 부품",
+          "name_en": "Subsystems",
+          "order": 2,
+          "segments": {
+            "engine_propulsion": {
+              "name_kr": "엔진/추진",
+              "name_en": "Engine/Propulsion",
+              "is_bottleneck": false,
+              "keywords": [
+                "항공엔진",
+                "aero engine",
+                "터빈",
+                "turbine",
+                "한화에어로",
+                "T-50엔진",
+                "KF-21엔진",
+                "F414",
+                "Pratt Whitney",
+                "Rolls Royce",
+                "propulsion",
+                "터보팬",
+                "turbofan",
+                "AFE",
+                "aero",
+                "gas turbine",
+                "발전",
+                "generator",
+                "스털링",
+                "Stirling",
+                "AIP"
+              ],
+              "stocks_kr": [
+                "012450"
+              ],
+              "stocks_us": [
+                "GE",
+                "RTX"
+              ]
+            },
+            "radar_comms": {
+              "name_kr": "레이더/통신",
+              "name_en": "Radar/Communication",
+              "is_bottleneck": false,
+              "keywords": [
+                "레이더",
+                "radar",
+                "AESA",
+                "능동위상배열",
+                "LIG넥스원",
+                "한화시스템",
+                "천궁레이더",
+                "K-AESA",
+                "조기경보",
+                "AEW",
+                "TICN",
+                "지휘통제",
+                "C4I",
+                "secure",
+                "위성",
+                "satellite",
+                "LEO",
+                "Skylark",
+                "SAR",
+                "sensor fusion",
+                "링크-K"
+              ],
+              "stocks_kr": [
+                "079550",
+                "272210"
+              ],
+              "stocks_us": []
+            },
+            "optics_electro": {
+              "name_kr": "광학/EO",
+              "name_en": "Optics/EO",
+              "is_bottleneck": false,
+              "keywords": [
+                "광학",
+                "optical",
+                "EO/IR",
+                "열영상",
+                "thermal imaging",
+                "이오시스템",
+                "적외선",
+                "infrared",
+                "FLIR",
+                "sight",
+                "조준경",
+                "laser designator",
+                "range finder",
+                "스코프",
+                "scope",
+                "day/night",
+                "stabilization",
+                "gimbal",
+                "UAV pod",
+                "targeting"
+              ],
+              "stocks_kr": [],
+              "stocks_us": []
+            }
+          }
+        },
+        "L3_munitions": {
+          "name_kr": "탄약/소재",
+          "name_en": "Munitions/Materials",
+          "order": 3,
+          "segments": {
+            "ammunition": {
+              "name_kr": "탄약/포탄",
+              "name_en": "Ammunition",
+              "is_bottleneck": true,
+              "keywords": [
+                "탄약",
+                "ammunition",
+                "포탄",
+                "shell",
+                "155mm",
+                "풍산",
+                "propellant",
+                "화약",
+                "powder",
+                "explosive",
+                "NATO탄",
+                "우크라이나",
+                "Ukraine",
+                "고갈",
+                "stockpile",
+                "증산",
+                "capacity",
+                "미국",
+                "유럽",
+                "납",
+                "tungsten",
+                "fuse",
+                "신관",
+                "D2"
+              ],
+              "stocks_kr": [
+                "103140"
+              ],
+              "stocks_us": []
+            }
+          }
+        }
+      }
+    },
+    "DATACENTER_POWER": {
+      "name": "데이터센터/전력",
+      "color": "#a855f7",
+      "layers": {
+        "L1_transformer": {
+          "name_kr": "변압기 ★★★",
+          "name_en": "Transformer ★★★",
+          "order": 1,
+          "segments": {
+            "uhv_transformer": {
+              "name_kr": "초고압 변압기 (765kV)",
+              "name_en": "UHV Transformer",
+              "is_bottleneck": true,
+              "keywords": [
+                "변압기",
+                "transformer",
+                "765kV",
+                "초고압",
+                "UHV",
+                "HD현대일렉",
+                "효성중공업",
+                "리드타임",
+                "lead time",
+                "2년",
+                "3년",
+                "증설",
+                "capacity",
+                "미국",
+                "해외",
+                "수출",
+                "TVA",
+                "Eaton",
+                "ABB",
+                "Hitachi Energy",
+                "Siemens Energy",
+                "공급부족",
+                "backlog",
+                "전력기기",
+                "T&D"
+              ],
+              "stocks_kr": [
+                "267260",
+                "298040"
+              ],
+              "stocks_us": []
+            },
+            "general_transformer": {
+              "name_kr": "일반 변압기/배전",
+              "name_en": "General Transformer/Distribution",
+              "is_bottleneck": false,
+              "keywords": [
+                "배전",
+                "distribution",
+                "LS일렉트릭",
+                "제룡전기",
+                "스위치기어",
+                "switchgear",
+                "MVCB",
+                "HVCB",
+                "변전소",
+                "substation",
+                "GIS",
+                "gas insulated",
+                "AIS",
+                "MV",
+                "LV",
+                "산업용",
+                "파드마운트",
+                "pole-mount",
+                "data center",
+                "AI DC",
+                "UPS",
+                "backup"
+              ],
+              "stocks_kr": [
+                "010120",
+                "033100"
+              ],
+              "stocks_us": [
+                "ETN"
+              ]
+            }
+          }
+        },
+        "L2_transmission": {
+          "name_kr": "송배전/HVDC",
+          "name_en": "Transmission/HVDC",
+          "order": 2,
+          "segments": {
+            "hvdc": {
+              "name_kr": "HVDC",
+              "name_en": "HVDC",
+              "is_bottleneck": true,
+              "keywords": [
+                "HVDC",
+                "고전압직류",
+                "direct current",
+                "LS일렉트릭",
+                "Hitachi",
+                "ABB",
+                "Siemens",
+                "컨버터",
+                "converter",
+                "VSC",
+                "LCC",
+                "backbone",
+                "interconnector",
+                "해상풍력연계",
+                "offshore",
+                "grid",
+                "GW",
+                "MMC",
+                "modular multilevel",
+                "subsea HVDC",
+                "ultra long",
+                "2GW"
+              ],
+              "stocks_kr": [
+                "010120"
+              ],
+              "stocks_us": [
+                "GEV"
+              ]
+            },
+            "cable_wire": {
+              "name_kr": "케이블/전선",
+              "name_en": "Cable/Wire",
+              "is_bottleneck": false,
+              "keywords": [
+                "전선",
+                "cable",
+                "wire",
+                "LS전선",
+                "대한전선",
+                "LS전선아시아",
+                "Prysmian",
+                "Nexans",
+                "Furukawa",
+                "해저",
+                "submarine",
+                "XLPE",
+                "insulation",
+                "구리",
+                "copper",
+                "알루미늄",
+                "aluminum",
+                "AAC",
+                "ACSR",
+                "UHV cable",
+                "power cable",
+                "고압케이블"
+              ],
+              "stocks_kr": [
+                "229640",
+                "001440"
+              ],
+              "stocks_us": []
+            }
+          }
+        },
+        "L3_generation": {
+          "name_kr": "발전/연계",
+          "name_en": "Generation",
+          "order": 3,
+          "segments": {
+            "gas_turbine": {
+              "name_kr": "가스터빈",
+              "name_en": "Gas Turbine",
+              "is_bottleneck": true,
+              "keywords": [
+                "가스터빈",
+                "gas turbine",
+                "두산에너빌리티",
+                "GE Vernova",
+                "Mitsubishi",
+                "Siemens Energy",
+                "H-class",
+                "J-class",
+                "9HA",
+                "heavy duty",
+                "peaker",
+                "피커",
+                "combined cycle",
+                "CCGT",
+                "LNG발전",
+                "backlog",
+                "100GW",
+                "수주",
+                "연료전환",
+                "fuel"
+              ],
+              "stocks_kr": [
+                "034020"
+              ],
+              "stocks_us": [
+                "GEV",
+                "MTSUF"
+              ]
+            },
+            "nuclear_smr": {
+              "name_kr": "원전/SMR",
+              "name_en": "Nuclear/SMR",
+              "is_bottleneck": false,
+              "keywords": [
+                "원전",
+                "nuclear",
+                "SMR",
+                "소형모듈원자로",
+                "두산에너빌리티",
+                "한국전력",
+                "KEPCO",
+                "NuScale",
+                "Rolls Royce SMR",
+                "Westinghouse",
+                "TerraPower",
+                "X-energy",
+                "UAE",
+                "Barakah",
+                "폴란드원전",
+                "체코",
+                "피카소",
+                "APR-1400",
+                "i-SMR",
+                "재가동"
+              ],
+              "stocks_kr": [
+                "015760",
+                "034020"
+              ],
+              "stocks_us": [
+                "NSC",
+                "BWXT",
+                "CCJ"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

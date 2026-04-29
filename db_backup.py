@@ -42,6 +42,20 @@ CORE_TABLES = [
     "recommendation_history",   # 추천 스냅샷
     "disclosure_history",       # 공시 + 점수
     "alert_rules",              # 알림 규칙 (DB)
+    # ↓↓ Step 4-1 신규 추가 ↓↓
+    "analysis_journal",         # 검증 시트 (사용자 작성, 영구 보존)
+    "alert_history_v2",         # Step 4 알림 이력 (성과 추적용 — 기존 alert_history와 별개)
+    # ↓↓ Step 4-2/4-3 — Render 조회용 (맥북 cron이 갱신, Render는 read-only) ↓↓
+    "financial_quarterly",      # DART 5년 분기 재무 (~100KB, 1568행)
+    "valuation_band",           # 5년 PER/EV/PBR 밴드 (~5KB, 76행)
+    "consensus_estimate",       # 컨센서스 (네이버+yfinance, ~10KB, 113행)
+    "dart_disclosure_overhang", # 오버행 (CB/BW/유증) — 추후 채워질 예정
+    # ↓↓ Step 4-7-A — 어닝 서프라이즈 ↓↓
+    "index_universe",           # 동적 유니버스 (출발: valuechain KR 82)
+    "consensus_quarterly",      # 분기 컨센서스 (Naver tb_type1)
+    "earnings_actual",          # 실제 발표 (Naver + DART 보정)
+    "earnings_surprise",        # 서프라이즈 + 사후 알림
+    "earnings_alert_queue",     # 발표 임박 사전 알림 큐
 ]
 
 # 사용자 설정/입력이 들어있는 JSON 캐시 파일도 함께 백업

@@ -607,11 +607,27 @@ def index():
 def _overlay_live_prices_on_data(data: dict) -> dict:
     """data.json 의 themes.stocks[].change_pct 와 weighted_avg_pct 를
     naver_universe 실시간 값으로 덮어씀. 장중 실시간 반영용.
-    kospi/kosdaq 값도 정리."""
+
+    Render 환경(naver_universe 부재) 폴백: themes 안 종목 코드를 모아
+    polling.finance.naver.com에 일괄 조회 (3분 캐시)."""
     uni = _load_naver_universe()
     stocks_live = (uni or {}).get("stocks") or {}
+
+    # naver_universe 부재 시 가벼운 실시간 폴링 폴백 (Render용)
     if not stocks_live:
-        return data  # 실시간 소스 없으면 원본 그대로
+        kr_codes: list = []
+        for theme in (data.get("themes") or []):
+            for s in (theme.get("stocks") or []):
+                code = s.get("code")
+                if code and re.fullmatch(r"\d{6}", code):
+                    kr_codes.append(code)
+        if not kr_codes:
+            return data
+        # dedupe + 일괄 조회
+        kr_codes = list(dict.fromkeys(kr_codes))
+        stocks_live = _fetch_naver_live_prices(kr_codes)
+        if not stocks_live:
+            return data
 
     updated_stocks = 0
     for theme in (data.get("themes") or []):
@@ -646,6 +662,122 @@ def _overlay_live_prices_on_data(data: dict) -> dict:
     return data
 
 
+# ─── 실시간 데이터 보강 (Render 환경 — pykrx/yfinance 미사용, urllib만) ───
+# Render는 자동 fetcher 비활성화 → /data.json 응답 시 가벼운 polling으로 신선도 보강.
+_KR_INDEX_CACHE = {"data": None, "ts": 0}
+_KR_INDEX_TTL = 300  # 5분
+
+_LIVE_PRICE_CACHE = {"data": {}, "ts": 0}
+_LIVE_PRICE_TTL = 180  # 3분 (장중 종목 가격)
+
+
+def _fetch_naver_live_prices(codes: list) -> dict:
+    """polling.finance.naver.com 일괄 조회 → {code: {close, change_pct, volume_mn}}.
+    종목 100개 단위 batch + 3분 메모리 캐시 (Render 메모리 안전)."""
+    if not codes:
+        return {}
+    now = time.time()
+    cache = _LIVE_PRICE_CACHE
+    if cache["data"] and (now - cache["ts"]) < _LIVE_PRICE_TTL:
+        # 캐시에서 요청 종목만 추출
+        return {c: cache["data"][c] for c in codes if c in cache["data"]}
+
+    import urllib.request
+    import urllib.error
+    out: dict = {}
+    BATCH = 100
+    for i in range(0, len(codes), BATCH):
+        batch = codes[i:i + BATCH]
+        query = "SERVICE_ITEM:" + ",".join(batch)
+        url = ("https://polling.finance.naver.com/api/realtime"
+               "?query=" + urllib.parse.quote(query, safe=":,"))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read()
+            text = None
+            for enc in ('utf-8', 'euc-kr', 'cp949'):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not text:
+                continue
+            payload = json.loads(text)
+            datas = payload.get("result", {}).get("areas", [{}])[0].get("datas") or []
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, KeyError) as e:
+            log.debug("[live prices] batch %d 실패: %s", i, e)
+            continue
+        for row in datas:
+            cd = row.get("cd")
+            nv = row.get("nv")  # 현재가
+            cr = row.get("cr")  # 등락률
+            aq = row.get("aq")  # 누적 거래량
+            if cd and nv is not None:
+                out[cd] = {
+                    "close": float(nv),
+                    "change_pct": round(float(cr or 0.0), 2),
+                    "volume_mn": round(float(aq or 0) / 1_000_000, 1),
+                }
+    if out:
+        # 캐시는 누적 (요청 종목 union)
+        merged = dict(cache.get("data") or {})
+        merged.update(out)
+        _LIVE_PRICE_CACHE["data"] = merged
+        _LIVE_PRICE_CACHE["ts"] = now
+    return out
+
+
+import urllib.parse  # _fetch_naver_live_prices 위에서 사용
+
+
+def _fetch_kr_indices_live() -> dict:
+    """Naver polling API로 KOSPI/KOSDAQ 실시간 지수 (urllib만, 가벼움)."""
+    now = time.time()
+    if _KR_INDEX_CACHE["data"] and (now - _KR_INDEX_CACHE["ts"]) < _KR_INDEX_TTL:
+        return _KR_INDEX_CACHE["data"]
+
+    import urllib.request
+    import urllib.error
+    url = ("https://polling.finance.naver.com/api/realtime"
+           "?query=SERVICE_INDEX%3AKOSPI%2CKOSDAQ")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read()
+        text = None
+        for enc in ('utf-8', 'euc-kr', 'cp949'):
+            try:
+                text = raw.decode(enc); break
+            except UnicodeDecodeError:
+                continue
+        if not text:
+            return {}
+        payload = json.loads(text)
+        datas = payload["result"]["areas"][0]["datas"]
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError, TimeoutError) as e:
+        log.debug("[KR index] Naver 실패: %s", e)
+        return {}
+
+    out = {}
+    for row in datas:
+        cd = row.get("cd"); nv = row.get("nv"); cr = row.get("cr")
+        if cd is None or nv is None:
+            continue
+        key = "kospi" if cd == "KOSPI" else "kosdaq" if cd == "KOSDAQ" else None
+        if not key:
+            continue
+        # nv는 원지수 × 100 → /100 스케일링
+        out[key] = {"value": round(nv / 100, 2),
+                    "change_pct": round(float(cr or 0.0), 2)}
+
+    if out:
+        _KR_INDEX_CACHE["data"] = out
+        _KR_INDEX_CACHE["ts"] = now
+    return out
+
+
 @app.route("/data.json")
 def route_data_json():
     if not DATA_JSON.exists():
@@ -658,6 +790,14 @@ def route_data_json():
     try:
         data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
         data = _overlay_live_prices_on_data(data)
+        # KOSPI/KOSDAQ stale 보강 (Render에서 data_fetcher 비활성화 시 필수)
+        if (not data.get("kospi") or not data.get("kospi", {}).get("value")
+            or not data.get("kosdaq") or not data.get("kosdaq", {}).get("value")):
+            live_idx = _fetch_kr_indices_live()
+            if live_idx.get("kospi"):
+                data["kospi"] = live_idx["kospi"]
+            if live_idx.get("kosdaq"):
+                data["kosdaq"] = live_idx["kosdaq"]
         return Response(json.dumps(data, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as exc:
@@ -666,6 +806,15 @@ def route_data_json():
             DATA_JSON.read_text(encoding="utf-8"),
             content_type="application/json; charset=utf-8",
         )
+
+
+@app.route("/api/index_kr")
+def api_index_kr():
+    """KOSPI/KOSDAQ 실시간 지수 (Render fallback용 endpoint)."""
+    out = _fetch_kr_indices_live()
+    if not out:
+        return jsonify({"error": "Naver index fetch failed"}), 502
+    return jsonify({**out, "ttl_sec": _KR_INDEX_TTL})
 
 
 @app.route("/api/status")
@@ -5776,25 +5925,33 @@ def _startup():
         log.error("data_fetcher.py 를 찾을 수 없습니다: %s", FETCHER)
         return
 
-    # data.json 이 없거나 오래됐으면 자동 수집
-    if data_is_fresh():
-        log.info("data.json 최신 상태 — 수집 생략")
+    # ── Render 환경 감지 (RENDER_EXTERNAL_URL 자동 주입됨) ──
+    # Render에서는 무거운 pykrx/yfinance 서브프로세스 비활성화 → 맥북 cron으로 분리
+    IS_RENDER = bool(os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("RENDER"))
+    DISABLE_AUTO_FETCH = IS_RENDER or bool(os.environ.get("DISABLE_AUTO_FETCH"))
+
+    if DISABLE_AUTO_FETCH:
+        log.info("⏸  자동 fetcher 비활성화 (Render 환경) — 맥북 cron으로 갱신")
     else:
-        reason = "없음" if not DATA_JSON.exists() else "오늘 날짜 아님"
-        log.info("data.json %s → data_fetcher.py 백그라운드 실행", reason)
-        trigger_fetch(background=True)
+        # data.json 이 없거나 오래됐으면 자동 수집 (로컬만)
+        if data_is_fresh():
+            log.info("data.json 최신 상태 — 수집 생략")
+        else:
+            reason = "없음" if not DATA_JSON.exists() else "오늘 날짜 아님"
+            log.info("data.json %s → data_fetcher.py 백그라운드 실행", reason)
+            trigger_fetch(background=True)
 
-    # Phase 10: Naver 업종 유니버스 백그라운드 빌드 (비차단)
-    #   일 1회, 약 79 섹터 × 0.25s ≈ 20 초 소요.
-    threading.Thread(target=_build_naver_universe_background,
-                     daemon=True, name="naver-universe").start()
+        # Phase 10: Naver 업종 유니버스 백그라운드 빌드 (비차단)
+        #   일 1회, 약 79 섹터 × 0.25s ≈ 20 초 소요.
+        threading.Thread(target=_build_naver_universe_background,
+                         daemon=True, name="naver-universe").start()
 
-    # Phase 14: S&P 500 market 백그라운드 빌드
-    #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
-    threading.Thread(target=_build_us_market_background,
-                     daemon=True, name="us-market-build").start()
+        # Phase 14: S&P 500 market 백그라운드 빌드
+        #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
+        threading.Thread(target=_build_us_market_background,
+                         daemon=True, name="us-market-build").start()
 
-    # APScheduler: 장중 자동 갱신
+    # APScheduler: 장중 자동 갱신 (Render에선 _scheduled_update 등록 안 함)
     if _SCHEDULER_OK:
         def _scheduled_update():
             if is_market_hours():
@@ -5805,10 +5962,11 @@ def _startup():
 
         _scheduler = _BgScheduler(daemon=True)
         interval = _get()["interval_minutes"]
-        _scheduler.add_job(
-            _scheduled_update, "interval", minutes=interval,
-            id="market_update", max_instances=1,
-        )
+        if not DISABLE_AUTO_FETCH:
+            _scheduler.add_job(
+                _scheduled_update, "interval", minutes=interval,
+                id="market_update", max_instances=1,
+            )
 
         # Phase 23: 텔레그램 알림 스케줄 (토큰 있을 때만)
         if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
@@ -6006,6 +6164,129 @@ def _startup():
         _scheduler.add_job(_hourly_db_backup, "cron", minute=30,
                            id="db_backup_hourly", max_instances=1)
         log.info("[DB백업] 매시 30분 스케줄 등록")
+
+        # ── Step 4-7-B: 유니버스 자동 갱신 (매월 1일 03:00) ──
+        def _scheduled_universe_sync():
+            try:
+                from universe_manager import sync_valuechain_to_universe
+                result = sync_valuechain_to_universe(verbose=False)
+                log.info("[유니버스] %s 활성 %d (+%d/-%d)",
+                         result.get('source'),
+                         result.get('total_active', 0),
+                         result.get('newly_added', 0),
+                         result.get('removed', 0))
+                # 변동 있을 때만 텔레그램 알림
+                if result.get('newly_added', 0) > 0 or result.get('removed', 0) > 0:
+                    try:
+                        msg = (f"📊 유니버스 갱신\n"
+                               f"활성: {result['total_active']}종목\n"
+                               f"➕ 추가: {result['newly_added']}\n"
+                               f"➖ 제거: {result['removed']}")
+                        send_telegram(msg)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log.warning("[유니버스 동기화] %s", exc)
+        _scheduler.add_job(_scheduled_universe_sync, "cron",
+                           day=1, hour=3, minute=0,
+                           id="universe_sync_monthly", max_instances=1)
+        log.info("[유니버스] 매월 1일 03:00 동기화 cron 등록")
+
+        # ── Step 4-7-C: 분기 컨센서스 주간 수집 (월요일 06:00) ──
+        def _scheduled_consensus_quarterly():
+            try:
+                from consensus_quarterly_collector import collect_all
+                results = collect_all()
+                ok = sum(1 for r in results if r.get('status') == 'OK')
+                log.info("[컨센서스 분기] %d/%d 종목 OK", ok, len(results))
+            except Exception as exc:
+                log.warning("[컨센서스 분기 수집] %s", exc)
+        _scheduler.add_job(_scheduled_consensus_quarterly, "cron",
+                           day_of_week="mon", hour=6, minute=0,
+                           id="consensus_quarterly_weekly", max_instances=1)
+        log.info("[컨센서스 분기] 매주 월요일 06:00 cron 등록")
+
+        # ── Step 4-7-D-7: 어닝 자동 파이프라인 (5분 간격) ──
+        # disclosure → earnings_actual → surprise → telegram
+        def _scheduled_earnings_pipeline():
+            """매 5분: 미처리 잠정실적 자동 처리 (장중/장마감 시즌만 의미 있음)"""
+            try:
+                # Step 1: 미처리 잠정실적 공시 → earnings_actual
+                from earnings_parser import process_disclosure as _proc_disc
+                with _get_db() as conn:
+                    cur = conn.execute("""
+                        SELECT d.rcept_no, d.stock_code, d.rcept_dt, d.title
+                        FROM disclosure_history d
+                        LEFT JOIN earnings_actual ea ON d.rcept_no = ea.disclosure_id
+                        WHERE ea.disclosure_id IS NULL
+                          AND d.rcept_dt >= strftime('%Y%m%d', date('now', '-7 days'))
+                          AND (d.title LIKE '%영업%잠정%'
+                            OR d.title LIKE '%연결%잠정%'
+                            OR d.title LIKE '%결산실적%')
+                        ORDER BY d.rcept_dt DESC LIMIT 30
+                    """)
+                    new_disc = [dict(r) for r in cur.fetchall()]
+                parsed_n = 0
+                for d in new_disc:
+                    try:
+                        r = _proc_disc(d['rcept_no'], d['stock_code'],
+                                       d['rcept_dt'], d['title'])
+                        if r.get('status') == 'OK':
+                            parsed_n += 1
+                    except Exception as exc:
+                        log.debug("[어닝 parse] %s: %s", d['rcept_no'], exc)
+
+                # Step 2: earnings_actual 있는데 surprise 없는 종목 → classify
+                from earnings_signal_classifier import process_earnings_announcement
+                with _get_db() as conn:
+                    cur = conn.execute("""
+                        SELECT DISTINCT ea.stock_code, ea.year, ea.quarter
+                        FROM earnings_actual ea
+                        LEFT JOIN earnings_surprise es
+                          ON ea.stock_code = es.stock_code
+                         AND ea.year = es.year AND ea.quarter = es.quarter
+                        WHERE es.stock_code IS NULL
+                        ORDER BY ea.parsed_at DESC LIMIT 30
+                    """)
+                    unclassified = [dict(r) for r in cur.fetchall()]
+                classified_n = 0
+                for u in unclassified:
+                    try:
+                        r = process_earnings_announcement(
+                            u['stock_code'], u['year'], u['quarter'], verbose=False)
+                        if 'error' not in r:
+                            classified_n += 1
+                    except Exception as exc:
+                        log.debug("[어닝 classify] %s: %s", u['stock_code'], exc)
+
+                # Step 3: surprise priority 1~3 + alert_sent=0 → 텔레그램
+                from earnings_telegram_sender import send_pending_alerts
+                send_result = send_pending_alerts(max_count=10, dry_run=False) \
+                    if classified_n > 0 or parsed_n > 0 else {'success': 0, 'failed': 0}
+
+                if parsed_n or classified_n or send_result.get('success'):
+                    log.info("[어닝 파이프] parsed=%d / classified=%d / sent=%d",
+                             parsed_n, classified_n, send_result.get('success', 0))
+            except Exception as exc:
+                log.warning("[어닝 파이프 에러] %s", exc)
+
+        _scheduler.add_job(_scheduled_earnings_pipeline, "interval", minutes=5,
+                           id="earnings_pipeline_5min", max_instances=1)
+        log.info("[어닝 파이프] 5분 간격 cron 등록")
+
+        # ── 어닝 성과 백필 (매일 06:30) ──
+        def _scheduled_earnings_backfill():
+            try:
+                from earnings_telegram_sender import backfill_alert_performance
+                r = backfill_alert_performance(verbose=False)
+                log.info("[어닝 백필] 업데이트 %d / 완료 %d",
+                         r.get('updated', 0), r.get('completed', 0))
+            except Exception as exc:
+                log.warning("[어닝 백필 에러] %s", exc)
+        _scheduler.add_job(_scheduled_earnings_backfill, "cron",
+                           hour=6, minute=30,
+                           id="earnings_backfill_daily", max_instances=1)
+        log.info("[어닝 백필] 매일 06:30 cron 등록")
 
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
@@ -8033,23 +8314,33 @@ def poll_dart_disclosures():
         return
 
     today = now_kst().strftime("%Y%m%d")
+    # 페이징 보강 (Step 4-7-D-2): 분기 시즌 하루 수천 건 → page_no 루프
+    MAX_PAGES = 10  # 1000건 한도 (분기 발표 절정일 보호)
+    items = []
     try:
         import requests as _rq
-        r = _rq.get(
-            "https://opendart.fss.or.kr/api/list.json",
-            params={
-                "crtfc_key": dart_key,
-                "bgn_de": today,
-                "end_de": today,
-                "page_count": 100,
-                "page_no": 1,
-            },
-            timeout=10,
-        )
-        data = r.json()
-        if data.get("status") != "000":
-            return
-        items = data.get("list") or []
+        for page in range(1, MAX_PAGES + 1):
+            r = _rq.get(
+                "https://opendart.fss.or.kr/api/list.json",
+                params={
+                    "crtfc_key": dart_key,
+                    "bgn_de": today,
+                    "end_de": today,
+                    "page_count": 100,
+                    "page_no": page,
+                },
+                timeout=10,
+            )
+            data = r.json()
+            if data.get("status") != "000":
+                break
+            page_items = data.get("list") or []
+            if not page_items:
+                break
+            items.extend(page_items)
+            # 페이지에 100건 미만이면 마지막 페이지
+            if len(page_items) < 100:
+                break
     except Exception as exc:
         log.debug("[DART] poll fail: %s", exc)
         return
@@ -12572,6 +12863,551 @@ def api_ohlcv_raw(code):
     except Exception as exc:
         log.exception("ohlcv raw")
         return jsonify({"error": str(exc)}), 500
+
+
+# ============================================================
+# 밸류체인 v2 API (3단 계층 + 반영도 점수) — Step 2
+# ============================================================
+_VC2_API_CACHE: dict = {}
+_VC2_API_TTL = 300  # 5분
+
+
+def _vc2_cache_get(key):
+    item = _VC2_API_CACHE.get(key)
+    if item and (time.time() - item["ts"]) < _VC2_API_TTL:
+        return item["data"]
+    return None
+
+
+def _vc2_cache_set(key, data):
+    _VC2_API_CACHE[key] = {"ts": time.time(), "data": data}
+
+
+@app.route("/api/valuechain2/themes")
+def api_vc2_themes():
+    """모든 테마 메타정보 (이름/색상/레이어 수)."""
+    cached = _vc2_cache_get("themes_all")
+    if cached:
+        return jsonify(cached)
+    try:
+        from valuechain import load_valuechain_map
+    except Exception as exc:
+        return jsonify({"error": f"valuechain 로드 실패: {exc}"}), 500
+    data = load_valuechain_map()
+    if not data:
+        return jsonify({"error": "map not loaded"}), 500
+    result = {
+        "version": data.get("version"),
+        "updated_at": data.get("updated_at"),
+        "themes": [
+            {
+                "theme_id": tid,
+                "name": t.get("name"),
+                "color": t.get("color"),
+                "layer_count": len((t.get("layers") or {})),
+            }
+            for tid, t in (data.get("themes") or {}).items()
+        ],
+    }
+    _vc2_cache_set("themes_all", result)
+    return jsonify(result)
+
+
+@app.route("/api/valuechain2/layers/<theme_id>")
+def api_vc2_layers(theme_id):
+    """특정 테마의 레이어 + 세그먼트 요약 (점수 포함, 종목 디테일 X)."""
+    cache_key = f"layers_{theme_id}"
+    cached = _vc2_cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+    try:
+        from valuechain import aggregate_theme_overview
+        overview = aggregate_theme_overview(theme_id)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    if not overview:
+        return jsonify({"error": f"theme {theme_id} not found"}), 404
+    _vc2_cache_set(cache_key, overview)
+    return jsonify(overview)
+
+
+@app.route("/api/valuechain2/segment/<theme_id>/<layer_id>/<segment_id>")
+def api_vc2_segment(theme_id, layer_id, segment_id):
+    """특정 세그먼트 상세 (모든 종목의 반영도 점수 포함)."""
+    cache_key = f"seg_{theme_id}_{layer_id}_{segment_id}"
+    cached = _vc2_cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+    try:
+        from valuechain import load_valuechain_map, aggregate_segment_score
+        data = load_valuechain_map()
+        seg_data = (data or {}).get("themes", {}).get(theme_id, {}).get("layers", {}).get(layer_id, {}).get("segments", {}).get(segment_id)
+        if not seg_data:
+            return jsonify({"error": "segment not found"}), 404
+        agg = aggregate_segment_score(theme_id, layer_id, segment_id, seg_data)
+        # 종목명 보강
+        if _SQLITE_OK and USE_SQLITE:
+            try:
+                with _get_db() as conn:
+                    for s in agg.get("stocks", []):
+                        r = conn.execute("SELECT name FROM stocks WHERE code = ?",
+                                         (s["code"],)).fetchone()
+                        s["name"] = (r["name"] if r else s["code"])
+            except Exception:
+                pass
+        result = {
+            "theme_id": theme_id,
+            "layer_id": layer_id,
+            "segment_id": segment_id,
+            "name_kr": seg_data.get("name_kr"),
+            "name_en": seg_data.get("name_en"),
+            "keyword_count": len(seg_data.get("keywords") or []),
+            **agg,
+        }
+        _vc2_cache_set(cache_key, result)
+        return jsonify(result)
+    except Exception as exc:
+        log.exception("vc2/segment")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/valuechain2/stock/<stock_code>")
+def api_vc2_stock_reflection(stock_code):
+    """단일 종목 반영도 + 소속 세그먼트 매칭."""
+    cache_key = f"stock_{stock_code}"
+    cached = _vc2_cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+    try:
+        from valuechain import (
+            get_all_segments, calculate_reflection_score,
+            _calculate_segment_heat_v2,
+        )
+        seg_heat = None
+        matched: list = []
+        for tid, lid, sid, seg in get_all_segments():
+            if stock_code in ((seg.get("stocks_kr") or []) + (seg.get("stocks_us") or [])):
+                matched.append({"theme_id": tid, "layer_id": lid,
+                                "segment_id": sid, "name_kr": seg.get("name_kr")})
+                if seg_heat is None:
+                    seg_heat = _calculate_segment_heat_v2(seg)
+        refl = calculate_reflection_score(stock_code, seg_heat)
+        result = {**refl, "matched_segments": matched}
+        _vc2_cache_set(cache_key, result)
+        return jsonify(result)
+    except Exception as exc:
+        log.exception("vc2/stock")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/valuechain2/refresh", methods=["POST"])
+def api_vc2_refresh():
+    """캐시 강제 갱신 (개발/테스트)."""
+    try:
+        from valuechain import reload_valuechain_map, _REFLECTION_CACHE
+        _VC2_API_CACHE.clear()
+        _REFLECTION_CACHE.clear()
+        reload_valuechain_map()
+        return jsonify({"status": "refreshed"})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/valuechain2/segment/<theme_id>/<layer_id>/<segment_id>/manage",
+           methods=["POST"])
+def api_vc2_segment_manage(theme_id, layer_id, segment_id):
+    """세그먼트에 종목 편입/편출.
+    body: {"action": "add"|"remove", "code": "...", "market": "kr"|"us"}
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        action = (body.get("action") or "").strip().lower()
+        code   = (body.get("code") or "").strip().upper()
+        market = (body.get("market") or "").strip().lower()
+        if action not in ("add", "remove"):
+            return jsonify({"error": "action must be add|remove"}), 400
+        if not code:
+            return jsonify({"error": "code required"}), 400
+        # market 자동 추정 (6자리 숫자=KR, 그 외=US)
+        if market not in ("kr", "us"):
+            market = "kr" if code.isdigit() and len(code) == 6 else "us"
+
+        from valuechain import VALUECHAIN_MAP_PATH, reload_valuechain_map, _REFLECTION_CACHE
+        with open(VALUECHAIN_MAP_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        seg = (data.get("themes", {}).get(theme_id, {})
+                  .get("layers", {}).get(layer_id, {})
+                  .get("segments", {}).get(segment_id))
+        if not seg:
+            return jsonify({"error": "segment not found"}), 404
+
+        list_key = "stocks_kr" if market == "kr" else "stocks_us"
+        seg.setdefault(list_key, [])
+
+        before = list(seg[list_key])
+        if action == "add":
+            if code not in seg[list_key]:
+                seg[list_key].append(code)
+        else:  # remove
+            seg[list_key] = [c for c in seg[list_key] if c != code]
+
+        if seg[list_key] == before:
+            return jsonify({"status": "noop", "message": f"{code} 이미 {action} 상태"}), 200
+
+        # 디스크 저장 (atomic write)
+        tmp = VALUECHAIN_MAP_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(VALUECHAIN_MAP_PATH)
+
+        # 캐시 무효화
+        _VC2_API_CACHE.clear()
+        _REFLECTION_CACHE.clear()
+        reload_valuechain_map()
+
+        return jsonify({
+            "status":  "ok",
+            "action":  action,
+            "code":    code,
+            "market":  market,
+            "stocks":  {"kr": seg.get("stocks_kr") or [],
+                        "us": seg.get("stocks_us") or []},
+        })
+    except Exception as exc:
+        log.exception("vc2/segment/manage")
+        return jsonify({"error": str(exc)}), 500
+
+
+# ============================================================
+# 밸류체인 v2 — Step 4-3-D: TAM + 풀 정보 + KUVIC 비교
+# ============================================================
+
+@app.route("/api/valuechain2/stock/<stock_code>/tam")
+def api_vc2_stock_tam(stock_code):
+    """종목별 자동 TAM 모델링 (Bear/Base/Bull EPS×PER → TP). Step 4-3-C."""
+    cache_key = f"tam_{stock_code}"
+    cached = _vc2_cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        from tam_modeler import build_auto_tam_with_label
+        result = build_auto_tam_with_label(stock_code)
+    except Exception as e:
+        log.exception("vc2/stock/tam")
+        return jsonify({"error": str(e), "stock_code": stock_code}), 500
+
+    _vc2_cache_set(cache_key, result)
+    return jsonify(result)
+
+
+@app.route("/api/valuechain2/stock/<stock_code>/full")
+def api_vc2_stock_full(stock_code):
+    """종목 풀 정보: 반영도 + TAM + 매칭 세그먼트 + KUVIC 세션. Step 4-3-D."""
+    cache_key = f"full_{stock_code}"
+    cached = _vc2_cache_get(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    result = {"stock_code": stock_code}
+
+    # 종목 기본 정보
+    if _SQLITE_OK and USE_SQLITE:
+        try:
+            with _get_db() as conn:
+                row = conn.execute("SELECT name FROM stocks WHERE code = ?",
+                                   (stock_code,)).fetchone()
+                if row:
+                    result["name"] = row["name"]
+        except Exception:
+            pass
+
+    # 매칭 세그먼트 + 반영도
+    try:
+        from valuechain import (
+            get_all_segments, calculate_reflection_score,
+            _calculate_segment_heat_v2,
+        )
+        seg_heat = None
+        matched_segments = []
+        for tid, lid, sid, seg in get_all_segments():
+            stocks = (seg.get("stocks_kr", []) or []) + (seg.get("stocks_us", []) or [])
+            if stock_code in stocks:
+                matched_segments.append({
+                    "theme_id":      tid,
+                    "layer_id":      lid,
+                    "segment_id":    sid,
+                    "name_kr":       seg.get("name_kr"),
+                    "is_bottleneck": seg.get("is_bottleneck", False),
+                })
+                if seg_heat is None:
+                    seg_heat = _calculate_segment_heat_v2(seg)
+        result["matched_segments"] = matched_segments
+        result["reflection"] = calculate_reflection_score(stock_code, seg_heat)
+    except Exception as e:
+        result["reflection_error"] = str(e)
+
+    # TAM
+    try:
+        from tam_modeler import build_auto_tam_with_label
+        result["tam"] = build_auto_tam_with_label(stock_code)
+    except Exception as e:
+        result["tam_error"] = str(e)
+
+    # KUVIC 세션 (있으면)
+    try:
+        from kuvic_validator import KUVIC_SESSION_ANALYSIS, compare_kuvic_vs_auto
+        if stock_code in KUVIC_SESSION_ANALYSIS:
+            result["kuvic_session"] = compare_kuvic_vs_auto(stock_code)
+    except Exception:
+        pass
+
+    _vc2_cache_set(cache_key, result)
+    return jsonify(result)
+
+
+# ============================================================
+# Step 4-7-B: 유니버스 API
+# ============================================================
+
+@app.route("/api/earnings/universe")
+def api_earnings_universe():
+    """현재 활성 유니버스 + 통계 (어닝 알림 대상)."""
+    try:
+        from universe_manager import get_universe_stats, get_universe_with_metadata
+        return jsonify({
+            "stats":  get_universe_stats(),
+            "stocks": get_universe_with_metadata(),
+        })
+    except Exception as e:
+        log.exception("earnings/universe")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/earnings/universe/sync", methods=["POST"])
+def api_earnings_universe_sync():
+    """유니버스 수동 동기화 (관리자/cron 트리거)."""
+    try:
+        from universe_manager import sync_valuechain_to_universe
+        result = sync_valuechain_to_universe(verbose=False)
+        return jsonify(result)
+    except Exception as e:
+        log.exception("earnings/universe/sync")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+# Step 4-7-C: 분기 컨센서스 API
+# ============================================================
+
+@app.route("/api/earnings/consensus/<stock_code>")
+def api_earnings_consensus_quarterly(stock_code):
+    """종목별 분기 컨센서스 조회 (DB read-only)."""
+    try:
+        with _get_db() as conn:
+            cur = conn.execute("""
+                SELECT year, quarter,
+                       revenue_consensus, op_consensus, ni_consensus, eps_consensus,
+                       analyst_count, source, collected_at, updated_at
+                FROM consensus_quarterly
+                WHERE stock_code = ?
+                ORDER BY year DESC, quarter DESC
+            """, (stock_code,))
+            rows = [dict(r) for r in cur.fetchall()]
+        return jsonify({"stock_code": stock_code, "consensus": rows})
+    except Exception as e:
+        log.exception("earnings/consensus")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/earnings/consensus/collect", methods=["POST"])
+def api_earnings_consensus_collect():
+    """분기 컨센서스 수동 수집 (단일/전체).
+    body: {"code": "007660"} 또는 {"all": true}"""
+    try:
+        body = request.get_json(force=True) or {}
+        from consensus_quarterly_collector import collect_one, collect_all
+        if body.get("all"):
+            results = collect_all()
+            ok = sum(1 for r in results if r.get('status') == 'OK')
+            return jsonify({"total": len(results), "ok": ok,
+                            "results": results[:20]})  # 응답 사이즈 제한
+        elif body.get("code"):
+            r = collect_one(body["code"])
+            return jsonify(r)
+        else:
+            return jsonify({"error": "code 또는 all 필요"}), 400
+    except Exception as e:
+        log.exception("earnings/consensus/collect")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/valuechain2/kuvic/compare")
+def api_vc2_kuvic_compare():
+    """KUVIC 세션 6종목 일괄 비교. Step 4-3-D."""
+    cached = _vc2_cache_get("kuvic_compare_all")
+    if cached:
+        return jsonify(cached)
+    try:
+        from kuvic_validator import compare_all_kuvic_stocks
+        result = {"comparisons": compare_all_kuvic_stocks()}
+    except Exception as e:
+        log.exception("vc2/kuvic/compare")
+        return jsonify({"error": str(e)}), 500
+    _vc2_cache_set("kuvic_compare_all", result)
+    return jsonify(result)
+
+
+# ============================================================
+# Step 4-4-J: analysis_journal Flask API
+# ============================================================
+
+@app.route('/api/journal/recent', methods=['GET'])
+def api_analysis_journal_recent():
+    """최근 분석 (전체 종목 통합). limit (기본 30, 최대 100)."""
+    try:
+        from analysis_journal_api import list_recent_journals
+        limit = request.args.get('limit', default=30, type=int)
+        results = list_recent_journals(limit)
+        return jsonify({'count': len(results), 'journals': results})
+    except Exception as e:
+        log.exception("journal/recent")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/journal/stock/<stock_code>', methods=['GET'])
+def api_analysis_journal_by_stock(stock_code):
+    """종목별 분석 이력 (최신순)."""
+    try:
+        from analysis_journal_api import list_journals_by_stock
+        limit = request.args.get('limit', default=10, type=int)
+        results = list_journals_by_stock(stock_code, limit)
+        return jsonify({
+            'stock_code': stock_code,
+            'count': len(results),
+            'journals': results,
+        })
+    except Exception as e:
+        log.exception("journal/by_stock")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/journal/<int:journal_id>', methods=['GET'])
+def api_analysis_journal_read(journal_id):
+    """단일 분석 조회."""
+    try:
+        from analysis_journal_api import read_journal
+        result = read_journal(journal_id)
+        if result:
+            return jsonify(result)
+        return jsonify({'error': f'id {journal_id} 없음'}), 404
+    except Exception as e:
+        log.exception("journal/read")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/journal', methods=['POST'])
+def api_analysis_journal_create():
+    """신규 분석 입력. Body(JSON): {stock_code, ...}"""
+    try:
+        from analysis_journal_api import create_journal
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({'success': False, 'error': 'JSON body 필수'}), 400
+        result = create_journal(data)
+        if result.get('success'):
+            return jsonify(result), 201
+        return jsonify(result), 400
+    except Exception as e:
+        log.exception("journal/create")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/journal/<int:journal_id>', methods=['PATCH'])
+def api_analysis_journal_update(journal_id):
+    """분석 부분 수정. Body(JSON): 변경할 필드만."""
+    try:
+        from analysis_journal_api import update_journal
+        updates = request.get_json(silent=True)
+        if not updates:
+            return jsonify({'success': False, 'error': 'JSON body 필수'}), 400
+        result = update_journal(journal_id, updates)
+        if result.get('success'):
+            return jsonify(result)
+        # 없는 id면 404, 그 외는 400
+        err = result.get('error', '') or ''
+        status = 404 if '없음' in err else 400
+        return jsonify(result), status
+    except Exception as e:
+        log.exception("journal/update")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/journal/<int:journal_id>', methods=['DELETE'])
+def api_analysis_journal_delete(journal_id):
+    """분석 hard delete."""
+    try:
+        from analysis_journal_api import delete_journal
+        result = delete_journal(journal_id)
+        if result.get('success'):
+            return jsonify(result)
+        return jsonify(result), 404
+    except Exception as e:
+        log.exception("journal/delete")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/journal/<int:journal_id>/export/markdown', methods=['GET'])
+def api_analysis_journal_export_markdown(journal_id):
+    """단일 분석 Markdown export (5분 피치)."""
+    try:
+        from analysis_journal_api import export_to_markdown, read_journal
+        if not read_journal(journal_id):
+            return jsonify({'error': f'id {journal_id} 없음'}), 404
+        md = export_to_markdown(journal_id)
+        return md, 200, {'Content-Type': 'text/markdown; charset=utf-8'}
+    except Exception as e:
+        log.exception("journal/export/markdown")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/journal/import-kuvic', methods=['POST'])
+def api_analysis_journal_import_kuvic():
+    """KUVIC 6종목 일괄 임포트 (관리자용). body: {force: true}"""
+    try:
+        from analysis_journal_api import import_kuvic_session_analysis
+        data = request.get_json(silent=True) or {}
+        force = data.get('force', False)
+        result = import_kuvic_session_analysis(skip_duplicates=not force)
+        return jsonify(result)
+    except Exception as e:
+        log.exception("journal/import-kuvic")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/journal/prefill/<stock_code>', methods=['GET'])
+def api_analysis_journal_prefill(stock_code):
+    """종목 코드로 분석 일지 초안 자동 작성."""
+    try:
+        from analysis_journal_helper import build_prefill_data
+        data = build_prefill_data(stock_code)
+        return jsonify(data)
+    except Exception as e:
+        log.exception("journal/prefill")
+        return jsonify({'error': str(e), 'stock_code': stock_code}), 500
+
+
+@app.route('/api/journal/stats', methods=['GET'])
+def api_analysis_journal_stats():
+    """분석 메타 통계 + 미분석 종목 일부."""
+    try:
+        from analysis_journal_helper import get_journal_stats, get_stocks_without_analysis
+        stats = get_journal_stats()
+        stats['missing_stocks_sample'] = get_stocks_without_analysis(limit=20)
+        return jsonify(stats)
+    except Exception as e:
+        log.exception("journal/stats")
+        return jsonify({'error': str(e)}), 500
 
 
 # gunicorn 이 모듈을 import 하는 시점에 자동 실행

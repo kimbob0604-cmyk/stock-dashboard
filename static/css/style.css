@@ -4719,3 +4719,577 @@ tr:hover td {
   .vc-layer { padding: 12px !important; }
   .vc-layer-header { flex-direction: column; gap: 10px; }
 }
+
+/* ============================================================
+   밸류체인 v2 — 3패널 드릴다운 (Step 3)
+   ============================================================ */
+.vc2-container {
+  padding: 12px 16px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vc2-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vc2-theme-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vc2-theme-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.vc2-theme-tab:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.vc2-theme-tab.active {
+  background: var(--theme-color, var(--accent));
+  border-color: var(--theme-color, var(--accent));
+  color: #ffffff;
+}
+
+.vc2-tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.vc2-theme-tab.active .vc2-tab-dot { display: none; }
+
+.vc2-tab-count {
+  font-size: 11px;
+  opacity: 0.7;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.vc2-filters {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.vc2-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.vc2-refresh-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  padding: 5px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.vc2-refresh-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
+/* 3패널 그리드 */
+.vc2-three-panel {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1.4fr;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.vc2-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.vc2-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vc2-count {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.vc2-layer-context {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.vc2-empty, .vc2-loading, .vc2-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.vc2-error { color: var(--color-up); }
+
+.vc2-layer-list, .vc2-segment-list, .vc2-stock-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vc2-layer-card, .vc2-segment-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 10px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.vc2-layer-card:hover, .vc2-segment-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-secondary);
+}
+
+.vc2-layer-card.active, .vc2-segment-card.active {
+  background: var(--color-accent-bg);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.vc2-layer-head, .vc2-segment-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.vc2-layer-name, .vc2-segment-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.vc2-layer-en, .vc2-segment-en {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.vc2-layer-kr, .vc2-segment-kr {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.vc2-bottleneck {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--color-gold);
+  font-weight: 600;
+}
+
+.vc2-score-badge {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vc2-layer-meta, .vc2-segment-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* heat bar */
+.vc2-heat-bar {
+  position: relative;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 6px 0 2px;
+}
+
+.vc2-heat-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(to right, #06b6d4, var(--color-gold), var(--color-up));
+  transition: width 0.3s;
+}
+
+.vc2-heat-text {
+  display: block;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: 'SF Mono', Menlo, monospace;
+}
+
+/* 세그먼트 요약 (우측 패널 상단) */
+.vc2-segment-summary {
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.vc2-segment-summary-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.vc2-segment-summary-score {
+  display: inline-block;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: #ffffff;
+  padding: 2px 8px;
+  border-radius: 3px;
+  margin-bottom: 6px;
+}
+
+.vc2-segment-summary-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* 종목 카드 */
+.vc2-stock-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 10px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.vc2-stock-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.vc2-stock-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.vc2-stock-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.vc2-market-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.vc2-market-badge.kr {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+}
+
+.vc2-market-badge.us {
+  background: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+}
+
+.vc2-stock-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.vc2-stock-code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.vc2-stock-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.vc2-stock-cell {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  padding: 4px 6px;
+  min-width: 0;
+}
+
+.vc2-cell-label {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vc2-cell-value {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 편입/편출 + 점수 분해 (Step 3.1) */
+.vc2-segment-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.vc2-add-btn {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vc2-add-btn:hover {
+  background: var(--color-accent);
+  color: #ffffff;
+}
+
+.vc2-score-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-primary);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.vc2-score-legend-title {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.vc2-legend-item b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.vc2-stock-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.vc2-toggle-btn, .vc2-remove-btn {
+  background: transparent;
+  border: 1px solid var(--border-primary);
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vc2-toggle-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
+.vc2-remove-btn:hover {
+  color: var(--color-up);
+  border-color: var(--color-up);
+  background: var(--color-up-bg);
+}
+
+/* 점수 분해 expandable */
+.vc2-breakdown {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-primary);
+  font-size: 11px;
+}
+
+.vc2-bd-row {
+  display: grid;
+  grid-template-columns: 80px 60px 1fr 130px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.vc2-bd-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.vc2-bd-raw {
+  font-family: 'SF Mono', Menlo, monospace;
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.vc2-bd-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.vc2-bd-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.vc2-bd-score {
+  font-family: 'SF Mono', Menlo, monospace;
+  color: var(--text-secondary);
+  text-align: right;
+  font-size: 10px;
+}
+
+.vc2-bd-score b {
+  color: var(--text-primary);
+}
+
+.vc2-bd-total {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-primary);
+  text-align: right;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.vc2-bd-total b {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* 모바일 반응형 — 768px 이하 1패널 스택 */
+@media (max-width: 768px) {
+  .vc2-three-panel {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 12px;
+  }
+  .vc2-panel { max-height: 60vh; }
+  .vc2-toolbar { flex-direction: column; align-items: stretch; }
+  .vc2-theme-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+  .vc2-theme-tab { flex-shrink: 0; }
+  .vc2-stock-grid { grid-template-columns: repeat(2, 1fr); }
+  .vc2-bd-row {
+    grid-template-columns: 70px 50px 1fr;
+    grid-template-rows: auto auto;
+  }
+  .vc2-bd-score {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+}

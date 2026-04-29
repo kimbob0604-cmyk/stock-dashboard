@@ -19,10 +19,60 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 from datetime import datetime
+from functools import lru_cache
 
 log = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
+
+# ============================================================
+# 신규 3단 계층 밸류체인 맵 (JSON 파일 기반, v2.0)
+# 기존 VALUECHAIN_MAP 은 그대로 유지 — 마이그레이션은 다음 단계에서.
+# ============================================================
+VALUECHAIN_MAP_PATH = BASE_DIR / "data" / "valuechain_map.json"
+
+
+@lru_cache(maxsize=1)
+def load_valuechain_map() -> dict | None:
+    """3단 계층 맵 로드 (메모리 캐시)."""
+    try:
+        with open(VALUECHAIN_MAP_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        n_themes = len(data.get("themes", {}))
+        log.info("[valuechain] map v%s loaded: %d themes",
+                 data.get("version", "?"), n_themes)
+        return data
+    except Exception as exc:
+        log.warning("[valuechain] load failed: %s — fallback to legacy VALUECHAIN_MAP", exc)
+        return None
+
+
+def reload_valuechain_map() -> dict | None:
+    """JSON 수정 후 캐시 무효화 + 재로드."""
+    load_valuechain_map.cache_clear()
+    return load_valuechain_map()
+
+
+def get_all_segments(theme_id: str | None = None):
+    """모든 세그먼트 yield: (theme_id, layer_id, segment_id, segment_data)."""
+    data = load_valuechain_map()
+    if not data:
+        return
+    themes = data.get("themes", {})
+    targets = {theme_id: themes[theme_id]} if theme_id and theme_id in themes else themes
+    for tid, theme in targets.items():
+        for lid, layer in (theme.get("layers") or {}).items():
+            for sid, seg in (layer.get("segments") or {}).items():
+                yield tid, lid, sid, seg
+
+
+def get_all_stocks_in_map() -> tuple[list, list]:
+    """JSON 맵에 등록된 모든 종목 코드 (KR, US) 중복 제거 반환."""
+    kr, us = set(), set()
+    for _, _, _, seg in get_all_segments():
+        kr.update(seg.get("stocks_kr") or [])
+        us.update(seg.get("stocks_us") or [])
+    return sorted(kr), sorted(us)
 
 
 # ============================================================
@@ -593,3 +643,457 @@ def calculate_layer_heat() -> dict:
     except Exception:
         pass
     return result
+
+
+# ============================================================
+# 반영도 점수 (Reflection Score) — Step 2
+# 가중치: 52주 0.5 / PER (또는 EV/EBITDA) 0.25 / heat 0.25
+# 캐시: 30분
+# ============================================================
+import sqlite3 as _sqlite3
+
+_REFLECTION_CACHE: dict = {}
+_REFLECTION_TTL = 1800  # 30분
+
+DB_PATH_VC = BASE_DIR / "db" / "dashboard.db"
+
+
+def _vc_db_conn():
+    conn = _sqlite3.connect(str(DB_PATH_VC), timeout=10)
+    conn.row_factory = _sqlite3.Row
+    return conn
+
+
+def _is_kr_code(code: str) -> bool:
+    return bool(code) and code.isdigit() and len(code) == 6
+
+
+# ── 점수 변환 함수 ──────────────────────────────
+def _normalize_52week(return_pct):
+    """52주 수익률 → 0~100 점수.
+    -30%↓: 0 (미반영) / +30%: 50 (중간) / +100%↑: 100 (반영)."""
+    if return_pct is None:
+        return 50.0
+    if return_pct <= -30:
+        return 0.0
+    if return_pct <= 30:
+        return (return_pct + 30) / 60 * 50
+    if return_pct <= 100:
+        return 50 + (return_pct - 30) / 70 * 50
+    return 100.0
+
+
+def _per_to_score(per):
+    """PER → 0~100 점수 (낮을수록 미반영)."""
+    if per is None or per <= 0 or per > 200:
+        return None
+    if per <= 5:
+        return 0.0
+    if per <= 15:
+        return (per - 5) / 10 * 50
+    if per <= 30:
+        return 50 + (per - 15) / 15 * 50
+    return 100.0
+
+
+def _ev_ebitda_to_score(ev_ebitda):
+    """EV/EBITDA → 0~100 점수."""
+    if ev_ebitda is None:
+        return None
+    if ev_ebitda <= 0:
+        return 50.0
+    if ev_ebitda <= 8:
+        return ev_ebitda / 8 * 25
+    if ev_ebitda <= 15:
+        return 25 + (ev_ebitda - 8) / 7 * 25
+    if ev_ebitda <= 30:
+        return 50 + (ev_ebitda - 15) / 15 * 50
+    return 100.0
+
+
+# ── 데이터 조회 ──────────────────────────────
+def calculate_52week_return(code):
+    """code의 보유 OHLCV 범위 내 최장 기간 수익률 (%) 반환.
+    DB가 6개월치만 있으면 6개월 수익률, 1년 있으면 1년."""
+    try:
+        with _vc_db_conn() as conn:
+            cur = conn.cursor()
+            # 최신 종가
+            row = cur.execute(
+                "SELECT close FROM ohlcv WHERE code = ? AND close IS NOT NULL "
+                "ORDER BY date DESC LIMIT 1", (code,)
+            ).fetchone()
+            if not row or not row["close"]:
+                return None
+            current = float(row["close"])
+            # 가장 오래된 종가 (250일 우선, 없으면 최장)
+            row245 = cur.execute(
+                "SELECT close FROM ohlcv WHERE code = ? AND close IS NOT NULL "
+                "ORDER BY date DESC LIMIT 1 OFFSET 245", (code,)
+            ).fetchone()
+            if row245 and row245["close"]:
+                prev = float(row245["close"])
+            else:
+                row_oldest = cur.execute(
+                    "SELECT close FROM ohlcv WHERE code = ? AND close IS NOT NULL "
+                    "ORDER BY date ASC LIMIT 1", (code,)
+                ).fetchone()
+                if not row_oldest or not row_oldest["close"]:
+                    return None
+                prev = float(row_oldest["close"])
+            if prev <= 0:
+                return None
+            return (current / prev - 1) * 100
+    except Exception as exc:
+        log.debug("[52w] %s: %s", code, exc)
+        return None
+
+
+def _get_kr_per(code):
+    """KR 종목 PER (financial 테이블 forward 우선)."""
+    try:
+        with _vc_db_conn() as conn:
+            r = conn.execute(
+                "SELECT per, estimate_per FROM financial WHERE code = ?", (code,)
+            ).fetchone()
+        if not r:
+            return None
+        # estimate_per (forward) 우선, 없으면 trailing per
+        for k in ("estimate_per", "per"):
+            v = r[k]
+            if v and 0 < v <= 200:
+                return float(v)
+        return None
+    except Exception:
+        return None
+
+
+def _get_us_yinfo(code):
+    """US 종목의 yinfo_cache 파싱."""
+    try:
+        with _vc_db_conn() as conn:
+            r = conn.execute(
+                "SELECT info_json FROM yinfo_cache WHERE symbol = ?", (code,)
+            ).fetchone()
+        if not r or not r["info_json"]:
+            return None
+        return json.loads(r["info_json"])
+    except Exception:
+        return None
+
+
+def calculate_per_score(code):
+    """PER 점수 (KR=financial / US=yinfo forwardPE)."""
+    if _is_kr_code(code):
+        per = _get_kr_per(code)
+    else:
+        info = _get_us_yinfo(code)
+        per = (info or {}).get("forwardPE") or (info or {}).get("trailingPE") if info else None
+    return _per_to_score(per), per
+
+
+def calculate_ev_ebitda_score(code):
+    """EV/EBITDA 점수 (US yinfo 기반, KR은 데이터 부족 → None)."""
+    if _is_kr_code(code):
+        return None, None  # KR은 yinfo에 없음
+    info = _get_us_yinfo(code)
+    if not info:
+        return None, None
+    ev = info.get("enterpriseValue")
+    ebitda = info.get("ebitda")
+    if ebitda is None or ev is None:
+        return None, None
+    if ebitda <= 0:
+        # 적자 → 75점 (상당 반영)
+        return 75.0, None
+    ev_ebitda = ev / ebitda
+    return _ev_ebitda_to_score(ev_ebitda), ev_ebitda
+
+
+def _get_overhang_dilution(code):
+    """오버행 물량(전환사채/BW/유증 예정) 시총 환산 — Step 2.x 강화 예정."""
+    return 0.0
+
+
+# ── 메인 점수 ──────────────────────────────
+def calculate_reflection_score(code, segment_heat=None):
+    """종목 반영도 0~100. 낮을수록 미반영 🔥."""
+    cache_key = f"{code}_{int(round(segment_heat or 0))}"
+    cached = _REFLECTION_CACHE.get(cache_key)
+    if cached and (time.time() - cached["ts"]) < _REFLECTION_TTL:
+        return cached["data"]
+
+    # 1) 52주 수익률
+    return_pct = calculate_52week_return(code)
+    score_52w = _normalize_52week(return_pct)
+
+    # 2) PER → EV/EBITDA fallback
+    score_val, val_raw = calculate_per_score(code)
+    val_method = "PER"
+    if score_val is None:
+        score_val, val_raw = calculate_ev_ebitda_score(code)
+        val_method = "EV/EBITDA"
+    if score_val is None:
+        score_val, val_method = 50.0, "N/A"
+
+    # 3) heat
+    score_heat = max(0.0, min(100.0, float(segment_heat) if segment_heat is not None else 50.0))
+
+    # 가중 평균
+    final = round(score_52w * 0.5 + score_val * 0.25 + score_heat * 0.25, 1)
+    final = max(0, min(100, final))
+
+    if final < 30:    label, badge = "미반영", "🔥"
+    elif final < 50:  label, badge = "부분 미반영", "💎"
+    elif final < 70:  label, badge = "부분 반영", "⚡"
+    elif final < 85:  label, badge = "상당 반영", "🟠"
+    else:             label, badge = "과열", "🔴"
+
+    result = {
+        "stock_code": code,
+        "score":      final,
+        "label":      label,
+        "badge":      badge,
+        "breakdown": {
+            "return_52w_pct":   round(return_pct, 2) if return_pct is not None else None,
+            "score_52w":        round(score_52w, 1),
+            "score_valuation":  round(score_val, 1),
+            "valuation_raw":    round(val_raw, 2) if isinstance(val_raw, (int, float)) else None,
+            "valuation_method": val_method,
+            "score_heat":       round(score_heat, 1),
+        },
+    }
+    _REFLECTION_CACHE[cache_key] = {"ts": time.time(), "data": result}
+    return result
+
+
+USD_KRW_FALLBACK = 1450.0  # 환율 (실시간 조회 실패 시)
+
+
+def _parse_korean_market_cap(text):
+    """한국식 시총 문자열 → float (원).
+    예: "1,262조 7,962억원" → 1.2627962e15
+        "5,847억원" → 5.847e11
+        "12345" (숫자만) → 12345
+    """
+    if text is None:
+        return 0.0
+    s = str(text).strip().replace(",", "").replace(" ", "").replace("원", "")
+    if not s:
+        return 0.0
+    # 순수 숫자
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    total = 0.0
+    # 조 단위 (1조 = 1e12)
+    if "조" in s:
+        parts = s.split("조", 1)
+        try:
+            total += float(parts[0]) * 1e12
+        except ValueError:
+            return 0.0
+        s = parts[1] if len(parts) > 1 else ""
+    # 억 단위 (1억 = 1e8)
+    if "억" in s:
+        parts = s.split("억", 1)
+        try:
+            total += float(parts[0]) * 1e8 if parts[0] else 0
+        except ValueError:
+            pass
+        s = parts[1] if len(parts) > 1 else ""
+    # 만 단위 (1만 = 1e4)
+    if "만" in s:
+        parts = s.split("만", 1)
+        try:
+            total += float(parts[0]) * 1e4 if parts[0] else 0
+        except ValueError:
+            pass
+    return total
+
+
+def _get_usd_krw_rate():
+    """현재 USD/KRW 환율 (macro_data.json 캐시). 실패 시 1450 fallback."""
+    try:
+        md_path = CACHE_DIR / "macro_data.json"
+        if md_path.exists():
+            md = json.loads(md_path.read_text(encoding="utf-8"))
+            for it in md.get("items", []):
+                if it.get("name") == "USD/KRW":
+                    v = it.get("value")
+                    if v and v > 0:
+                        return float(v)
+    except Exception:
+        pass
+    return USD_KRW_FALLBACK
+
+
+def get_market_cap_vc(code):
+    """종목 시가총액 (원 단위 float, 모든 시장 KRW로 통일).
+    우선순위: stocks.market_cap → financial.market_cap (KR 파싱) → yinfo.marketCap × 환율 (US)."""
+    try:
+        with _vc_db_conn() as conn:
+            # 1) stocks 테이블
+            r = conn.execute(
+                "SELECT market_cap FROM stocks WHERE code = ?", (code,)
+            ).fetchone()
+            if r and r["market_cap"]:
+                try:
+                    cap = float(r["market_cap"])
+                    # US 종목이면 USD 단위로 저장된 경우가 있어 환율 적용
+                    is_us = not (code.isdigit() and len(code) == 6)
+                    if cap > 0:
+                        return cap * _get_usd_krw_rate() if is_us else cap
+                except (TypeError, ValueError):
+                    pass
+
+            # 2) financial 테이블 (KR 한국식 문자열)
+            if code.isdigit() and len(code) == 6:
+                r = conn.execute(
+                    "SELECT market_cap FROM financial WHERE code = ?", (code,)
+                ).fetchone()
+                if r and r["market_cap"]:
+                    cap = _parse_korean_market_cap(r["market_cap"])
+                    if cap > 0:
+                        return cap
+
+            # 3) yinfo_cache (US, USD → KRW 환산)
+            r = conn.execute(
+                "SELECT info_json FROM yinfo_cache WHERE symbol = ?", (code,)
+            ).fetchone()
+            if r and r["info_json"]:
+                try:
+                    info = json.loads(r["info_json"])
+                    cap_usd = info.get("marketCap")
+                    if cap_usd and cap_usd > 0:
+                        return float(cap_usd) * _get_usd_krw_rate()
+                except Exception:
+                    pass
+        return 0.0
+    except Exception as exc:
+        log.debug("[market_cap] %s: %s", code, exc)
+        return 0.0
+
+
+# ── 세그먼트/레이어/테마 집계 ──────────────────
+# ── 헤드라인 풀 캐시 (segment heat 계산용) ──
+_HEADLINE_POOL: dict = {"text": "", "ts": 0, "count": 0}
+_HEADLINE_TTL = 1800  # 30분
+
+
+def _get_headline_pool():
+    """뉴스 헤드라인 풀 (소문자 결합 텍스트). 30분 캐시."""
+    now = time.time()
+    if _HEADLINE_POOL["text"] and (now - _HEADLINE_POOL["ts"]) < _HEADLINE_TTL:
+        return _HEADLINE_POOL["text"], _HEADLINE_POOL["count"]
+    headlines = _fetch_naver_news() + _fetch_finnhub_news()
+    text = " ".join(h.lower() for h in headlines if h)
+    _HEADLINE_POOL["text"] = text
+    _HEADLINE_POOL["count"] = len(headlines)
+    _HEADLINE_POOL["ts"] = now
+    log.info("[headline_pool] %d headlines, %d chars", len(headlines), len(text))
+    return text, len(headlines)
+
+
+def _calculate_segment_heat_v2(segment_data):
+    """세그먼트 heat 계산 (0~100).
+    전략:
+      1) 헤드라인 풀에서 keyword 매칭 횟수 (log 스케일)
+      2) bottleneck 세그먼트는 +10 보너스
+      3) 풀 비어 있으면 키워드 풍부도 폴백
+    """
+    import math
+    kws = segment_data.get("keywords") or []
+    if not kws:
+        return 50.0
+    text, n = _get_headline_pool()
+    if not text:
+        # 폴백: 키워드 수 기반
+        return min(60.0, max(20.0, len(kws) * 1.5))
+
+    # 키워드 매칭 (상위 30개만 사용 — 너무 일반적인 키워드는 노이즈)
+    sample_kws = kws[:30]
+    hits = sum(text.count(kw.lower()) for kw in sample_kws if len(kw) >= 2)
+
+    # 로그 스케일: 0건 → 10, 5건 → 35, 20건 → 60, 50건 → 80, 100건+ → 95
+    if hits == 0:
+        heat = 10.0
+    else:
+        heat = 10 + math.log(hits + 1) * 18
+        heat = min(95.0, max(10.0, heat))
+
+    # 병목 보너스 (구조적 강세)
+    if segment_data.get("is_bottleneck"):
+        heat = min(100.0, heat + 10)
+
+    return heat
+
+
+def aggregate_segment_score(theme_id, layer_id, segment_id, segment_data):
+    """세그먼트 점수 = 시총 가중 평균 반영도."""
+    seg_heat = _calculate_segment_heat_v2(segment_data)
+    stocks = (segment_data.get("stocks_kr") or []) + (segment_data.get("stocks_us") or [])
+    if not stocks:
+        return {"segment_score": 50.0, "heat": round(seg_heat, 1),
+                "is_bottleneck": segment_data.get("is_bottleneck", False),
+                "stock_count": 0, "stocks": []}
+
+    weighted, total_cap = 0.0, 0.0
+    rows = []
+    for code in stocks:
+        cap = get_market_cap_vc(code) or 1.0
+        refl = calculate_reflection_score(code, seg_heat)
+        weighted += refl["score"] * cap
+        total_cap += cap
+        rows.append({"code": code, "market_cap": cap, **refl})
+
+    seg_score = (weighted / total_cap) if total_cap > 0 else 50.0
+    return {
+        "segment_score":  round(seg_score, 1),
+        "heat":           round(seg_heat, 1),
+        "is_bottleneck":  segment_data.get("is_bottleneck", False),
+        "stock_count":    len(stocks),
+        "stocks":         sorted(rows, key=lambda x: x["score"]),  # 미반영 우선
+    }
+
+
+def aggregate_theme_overview(theme_id):
+    """테마 전체 개요 (레이어/세그먼트 요약, 종목 디테일 제외)."""
+    data = load_valuechain_map()
+    if not data or theme_id not in (data.get("themes") or {}):
+        return None
+    theme = data["themes"][theme_id]
+    layers = theme.get("layers") or {}
+
+    layer_summary = {}
+    for lid, ldata in layers.items():
+        seg_brief = []
+        for sid, sdata in (ldata.get("segments") or {}).items():
+            agg = aggregate_segment_score(theme_id, lid, sid, sdata)
+            seg_brief.append({
+                "segment_id":    sid,
+                "name_kr":       sdata.get("name_kr"),
+                "name_en":       sdata.get("name_en"),
+                "segment_score": agg["segment_score"],
+                "heat":          agg["heat"],
+                "is_bottleneck": agg["is_bottleneck"],
+                "stock_count":   agg["stock_count"],
+            })
+        avg = (sum(s["segment_score"] for s in seg_brief) / len(seg_brief)) if seg_brief else 50
+        layer_summary[lid] = {
+            "name_kr":         ldata.get("name_kr"),
+            "name_en":         ldata.get("name_en"),
+            "order":           ldata.get("order", 0),
+            "layer_score":     round(avg, 1),
+            "segment_count":   len(seg_brief),
+            "has_bottleneck":  any(s["is_bottleneck"] for s in seg_brief),
+            "segments_brief":  seg_brief,
+        }
+    return {
+        "theme_id":   theme_id,
+        "name":       theme.get("name"),
+        "color":      theme.get("color"),
+        "layer_count": len(layers),
+        "layers":     dict(sorted(layer_summary.items(), key=lambda x: x[1]["order"])),
+    }

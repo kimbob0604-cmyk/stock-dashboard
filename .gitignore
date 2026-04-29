@@ -12,11 +12,18 @@ env/
 
 # 데이터 캐시 (런타임 생성)
 cache/
-data.json
+# data.json은 추적 — 맥북 cron이 매일 18시 git push로 Render에 전달 (~110KB)
+# (Render는 자동 fetcher 비활성화 상태이므로 git push가 유일한 갱신 경로)
 
 # SQLite 런타임 DB (Render에서 부팅 시 새로 생성/마이그레이션, ~230MB)
 db/dashboard.db
 db/dashboard.db-*
+db/dashboard.db.backup_*
+db/llm_cache.db
+db/llm_cache.db-*
+
+# valuechain_map.json 백업 (정리 작업 산출물)
+data/valuechain_map.json.bak.*
 
 # 백업 파일
 *.bak

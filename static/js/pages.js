@@ -886,7 +886,7 @@ const PAGE_RENDERERS = {
   dashboard:  () => { renderDashboardHome(); },
   pnljournal: () => { renderPnlJournalPage(); },
   globalmacro:() => { renderGlobalMacroPage(); },
-  valuechain: () => { renderValuechainPage(); },
+  valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
 function navigateTo(page) {
@@ -1011,7 +1011,7 @@ async function renderWatchlistPage() {
     const themeStr = stock && stock.theme ? `<span class="wl-theme">${_escHtml(stock.theme)}</span>` : '';
     return `<div class="watchlist-card" data-code="${sc}" data-name="${sn}">
       <button class="watchlist-star star-active wl-card-star" title="제거">★</button>
-      <div class="wl-name">${sn}${_marketBadgeFromItem({code: w.code, market: w.market})}</div>
+      <div class="wl-name">${sn}${_marketBadgeFromItem({code: item.code, market: item.market})}</div>
       <div class="wl-code">${sc} ${themeStr}</div>
       <div class="wl-card-bottom">
         <span class="wl-pct" style="color:${col}">${chg == null ? '—' : sign + chg.toFixed(2) + '%'}</span>
@@ -6276,3 +6276,551 @@ function _renderValuechain(data, box) {
     });
   });
 }
+
+// ============================================================
+// 밸류체인 v2 — 3패널 드릴다운 (Step 3)
+// ============================================================
+const VC2_STATE = {
+  themes: [],
+  currentTheme: null,
+  currentLayer: null,
+  currentSegment: null,
+  layerData: null,
+  segmentData: null,
+  loading: false,
+  filterReflection: 'all',
+  filterMarket: 'all',
+};
+
+function vc2BadgeColor(score) {
+  if (score < 30) return '#3b82f6';
+  if (score < 50) return '#06b6d4';
+  if (score < 70) return '#f59e0b';
+  if (score < 85) return '#f97316';
+  return '#ef4444';
+}
+
+function vc2BadgeLabel(score) {
+  if (score < 30) return { label: '미반영', emoji: '🔥' };
+  if (score < 50) return { label: '부분 미반영', emoji: '💎' };
+  if (score < 70) return { label: '부분 반영', emoji: '⚡' };
+  if (score < 85) return { label: '상당 반영', emoji: '🟠' };
+  return { label: '과열', emoji: '🔴' };
+}
+
+function vc2HeatBar(heat) {
+  const pct = Math.max(0, Math.min(100, heat || 0));
+  return `
+    <div class="vc2-heat-bar">
+      <div class="vc2-heat-fill" style="width:${pct}%"></div>
+    </div>
+    <span class="vc2-heat-text">heat ${pct.toFixed(0)}</span>
+  `;
+}
+
+async function renderValuechain2Page() {
+  const root = document.getElementById('valuechain-view');
+  if (!root) return;
+
+  root.innerHTML = `
+    <div class="vc2-container">
+      <div class="vc2-header">
+        <div class="vc2-toolbar">
+          <div class="vc2-theme-tabs" id="vc2-theme-tabs"></div>
+          <div class="vc2-filters">
+            <select id="vc2-filter-reflection" class="vc2-select" title="반영도 필터">
+              <option value="all">전체</option>
+              <option value="unreflected">🔥 미반영만</option>
+              <option value="bottleneck">★ 병목만</option>
+            </select>
+            <select id="vc2-filter-market" class="vc2-select" title="시장 필터">
+              <option value="all">KR + US</option>
+              <option value="kr">KR만</option>
+              <option value="us">US만</option>
+            </select>
+            <button class="vc2-refresh-btn" onclick="vc2Refresh()" title="캐시 갱신">↻</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="vc2-three-panel">
+        <div class="vc2-panel vc2-panel-layers" id="vc2-panel-layers">
+          <div class="vc2-panel-title">레이어</div>
+          <div class="vc2-loading">테마 로딩 중...</div>
+        </div>
+        <div class="vc2-panel vc2-panel-segments" id="vc2-panel-segments">
+          <div class="vc2-panel-title">세그먼트</div>
+          <div class="vc2-empty">레이어를 선택하세요</div>
+        </div>
+        <div class="vc2-panel vc2-panel-stocks" id="vc2-panel-stocks">
+          <div class="vc2-panel-title">종목 · 반영도</div>
+          <div class="vc2-empty">세그먼트를 선택하세요</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('vc2-filter-reflection')?.addEventListener('change', (e) => {
+    VC2_STATE.filterReflection = e.target.value;
+    vc2RenderSegmentsPanel();
+    vc2RenderStocksPanel();
+  });
+  document.getElementById('vc2-filter-market')?.addEventListener('change', (e) => {
+    VC2_STATE.filterMarket = e.target.value;
+    vc2RenderStocksPanel();
+  });
+
+  await vc2LoadThemes();
+}
+
+async function vc2LoadThemes() {
+  try {
+    const resp = await fetch('/api/valuechain2/themes');
+    const data = await resp.json();
+    VC2_STATE.themes = data.themes || [];
+    vc2RenderThemeTabs();
+    if (VC2_STATE.themes.length > 0) {
+      await vc2SelectTheme(VC2_STATE.themes[0].theme_id);
+    }
+  } catch (e) {
+    console.error('vc2 themes load error:', e);
+    const tabs = document.getElementById('vc2-theme-tabs');
+    if (tabs) tabs.innerHTML = '<div class="vc2-error">테마 로딩 실패</div>';
+  }
+}
+
+function vc2RenderThemeTabs() {
+  const tabs = document.getElementById('vc2-theme-tabs');
+  if (!tabs) return;
+  tabs.innerHTML = VC2_STATE.themes.map(t => `
+    <button class="vc2-theme-tab ${VC2_STATE.currentTheme === t.theme_id ? 'active' : ''}"
+            data-theme="${_escHtml(t.theme_id)}"
+            style="--theme-color:${_escHtml(t.color || '#3b82f6')}"
+            onclick="vc2SelectTheme('${_escHtml(t.theme_id)}')">
+      <span class="vc2-tab-dot" style="background:${_escHtml(t.color || '#3b82f6')}"></span>
+      <span>${_escHtml(t.name || t.theme_id)}</span>
+      <span class="vc2-tab-count">${t.layer_count || 0}</span>
+    </button>
+  `).join('');
+}
+
+async function vc2SelectTheme(themeId) {
+  if (VC2_STATE.loading) return;
+  VC2_STATE.loading = true;
+  VC2_STATE.currentTheme = themeId;
+  VC2_STATE.currentLayer = null;
+  VC2_STATE.currentSegment = null;
+  VC2_STATE.layerData = null;
+  VC2_STATE.segmentData = null;
+
+  vc2RenderThemeTabs();
+  const lp = document.getElementById('vc2-panel-layers');
+  if (lp) lp.innerHTML = `<div class="vc2-panel-title">레이어</div><div class="vc2-loading">로딩 중...</div>`;
+  const sp = document.getElementById('vc2-panel-segments');
+  if (sp) sp.innerHTML = `<div class="vc2-panel-title">세그먼트</div><div class="vc2-empty">레이어를 선택하세요</div>`;
+  const tp = document.getElementById('vc2-panel-stocks');
+  if (tp) tp.innerHTML = `<div class="vc2-panel-title">종목 · 반영도</div><div class="vc2-empty">세그먼트를 선택하세요</div>`;
+
+  try {
+    const resp = await fetch(`/api/valuechain2/layers/${themeId}`);
+    const data = await resp.json();
+    VC2_STATE.layerData = data;
+    vc2RenderLayersPanel();
+    const layerIds = Object.keys(data.layers || {});
+    if (layerIds.length > 0) {
+      vc2SelectLayer(layerIds[0]);
+    }
+  } catch (e) {
+    console.error('vc2 layers load error:', e);
+    const lp2 = document.getElementById('vc2-panel-layers');
+    if (lp2) lp2.innerHTML = `<div class="vc2-panel-title">레이어</div><div class="vc2-error">레이어 로딩 실패</div>`;
+  } finally {
+    VC2_STATE.loading = false;
+  }
+}
+
+function vc2RenderLayersPanel() {
+  const panel = document.getElementById('vc2-panel-layers');
+  if (!panel || !VC2_STATE.layerData) return;
+  const layers = VC2_STATE.layerData.layers || {};
+  const sortedIds = Object.keys(layers).sort((a, b) => (layers[a].order || 0) - (layers[b].order || 0));
+
+  panel.innerHTML = `
+    <div class="vc2-panel-title">레이어 <span class="vc2-count">${sortedIds.length}</span></div>
+    <div class="vc2-layer-list">
+      ${sortedIds.map(lid => {
+        const l = layers[lid];
+        const score = l.layer_score || 50;
+        const badgeColor = vc2BadgeColor(score);
+        const isActive = VC2_STATE.currentLayer === lid;
+        const segs = l.segments_brief || [];
+        const avgHeat = segs.length ? (segs.reduce((sum, s) => sum + (s.heat || 0), 0) / segs.length) : 0;
+        return `
+          <div class="vc2-layer-card ${isActive ? 'active' : ''}"
+               onclick="vc2SelectLayer('${_escHtml(lid)}')">
+            <div class="vc2-layer-head">
+              <div class="vc2-layer-name">
+                <span class="vc2-layer-en">${_escHtml(l.name_en || '')}</span>
+                <span class="vc2-layer-kr">${_escHtml(l.name_kr || lid)}${l.has_bottleneck ? ' <span class="vc2-bottleneck">★</span>' : ''}</span>
+              </div>
+              <div class="vc2-score-badge" style="background:${badgeColor}">
+                ${score.toFixed(0)}
+              </div>
+            </div>
+            ${vc2HeatBar(avgHeat)}
+            <div class="vc2-layer-meta">세그먼트 ${l.segment_count || 0}</div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function vc2SelectLayer(layerId) {
+  VC2_STATE.currentLayer = layerId;
+  VC2_STATE.currentSegment = null;
+  vc2RenderLayersPanel();
+  vc2RenderSegmentsPanel();
+
+  if (!VC2_STATE.layerData) return;
+  const layer = VC2_STATE.layerData.layers[layerId];
+  if (layer && layer.segments_brief && layer.segments_brief.length > 0) {
+    const filtered = vc2FilterSegments(layer.segments_brief);
+    if (filtered.length > 0) {
+      vc2SelectSegment(filtered[0].segment_id);
+    } else {
+      const sp = document.getElementById('vc2-panel-stocks');
+      if (sp) sp.innerHTML = `<div class="vc2-panel-title">종목 · 반영도</div><div class="vc2-empty">필터에 해당하는 세그먼트가 없습니다</div>`;
+    }
+  }
+}
+
+function vc2FilterSegments(segments) {
+  let result = segments.slice();
+  if (VC2_STATE.filterReflection === 'unreflected') {
+    result = result.filter(s => (s.segment_score || 50) < 50);
+  } else if (VC2_STATE.filterReflection === 'bottleneck') {
+    result = result.filter(s => s.is_bottleneck);
+  }
+  return result;
+}
+
+function vc2RenderSegmentsPanel() {
+  const panel = document.getElementById('vc2-panel-segments');
+  if (!panel) return;
+  if (!VC2_STATE.layerData || !VC2_STATE.currentLayer) {
+    panel.innerHTML = `<div class="vc2-panel-title">세그먼트</div><div class="vc2-empty">레이어를 선택하세요</div>`;
+    return;
+  }
+  const layer = VC2_STATE.layerData.layers[VC2_STATE.currentLayer];
+  if (!layer) return;
+  const segments = vc2FilterSegments(layer.segments_brief || []);
+
+  if (segments.length === 0) {
+    panel.innerHTML = `
+      <div class="vc2-panel-title">세그먼트 · ${_escHtml(layer.name_kr || '')}</div>
+      <div class="vc2-empty">필터 조건에 맞는 세그먼트 없음</div>
+    `;
+    return;
+  }
+
+  panel.innerHTML = `
+    <div class="vc2-panel-title">세그먼트 <span class="vc2-count">${segments.length}</span></div>
+    <div class="vc2-layer-context">${_escHtml(layer.name_en || '')} / ${_escHtml(layer.name_kr || '')}</div>
+    <div class="vc2-segment-list">
+      ${segments.map(s => {
+        const score = s.segment_score || 50;
+        const badgeColor = vc2BadgeColor(score);
+        const isActive = VC2_STATE.currentSegment === s.segment_id;
+        const labelInfo = vc2BadgeLabel(score);
+        return `
+          <div class="vc2-segment-card ${isActive ? 'active' : ''}"
+               onclick="vc2SelectSegment('${_escHtml(s.segment_id)}')">
+            <div class="vc2-segment-head">
+              <div class="vc2-segment-name">
+                <span class="vc2-segment-en">${_escHtml(s.name_en || '')}</span>
+                <span class="vc2-segment-kr">${_escHtml(s.name_kr || s.segment_id)}${s.is_bottleneck ? ' <span class="vc2-bottleneck">★ 병목</span>' : ''}</span>
+              </div>
+              <div class="vc2-score-badge" style="background:${badgeColor}">
+                ${labelInfo.emoji} ${score.toFixed(0)}
+              </div>
+            </div>
+            ${vc2HeatBar(s.heat || 0)}
+            <div class="vc2-segment-meta">${labelInfo.label} · 종목 ${s.stock_count || 0}</div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+async function vc2SelectSegment(segmentId) {
+  VC2_STATE.currentSegment = segmentId;
+  vc2RenderSegmentsPanel();
+
+  const panel = document.getElementById('vc2-panel-stocks');
+  if (panel) panel.innerHTML = `<div class="vc2-panel-title">종목 · 반영도</div><div class="vc2-loading">로딩 중...</div>`;
+
+  try {
+    const url = `/api/valuechain2/segment/${VC2_STATE.currentTheme}/${VC2_STATE.currentLayer}/${segmentId}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    VC2_STATE.segmentData = data;
+    vc2RenderStocksPanel();
+  } catch (e) {
+    console.error('vc2 segment load error:', e);
+    if (panel) panel.innerHTML = `<div class="vc2-panel-title">종목 · 반영도</div><div class="vc2-error">로딩 실패</div>`;
+  }
+}
+
+function vc2RenderStocksPanel() {
+  const panel = document.getElementById('vc2-panel-stocks');
+  if (!panel) return;
+  if (!VC2_STATE.segmentData) {
+    panel.innerHTML = `<div class="vc2-panel-title">종목 · 반영도</div><div class="vc2-empty">세그먼트를 선택하세요</div>`;
+    return;
+  }
+  const sd = VC2_STATE.segmentData;
+  let stocks = (sd.stocks || []).slice();
+
+  if (VC2_STATE.filterMarket === 'kr') {
+    stocks = stocks.filter(s => /^\d{6}$/.test(s.code));
+  } else if (VC2_STATE.filterMarket === 'us') {
+    stocks = stocks.filter(s => !/^\d{6}$/.test(s.code));
+  }
+
+  const segScore = sd.segment_score || 50;
+  const segColor = vc2BadgeColor(segScore);
+
+  const summaryHtml = `
+    <div class="vc2-segment-summary">
+      <div class="vc2-segment-summary-row">
+        <div>
+          <div class="vc2-segment-summary-name">
+            ${_escHtml(sd.name_kr || '')}
+            ${sd.is_bottleneck ? '<span class="vc2-bottleneck">★ 병목</span>' : ''}
+          </div>
+          <div class="vc2-segment-summary-score" style="background:${segColor}">
+            세그먼트 ${segScore.toFixed(0)} · 시총 가중 평균
+          </div>
+          <div class="vc2-segment-summary-meta">
+            heat ${(sd.heat || 0).toFixed(0)} · 키워드 ${sd.keyword_count || 0}개 · 종목 ${sd.stock_count || 0}
+          </div>
+        </div>
+        <button class="vc2-add-btn" onclick="vc2PromptAddStock()" title="종목 편입">＋ 편입</button>
+      </div>
+      <div class="vc2-score-legend">
+        <span class="vc2-score-legend-title">점수 구성:</span>
+        <span class="vc2-legend-item"><b>52주(50%)</b> 주가 상승 = 시장 반영도 ↑</span>
+        <span class="vc2-legend-item"><b>밸류에이션(25%)</b> PER/EV-EBITDA 낮음 = 미반영 ↑</span>
+        <span class="vc2-legend-item"><b>heat(25%)</b> 뉴스 열기 = 시장 반영 가속</span>
+      </div>
+    </div>
+  `;
+
+  if (stocks.length === 0) {
+    panel.innerHTML = `
+      <div class="vc2-panel-title">종목 · ${_escHtml(sd.name_kr || '')}</div>
+      ${summaryHtml}
+      <div class="vc2-empty">필터 조건에 맞는 종목 없음</div>
+    `;
+    return;
+  }
+
+  panel.innerHTML = `
+    <div class="vc2-panel-title">종목 <span class="vc2-count">${stocks.length}</span></div>
+    ${summaryHtml}
+    <div class="vc2-stock-list">
+      ${stocks.map(s => vc2RenderStockCard(s)).join('')}
+    </div>
+  `;
+}
+
+function vc2RenderStockCard(s) {
+  const score = s.score || 50;
+  const badgeColor = vc2BadgeColor(score);
+  const isUS = !/^\d{6}$/.test(s.code);
+  const marketBadge = isUS ? 'US' : 'KR';
+  const market = isUS ? 'us' : 'kr';
+  const bd = s.breakdown || {};
+  const ret52w = bd.return_52w_pct;
+  const ret52wText = (ret52w !== null && ret52w !== undefined)
+    ? `${ret52w >= 0 ? '+' : ''}${Number(ret52w).toFixed(1)}%`
+    : '–';
+  const ret52wColor = (ret52w || 0) >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+  const valMethod = bd.valuation_method || 'VAL';
+  const valScore = bd.score_valuation;
+  const valRaw = bd.valuation_raw;
+  const score52w = bd.score_52w;
+  const scoreHeat = bd.score_heat;
+  const cap = s.market_cap || 0;
+  const capText = cap > 1e12 ? `${(cap / 1e12).toFixed(1)}조`
+                : cap > 1e8  ? `${(cap / 1e8).toFixed(0)}억` : '-';
+
+  // 가중치 분해 — title 툴팁 + expandable 섹션
+  const fmtScore = v => (v !== undefined && v !== null) ? Number(v).toFixed(0) : '-';
+  const valRawText = (valRaw !== undefined && valRaw !== null) ? Number(valRaw).toFixed(1) : '-';
+  const w52 = score52w !== undefined ? (score52w * 0.5).toFixed(1) : '?';
+  const wVal = valScore !== undefined ? (valScore * 0.25).toFixed(1) : '?';
+  const wHeat = scoreHeat !== undefined ? (scoreHeat * 0.25).toFixed(1) : '?';
+
+  return `
+    <div class="vc2-stock-card" data-code="${_escHtml(s.code)}" data-name="${_escHtml(s.name || '')}" data-market="${market}">
+      <div class="vc2-stock-head" onclick="vc2OpenStockChart('${_escHtml(s.code)}', '${_escHtml(s.name || '')}', '${market}')">
+        <div class="vc2-stock-id">
+          <span class="vc2-market-badge ${market}">${marketBadge}</span>
+          <span class="vc2-stock-name">${_escHtml(s.name || s.code)}</span>
+          <span class="vc2-stock-code">${_escHtml(s.code)}</span>
+        </div>
+        <div class="vc2-stock-actions">
+          <div class="vc2-score-badge" style="background:${badgeColor}"
+               title="반영도 ${score.toFixed(1)} = 52주(${w52}) + ${valMethod}(${wVal}) + heat(${wHeat})">
+            ${s.badge || ''} ${score.toFixed(0)}
+          </div>
+          <button class="vc2-toggle-btn" onclick="event.stopPropagation(); vc2ToggleBreakdown(this)" title="점수 분해">▾</button>
+          <button class="vc2-remove-btn" onclick="event.stopPropagation(); vc2RemoveStock('${_escHtml(s.code)}', '${market}', '${_escHtml(s.name || s.code)}')" title="세그먼트에서 편출">✕</button>
+        </div>
+      </div>
+      <div class="vc2-stock-grid" onclick="vc2OpenStockChart('${_escHtml(s.code)}', '${_escHtml(s.name || '')}', '${market}')">
+        <div class="vc2-stock-cell" title="최근 52주 주가 수익률 (가중치 50%) — 높을수록 시장이 이미 반영">
+          <div class="vc2-cell-label">52주</div>
+          <div class="vc2-cell-value" style="color:${ret52wColor}">${ret52wText}</div>
+        </div>
+        <div class="vc2-stock-cell" title="${valMethod} 원시값 = ${valRawText} / 점수 ${fmtScore(valScore)} (가중치 25%) — 낮을수록 저평가">
+          <div class="vc2-cell-label">${_escHtml(valMethod)}</div>
+          <div class="vc2-cell-value">${valRawText}</div>
+        </div>
+        <div class="vc2-stock-cell" title="시가총액 (시총 가중 평균에 사용)">
+          <div class="vc2-cell-label">시총</div>
+          <div class="vc2-cell-value">${capText}</div>
+        </div>
+        <div class="vc2-stock-cell" title="반영도 라벨 — 미반영(<30) / 부분 미반영(<50) / 부분 반영(<70) / 상당 반영(<85) / 과열(≥85)">
+          <div class="vc2-cell-label">반영</div>
+          <div class="vc2-cell-value">${_escHtml(s.label || '-')}</div>
+        </div>
+      </div>
+      <div class="vc2-breakdown" style="display:none">
+        <div class="vc2-bd-row">
+          <span class="vc2-bd-label">52주 수익률</span>
+          <span class="vc2-bd-raw">${ret52wText}</span>
+          <div class="vc2-bd-bar"><div class="vc2-bd-fill" style="width:${fmtScore(score52w)}%;background:#3b82f6"></div></div>
+          <span class="vc2-bd-score">${fmtScore(score52w)} × 0.5 = <b>${w52}</b></span>
+        </div>
+        <div class="vc2-bd-row">
+          <span class="vc2-bd-label">${_escHtml(valMethod)}</span>
+          <span class="vc2-bd-raw">${valRawText}</span>
+          <div class="vc2-bd-bar"><div class="vc2-bd-fill" style="width:${fmtScore(valScore)}%;background:#06b6d4"></div></div>
+          <span class="vc2-bd-score">${fmtScore(valScore)} × 0.25 = <b>${wVal}</b></span>
+        </div>
+        <div class="vc2-bd-row">
+          <span class="vc2-bd-label">heat</span>
+          <span class="vc2-bd-raw">${fmtScore(scoreHeat)}</span>
+          <div class="vc2-bd-bar"><div class="vc2-bd-fill" style="width:${fmtScore(scoreHeat)}%;background:#f59e0b"></div></div>
+          <span class="vc2-bd-score">${fmtScore(scoreHeat)} × 0.25 = <b>${wHeat}</b></span>
+        </div>
+        <div class="vc2-bd-total">합계 = ${w52} + ${wVal} + ${wHeat} = <b>${score.toFixed(1)}</b></div>
+      </div>
+    </div>
+  `;
+}
+
+function vc2ToggleBreakdown(btn) {
+  const card = btn.closest('.vc2-stock-card');
+  if (!card) return;
+  const bd = card.querySelector('.vc2-breakdown');
+  if (!bd) return;
+  const open = bd.style.display !== 'none';
+  bd.style.display = open ? 'none' : 'block';
+  btn.textContent = open ? '▾' : '▴';
+}
+
+async function vc2RemoveStock(code, market, name) {
+  if (!VC2_STATE.currentTheme || !VC2_STATE.currentLayer || !VC2_STATE.currentSegment) return;
+  if (!confirm(`「${name} (${code})」을(를) 이 세그먼트에서 편출하시겠습니까?`)) return;
+  try {
+    const url = `/api/valuechain2/segment/${VC2_STATE.currentTheme}/${VC2_STATE.currentLayer}/${VC2_STATE.currentSegment}/manage`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', code, market }),
+    });
+    const result = await resp.json();
+    if (result.error) {
+      alert('편출 실패: ' + result.error);
+      return;
+    }
+    // 현재 테마 다시 로드 (점수 재계산)
+    await vc2SelectTheme(VC2_STATE.currentTheme);
+    // 같은 세그먼트로 복귀
+    if (VC2_STATE.layerData) {
+      vc2SelectLayer(VC2_STATE.currentLayer);
+    }
+  } catch (e) {
+    alert('편출 실패: ' + e.message);
+  }
+}
+
+async function vc2PromptAddStock() {
+  if (!VC2_STATE.currentTheme || !VC2_STATE.currentLayer || !VC2_STATE.currentSegment) {
+    alert('세그먼트를 먼저 선택하세요');
+    return;
+  }
+  const input = prompt('편입할 종목 코드를 입력하세요\n(KR: 6자리 숫자, 예: 005930 / US: 티커, 예: NVDA)');
+  if (!input) return;
+  const code = input.trim().toUpperCase();
+  if (!code) return;
+  const market = (/^\d{6}$/.test(code)) ? 'kr' : 'us';
+  try {
+    const url = `/api/valuechain2/segment/${VC2_STATE.currentTheme}/${VC2_STATE.currentLayer}/${VC2_STATE.currentSegment}/manage`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'add', code, market }),
+    });
+    const result = await resp.json();
+    if (result.error) {
+      alert('편입 실패: ' + result.error);
+      return;
+    }
+    if (result.status === 'noop') {
+      alert(result.message || '이미 편입되어 있습니다');
+      return;
+    }
+    await vc2SelectTheme(VC2_STATE.currentTheme);
+    if (VC2_STATE.layerData) {
+      vc2SelectLayer(VC2_STATE.currentLayer);
+    }
+  } catch (e) {
+    alert('편입 실패: ' + e.message);
+  }
+}
+
+function vc2OpenStockChart(code, name, market) {
+  if (typeof openChartPanel === 'function') {
+    openChartPanel(code, name || null, market || (/^\d{6}$/.test(code) ? 'kr' : 'us'));
+  } else {
+    console.warn('openChartPanel not found:', code);
+  }
+}
+
+async function vc2Refresh() {
+  try {
+    await fetch('/api/valuechain2/refresh', { method: 'POST' });
+    if (VC2_STATE.currentTheme) {
+      await vc2SelectTheme(VC2_STATE.currentTheme);
+    }
+  } catch (e) {
+    console.error('vc2 refresh error:', e);
+  }
+}
+
+// 전역 노출 (onclick 핸들러)
+window.renderValuechain2Page = renderValuechain2Page;
+window.vc2SelectTheme   = vc2SelectTheme;
+window.vc2SelectLayer   = vc2SelectLayer;
+window.vc2SelectSegment = vc2SelectSegment;
+window.vc2OpenStockChart = vc2OpenStockChart;
+window.vc2Refresh       = vc2Refresh;
+window.vc2ToggleBreakdown = vc2ToggleBreakdown;
+window.vc2RemoveStock   = vc2RemoveStock;
+window.vc2PromptAddStock = vc2PromptAddStock;
