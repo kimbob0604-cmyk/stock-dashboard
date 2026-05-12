@@ -604,6 +604,19 @@ def index():
     return send_file(BASE_DIR / "index.html")
 
 
+# ============================================================
+# Step 4-5-2-C: SPA URL path 라우팅 — index.html 폴백
+# 프론트의 parseUrlPath() 가 pathname 을 보고 해당 페이지 렌더.
+# ============================================================
+@app.route("/verification")
+@app.route("/verification/<code>")
+@app.route("/journal")
+@app.route("/journal/<int:journal_id>")
+@app.route("/ops/<page>")
+def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
+    return send_file(BASE_DIR / "index.html")
+
+
 def _overlay_live_prices_on_data(data: dict) -> dict:
     """data.json 의 themes.stocks[].change_pct 와 weighted_avg_pct 를
     naver_universe 실시간 값으로 덮어씀. 장중 실시간 반영용.

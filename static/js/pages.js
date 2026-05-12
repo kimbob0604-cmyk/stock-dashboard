@@ -890,7 +890,65 @@ const PAGE_RENDERERS = {
   valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
-function navigateTo(page) {
+// ─────────────────────────────────────────────────────────────────────────────
+// 4-5-2-C: SPA URL path 라우팅
+// 페이지 <-> URL 양방향 매핑. 직접 URL 진입 / 뒤로가기 / 북마크 모두 지원.
+// ─────────────────────────────────────────────────────────────────────────────
+const _URL_ROUTED_PAGES = new Set([
+  'verification', 'journal',
+  'ops-freshness', 'ops-cron', 'ops-health',
+]);
+
+/** page + params → pathname. URL 라우팅 대상이 아닌 페이지는 '/' 반환. */
+function pageToUrl(page, params) {
+  params = params || {};
+  if (page === 'verification') {
+    return params.code ? `/verification/${encodeURIComponent(params.code)}` : '/verification';
+  }
+  if (page === 'journal') {
+    return params.id ? `/journal/${encodeURIComponent(params.id)}` : '/journal';
+  }
+  if (page === 'ops-freshness') return '/ops/freshness';
+  if (page === 'ops-cron')      return '/ops/cron';
+  if (page === 'ops-health')    return '/ops/health';
+  return '/';
+}
+
+/** location.pathname → { page, params }. 인식 못 하면 page=null. */
+function parseUrlPath(pathname) {
+  pathname = pathname || window.location.pathname;
+  // /verification 또는 /verification/<code>
+  let m = pathname.match(/^\/verification(?:\/([^\/]+))?\/?$/);
+  if (m) return { page: 'verification', params: m[1] ? { code: decodeURIComponent(m[1]) } : {} };
+  // /journal 또는 /journal/<id>
+  m = pathname.match(/^\/journal(?:\/(\d+))?\/?$/);
+  if (m) return { page: 'journal', params: m[1] ? { id: parseInt(m[1], 10) } : {} };
+  // /ops/<page>
+  m = pathname.match(/^\/ops\/([a-z\-]+)\/?$/);
+  if (m) {
+    const sub = m[1];
+    if (['freshness', 'cron', 'health'].includes(sub)) {
+      return { page: `ops-${sub}`, params: {} };
+    }
+  }
+  return { page: null, params: {} };
+}
+
+/** 현재 URL을 보고 해당 페이지 렌더 (초기 진입 + popstate 핸들러용).
+ *  URL 라우팅 대상이 아니면 기본 페이지(thememap) 렌더. */
+function applyUrlRouting() {
+  const parsed = parseUrlPath();
+  if (parsed.page) {
+    navigateTo(parsed.page, parsed.params, { fromUrl: true });
+  } else {
+    // 알 수 없는 / 라우팅 안 되는 path → 기본 페이지
+    navigateTo('thememap', {}, { fromUrl: true });
+  }
+}
+
+function navigateTo(page, params, opts) {
+  params = params || {};
+  opts = opts || {};
   // 삭제/통합된 메뉴 리다이렉트 (기존 URL/북마크 호환)
   const _REDIRECTS = {
     screener: 'discover',
@@ -910,10 +968,17 @@ function navigateTo(page) {
     if (typeof _opsClearTimer === 'function') _opsClearTimer(key);
   }
   APP.page = page;
+  APP.pageParams = params;
 
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const pageEl = document.getElementById(`page-${page}`);
-  if (pageEl) pageEl.classList.add('active');
+  if (pageEl) {
+    pageEl.classList.add('active');
+    // URL 파라미터가 바뀐 경우 강제 재렌더
+    if (params && Object.keys(params).length > 0) {
+      delete pageEl.dataset.inited;
+    }
+  }
 
   document.querySelectorAll('#sidebar-menu .sidebar-item').forEach(el => {
     el.classList.toggle('active', el.dataset.page === page);
@@ -924,13 +989,42 @@ function navigateTo(page) {
                                   'page-verification','page-ops-freshness','page-ops-cron','page-ops-health');
   document.body.classList.add(`page-${page}`);
 
-  try { PAGE_RENDERERS[page](); }
+  try { PAGE_RENDERERS[page](params); }
   catch (err) { console.error('[navigateTo] render error for', page, err); }
+
+  // 4-5-2-C: URL 동기화 — popstate / 초기 진입 / 시장 토글 재렌더는 제외
+  if (!opts.fromUrl && _URL_ROUTED_PAGES.has(page)) {
+    const newPath = pageToUrl(page, params);
+    if (newPath !== window.location.pathname + window.location.search) {
+      try { history.pushState({ page, params }, '', newPath); }
+      catch (e) { /* iframe/sandbox 환경 무시 */ }
+    }
+  } else if (!opts.fromUrl && !_URL_ROUTED_PAGES.has(page)) {
+    // URL 라우팅 대상이 아닌 페이지로 이동할 때 URL이 /verification 등에 머물러 있다면 / 로 정리
+    if (window.location.pathname !== '/') {
+      try { history.pushState({ page }, '', '/'); } catch (e) {}
+    }
+  }
 
   // 모바일이면 사이드바 자동 닫기
   if (window.innerWidth <= 768 && typeof closeMobileSidebar === 'function') {
     closeMobileSidebar();
   }
+}
+
+// popstate 핸들러 — 뒤로가기/앞으로가기
+window.addEventListener('popstate', () => {
+  applyUrlRouting();
+});
+
+// 초기 진입 시 URL 반영 (DOM 준비 후, pages.js 로드 시점이면 이미 충족)
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.location.pathname !== '/') applyUrlRouting();
+  });
+} else {
+  // pages.js 가 deferred 로딩되었거나 readyState='complete'
+  if (window.location.pathname !== '/') applyUrlRouting();
 }
 
 document.getElementById('sidebar-menu').addEventListener('click', (e) => {
@@ -6845,14 +6939,25 @@ function _phEsc(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-function renderVerificationPlaceholder() {
+function renderVerificationPlaceholder(params) {
+  params = params || (APP && APP.pageParams) || {};
+  const code = params.code || null;
   const c = document.getElementById('page-verification');
   if (!c) return;
+  const codeBanner = code ? `
+    <div style="margin: 12px 0; padding: 10px 14px; background: rgba(59,130,246,0.08);
+                border-left: 3px solid #3b82f6; border-radius: 6px; font-size: 13px;">
+      🎯 선택된 종목: <strong>${_phEsc(code)}</strong>
+      <span style="font-size:11px;color:var(--text-muted,#888);margin-left:8px;">
+        (Phase 4-5-3 구축 시 자동 prefill 대상)
+      </span>
+    </div>` : '';
   c.innerHTML = `
     <div class="page-header">
       <h2>✅ 검증 시트</h2>
       <p class="page-desc">KUVIC 5단계 분석 프레임 + 자동 산출 데이터 통합</p>
     </div>
+    ${codeBanner}
     <div class="placeholder-card">
       <div class="placeholder-icon">🚧</div>
       <div class="placeholder-title">Phase 4-5-3에서 구축 예정</div>
@@ -6872,14 +6977,25 @@ function renderVerificationPlaceholder() {
     </div>`;
 }
 
-function renderJournalPlaceholder() {
+function renderJournalPlaceholder(params) {
+  params = params || (APP && APP.pageParams) || {};
+  const journalId = params.id || null;
   const c = document.getElementById('page-journal');
   if (!c) return;
+  const idBanner = journalId ? `
+    <div style="margin: 12px 0; padding: 10px 14px; background: rgba(34,197,94,0.08);
+                border-left: 3px solid #22c55e; border-radius: 6px; font-size: 13px;">
+      📓 일지 ID: <strong>${_phEsc(journalId)}</strong>
+      <span style="font-size:11px;color:var(--text-muted,#888);margin-left:8px;">
+        (Phase 4-5-9 구축 시 단일 조회 화면 대상)
+      </span>
+    </div>` : '';
   c.innerHTML = `
     <div class="page-header">
       <h2>📓 분석 일지</h2>
       <p class="page-desc">analysis_journal CRUD — KUVIC 분석 보관/검색</p>
     </div>
+    ${idBanner}
     <div class="placeholder-card">
       <div class="placeholder-icon">🚧</div>
       <div class="placeholder-title">Phase 4-5-9에서 구축 예정</div>
