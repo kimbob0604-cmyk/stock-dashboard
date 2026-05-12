@@ -6620,3 +6620,349 @@ tr:hover td {
   .vsv-gap-sev    { grid-area: sev; }
   .vsv-gap-dir    { grid-area: dir; text-align: left; }
 }
+
+/* ==============================================================
+ * Phase 4-5-7: 종합 신호 sticky 패널 + 2-column 레이아웃
+ * ============================================================== */
+
+/* 검증 시트 2-column 레이아웃 */
+.verif-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+.verif-main { min-width: 0; }  /* grid 안에서 overflow 방지 */
+.verif-side {
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+}
+
+/* sticky 패널 카드 */
+.vc-card {
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.vc-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: rgba(59,130,246,0.08);
+  border-bottom: 1px solid rgba(59,130,246,0.20);
+}
+.vc-head-icon { font-size: 14px; }
+.vc-head-title {
+  flex: 1; font-weight: 700; font-size: 14px;
+  color: var(--text, #222);
+}
+.vc-refresh-btn {
+  width: 24px; height: 24px;
+  border-radius: 4px; border: 1px solid rgba(120,120,120,0.30);
+  background: transparent;
+  cursor: pointer; font-size: 13px;
+  color: var(--text-muted, #666);
+}
+.vc-refresh-btn:hover { background: rgba(120,120,120,0.10); }
+
+.vc-body { padding: 14px; }
+
+.vc-composite-loading, .vc-composite-error {
+  padding: 18px; text-align: center;
+  color: var(--text-muted, #888);
+  background: rgba(120,120,120,0.04);
+  border: 1px dashed rgba(120,120,120,0.20);
+  border-radius: 8px;
+}
+.vc-composite-error { color: #ef4444; }
+
+/* 종합 점수 블록 */
+.vc-score-block {
+  text-align: center;
+  padding: 14px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  border-left: 4px solid var(--vc-score-color, #94a3b8);
+  background: var(--vc-score-bg, rgba(120,120,120,0.05));
+}
+.vc-score-stars {
+  font-size: 14px; font-weight: 600;
+  color: #f59e0b;
+  margin-bottom: 4px;
+}
+.vc-score-number {
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 36px; font-weight: 800;
+  color: var(--text, #222);
+  line-height: 1;
+}
+.vc-score-total {
+  font-size: 14px; font-weight: 500;
+  color: var(--text-muted, #888);
+  margin-left: 2px;
+}
+.vc-score-rec {
+  margin-top: 4px;
+  font-size: 12px; color: var(--text-muted, #666);
+  font-weight: 500;
+}
+.vc-score-buy     { --vc-score-color: #16a34a; --vc-score-bg: rgba(34,197,94,0.06); }
+.vc-score-hold    { --vc-score-color: #3b82f6; --vc-score-bg: rgba(59,130,246,0.05); }
+.vc-score-holdmin { --vc-score-color: #f59e0b; --vc-score-bg: rgba(245,158,11,0.05); }
+.vc-score-sell    { --vc-score-color: #ef4444; --vc-score-bg: rgba(239,68,68,0.05); }
+.vc-score-na      { --vc-score-color: #94a3b8; --vc-score-bg: rgba(148,163,184,0.05); }
+
+/* 섹션 */
+.vc-section {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(120,120,120,0.10);
+}
+.vc-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.vc-section-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-muted, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 6px;
+}
+
+/* 점수 바 */
+.vc-bar-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 11.5px;
+}
+.vc-bar-row-warn,
+.vc-bar-row-penalty {
+  grid-template-columns: 70px 1fr;
+}
+.vc-bar-label {
+  color: var(--text-muted, #666);
+  font-size: 11px;
+}
+.vc-bar-track {
+  height: 6px;
+  background: rgba(120,120,120,0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.vc-bar-fill {
+  height: 100%;
+  background: linear-gradient(to right, #3b82f6, #2563eb);
+  border-radius: 3px;
+}
+.vc-bar-kuvic {
+  background: linear-gradient(to right, #9333ea, #7c3aed);
+}
+.vc-bar-val {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text, #222);
+  text-align: right;
+}
+.vc-bar-na { color: var(--text-muted, #aaa); }
+.vc-bar-hint {
+  grid-column: 2 / -1;
+  font-size: 10.5px;
+  color: var(--text-muted, #888);
+  margin-top: -2px;
+}
+.vc-bar-warn {
+  font-size: 11px;
+  color: #a37700;
+  background: rgba(245,158,11,0.10);
+  padding: 3px 8px; border-radius: 4px;
+}
+.vc-bar-penalty {
+  color: #ef4444; font-weight: 700;
+}
+.vc-subbars {
+  margin: 0 0 4px 12px;
+  padding-left: 6px;
+  border-left: 2px solid rgba(120,120,120,0.15);
+}
+
+/* 신뢰도 */
+.vc-conf-pct {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+.vc-conf-high { color: #16a34a; }
+.vc-conf-mid  { color: #f59e0b; }
+.vc-conf-low  { color: #ef4444; }
+
+.vc-conf-bar {
+  height: 6px;
+  background: rgba(120,120,120,0.12);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.vc-conf-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+.vc-conf-fill.vc-conf-high { background: #16a34a; }
+.vc-conf-fill.vc-conf-mid  { background: #f59e0b; }
+.vc-conf-fill.vc-conf-low  { background: #ef4444; }
+
+.vc-conf-list {
+  margin: 0; padding: 0; list-style: none;
+}
+.vc-conf-hdr {
+  font-size: 10.5px;
+  color: var(--text-muted, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+.vc-conf-factor {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.vc-conf-impact {
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+  color: #ef4444;
+  text-align: right;
+}
+.vc-conf-name {
+  color: var(--text, #222);
+  font-size: 11.5px;
+}
+.vc-conf-label {
+  font-size: 10.5px;
+  color: var(--text-muted, #888);
+  font-family: ui-monospace, monospace;
+}
+.vc-conf-good {
+  font-size: 12px;
+  color: #16a34a;
+  text-align: center;
+  padding: 8px;
+  background: rgba(34,197,94,0.06);
+  border-radius: 4px;
+}
+
+/* 액션 리스트 */
+.vc-action-list {
+  margin: 0; padding: 0; list-style: none;
+}
+.vc-action {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(120,120,120,0.08);
+}
+.vc-action:last-child { border-bottom: none; }
+.vc-action-priority {
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+  font-size: 10.5px;
+  background: rgba(120,120,120,0.10);
+  border-radius: 4px;
+  text-align: center;
+  padding: 2px 0;
+  height: 20px;
+}
+.vc-action-p1 .vc-action-priority { background: rgba(239,68,68,0.15);  color: #b91c1c; }
+.vc-action-p2 .vc-action-priority { background: rgba(245,158,11,0.15); color: #a37700; }
+.vc-action-p3 .vc-action-priority { background: rgba(59,130,246,0.10); color: #2563eb; }
+.vc-action-body { min-width: 0; }
+.vc-action-text {
+  font-size: 12px;
+  color: var(--text, #222);
+  line-height: 1.4;
+}
+.vc-action-reason {
+  font-size: 10.5px;
+  color: var(--text-muted, #888);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* 모니터링 */
+.vc-mon-list {
+  margin: 0; padding: 0; list-style: none;
+}
+.vc-mon-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 11.5px;
+  border-bottom: 1px solid rgba(120,120,120,0.08);
+}
+.vc-mon-row:last-child { border-bottom: none; }
+.vc-mon-when {
+  font-family: ui-monospace, monospace;
+  color: var(--text-muted, #888);
+  width: 92px; flex-shrink: 0;
+  font-size: 11px;
+}
+.vc-mon-event {
+  color: var(--text, #222);
+  flex: 1;
+}
+
+.vc-empty {
+  font-size: 11.5px;
+  color: var(--text-muted, #888);
+  text-align: center;
+  padding: 8px;
+  background: rgba(120,120,120,0.04);
+  border-radius: 4px;
+}
+
+/* 다크 모드 */
+@media (prefers-color-scheme: dark) {
+  .vc-card {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.10);
+  }
+  .vc-head {
+    background: rgba(59,130,246,0.10);
+    border-bottom-color: rgba(59,130,246,0.20);
+  }
+  .vc-head-title, .vc-score-number, .vc-conf-name,
+  .vc-action-text, .vc-mon-event {
+    color: #f1f5f9;
+  }
+  .vc-section { border-bottom-color: rgba(255,255,255,0.08); }
+  .vc-action { border-bottom-color: rgba(255,255,255,0.08); }
+  .vc-mon-row { border-bottom-color: rgba(255,255,255,0.08); }
+}
+
+/* 모바일 — 1-column, sticky 해제 */
+@media (max-width: 1024px) {
+  .verif-layout {
+    grid-template-columns: 1fr;
+  }
+  .verif-side {
+    position: static;
+    max-height: none;
+  }
+}
+@media (max-width: 768px) {
+  .vc-score-number { font-size: 28px; }
+  .vc-bar-row {
+    grid-template-columns: 64px 1fr 48px;
+    font-size: 11px;
+  }
+}

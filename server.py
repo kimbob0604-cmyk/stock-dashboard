@@ -13829,6 +13829,400 @@ def api_verification_prefill(code):
 
 
 # ============================================================
+# Step 4-5-7: 종합 신호 패널 API
+# ============================================================
+
+# 어닝 시그널 → 점수 매핑
+_EARN_SIGNAL_SCORE = {
+    'BEAT_BIG': 90, 'BEAT': 75,
+    'TURNAROUND_FULL': 88, 'TURNAROUND_PARTIAL': 70,
+    'REVENUE_BEAT_OP_INLINE': 60, 'REVENUE_MISS_OP_BEAT': 70,
+    'REVENUE_BEAT': 60, 'REVENUE_MISS': 35,
+    'INLINE': 50,
+    'YOY_INLINE': 50, 'YOY_SURGE': 75, 'YOY_PLUNGE': 25,
+    'YOY_TURNAROUND': 80, 'YOY_SHOCK': 15,
+    'MISS': 25, 'MISS_BIG': 10,
+    'SHOCK_FULL': 5,
+}
+
+# KUVIC 결론 × 우선순위 → 점수
+_KUVIC_SCORE = {
+    'BUY':   {'★★★': 90, '★★': 75, '★': 60, '—': 50, None: 60},
+    'HOLD':  {'★★★': 50, '★★': 45, '★': 40, '—': 40, None: 45},
+    'WATCH': {'★★★': 40, '★★': 35, '★': 30, '—': 30, None: 35},
+    'SELL':  {'★★★': 15, '★★': 20, '★': 25, '—': 30, None: 22},
+}
+
+
+def _score_valuation(fwd_per_band_pct):
+    """5년 PER 백분위 → 점수 (낮을수록 좋음 = 저평가)."""
+    if fwd_per_band_pct is None:
+        return None
+    if fwd_per_band_pct <= 25: return 80
+    if fwd_per_band_pct <= 50: return 60
+    if fwd_per_band_pct <= 75: return 40
+    return 20
+
+
+def _score_earnings(signal):
+    if not signal:
+        return None
+    return _EARN_SIGNAL_SCORE.get(signal, 50)
+
+
+def _score_technical(position_pct):
+    """52주 위치 → 점수 (저점일수록 좋음, contrarian view)."""
+    if position_pct is None:
+        return None
+    if position_pct < 30: return 70
+    if position_pct < 70: return 50
+    return 30
+
+
+def _score_kuvic(conclusion, priority):
+    if not conclusion:
+        return None
+    row = _KUVIC_SCORE.get(conclusion)
+    if not row:
+        return 50
+    return row.get(priority, row.get(None, 50))
+
+
+def _stars_from_score(s):
+    if s is None: return '—'
+    if s >= 81: return '★★★ BUY'
+    if s >= 61: return '★★★ BUY-'
+    if s >= 41: return '★★ HOLD'
+    if s >= 21: return '★★ HOLD-'
+    return '★ SELL/WATCH'
+
+
+def _rec_from_score(s):
+    if s is None: return None
+    if s >= 81: return 'BUY'
+    if s >= 61: return 'BUY-'
+    if s >= 41: return 'HOLD'
+    if s >= 21: return 'HOLD-'
+    return 'SELL/WATCH'
+
+
+def _confidence_label(v):
+    if v >= 0.75: return '높음'
+    if v >= 0.5:  return '중간'
+    return '낮음'
+
+
+def _composite_freshness_factors(conn) -> tuple[float, list]:
+    """4개 핵심 소스 신선도 → 감점 + 요인."""
+    from data_freshness import get_freshness, DATA_SOURCE_CONFIG
+    SOURCES = ['naver_price', 'valuation_band', 'consensus_quarterly',
+               'earnings_pipeline']
+    penalty = 0.0
+    factors = []
+    for src in SOURCES:
+        if src not in DATA_SOURCE_CONFIG:
+            continue
+        try:
+            f = get_freshness(src, conn)
+        except Exception:
+            continue
+        name = f.name_kr
+        if f.label == 'ARCHIVE':
+            penalty += 0.10
+            factors.append({
+                'source': src, 'name_kr': name,
+                'label': f.label, 'age_human': f.age_human,
+                'impact': -0.10,
+            })
+        elif f.label == 'DELAY':
+            penalty += 0.05
+            factors.append({
+                'source': src, 'name_kr': name,
+                'label': f.label, 'age_human': f.age_human,
+                'impact': -0.05,
+            })
+        elif f.label == 'NO_DATA':
+            penalty += 0.15
+            factors.append({
+                'source': src, 'name_kr': name,
+                'label': f.label, 'age_human': f.age_human,
+                'impact': -0.15,
+            })
+    return penalty, factors
+
+
+def _next_quarter_label(latest_year, latest_quarter):
+    """ '2026Q1' → 다음 분기 라벨 + 발표 추정일 (KR 분기 말 + 45일)."""
+    if not latest_year or not latest_quarter:
+        return None, None
+    nq = latest_quarter + 1
+    ny = latest_year
+    if nq > 4:
+        nq = 1
+        ny += 1
+    # KR 분기 말 + 45일 (대략적 발표 시점)
+    quarter_end_month = {1: 3, 2: 6, 3: 9, 4: 12}[nq]
+    from datetime import date
+    try:
+        end = date(ny, quarter_end_month, 28)
+        from datetime import timedelta
+        est = end + timedelta(days=45)
+        return f'{ny}Q{nq}', est.isoformat()
+    except Exception:
+        return f'{ny}Q{nq}', None
+
+
+@app.route('/api/verification/<code>/composite', methods=['GET'])
+def api_verification_composite(code):
+    """종합 신호 패널.
+    점수(0~100) = 자동 50% + KUVIC 30% + 갭 페널티 20%
+    신뢰도(0~1) = 1.0 - 데이터 신선도/완전성 감점
+    Returns: { code, name, current_price,
+               score: { composite, stars, recommendation, breakdown },
+               confidence: { value, label, factors },
+               actions: [...], monitoring: [...],
+               errors: [...] }
+    """
+    if not code or not code.isdigit() or len(code) != 6:
+        return jsonify({'error': '6자리 숫자 종목 코드만 허용', 'code': code}), 400
+
+    errors: list = []
+    conn = sqlite3.connect(str(BASE_DIR / 'db' / 'dashboard.db'), timeout=10)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        # 1) prefill 데이터
+        try:
+            from analysis_journal_helper import build_prefill_data
+            pf = build_prefill_data(code) or {}
+            errors.extend(pf.get('errors', []))
+        except Exception as exc:
+            return jsonify({
+                'code': code, 'error': f'prefill 실패: {exc}',
+                'errors': errors,
+            }), 500
+
+        # 2) 최신 KUVIC 일지
+        kuvic_journal = None
+        try:
+            from analysis_journal_api import list_journals_by_stock
+            journals = list_journals_by_stock(code, 1) or []
+            if journals:
+                kuvic_journal = journals[0]
+        except Exception as exc:
+            errors.append(f'journal: {exc}')
+
+        # 3) 최근 어닝 시그널 (직접 쿼리)
+        earnings_signal = None
+        earnings_year = None
+        earnings_quarter = None
+        try:
+            row = conn.execute("""
+                SELECT year, quarter, signal, priority
+                FROM earnings_surprise
+                WHERE stock_code = ?
+                ORDER BY year DESC, quarter DESC LIMIT 1
+            """, (code,)).fetchone()
+            if row:
+                earnings_signal = row['signal']
+                earnings_year = row['year']
+                earnings_quarter = row['quarter']
+        except Exception as exc:
+            errors.append(f'earnings_surprise: {exc}')
+
+        # 4) 52주 위치
+        position_pct = None
+        try:
+            r = conn.execute("""
+                SELECT MIN(close) AS low, MAX(close) AS high,
+                       (SELECT close FROM ohlcv WHERE code=? ORDER BY date DESC LIMIT 1) AS cur
+                FROM ohlcv
+                WHERE code = ? AND date >= date('now', '-365 days')
+            """, (code, code)).fetchone()
+            if r and r['low'] and r['high'] and r['cur'] and r['high'] > r['low']:
+                position_pct = round((r['cur'] - r['low']) / (r['high'] - r['low']) * 100, 1)
+        except Exception as exc:
+            errors.append(f'ohlcv: {exc}')
+
+        # 5) 점수 계산
+        fwd_per_band_pct = pf.get('fwd_per_band_pct')
+        val_score = _score_valuation(fwd_per_band_pct)
+        earn_score = _score_earnings(earnings_signal)
+        tech_score = _score_technical(position_pct)
+
+        # 자동 = 사용 가능한 축 평균
+        auto_components = {
+            'valuation': val_score, 'earnings': earn_score, 'technical': tech_score,
+        }
+        auto_used = [v for v in auto_components.values() if v is not None]
+        auto_score = round(sum(auto_used) / len(auto_used), 1) if auto_used else None
+
+        # KUVIC
+        kuvic_score = None
+        if kuvic_journal:
+            kuvic_score = _score_kuvic(
+                kuvic_journal.get('conclusion'),
+                kuvic_journal.get('priority'),
+            )
+
+        # 갭 페널티: gap-analysis 재호출 대신 인라인 계산 (간단)
+        gap_penalty = 0
+        gap_high_count = 0
+        if kuvic_journal:
+            for sc in ('bear', 'base', 'bull'):
+                a = pf.get(f'{sc}_tp')
+                k = kuvic_journal.get(f'{sc}_tp')
+                if a and k:
+                    diff_pct = abs((k - a) / a * 100)
+                    if diff_pct >= 25:
+                        gap_high_count += 1
+                        gap_penalty += 5  # 1건당 -5
+
+        # 합성
+        if auto_score is None:
+            composite = None
+        elif kuvic_score is not None:
+            composite = round(auto_score * 0.5 + kuvic_score * 0.3 - gap_penalty, 1)
+        else:
+            composite = round(auto_score - gap_penalty, 1)
+        if composite is not None:
+            composite = max(0.0, min(100.0, composite))
+
+        # 6) 신뢰도
+        confidence_value = 1.0
+        confidence_factors = []
+        pen, ff = _composite_freshness_factors(conn)
+        confidence_value -= pen
+        confidence_factors.extend(ff)
+        if not kuvic_journal:
+            confidence_value -= 0.10
+            confidence_factors.append({
+                'source': 'kuvic_journal',
+                'name_kr': 'KUVIC 분석 일지',
+                'label': 'MISSING', 'age_human': '미작성',
+                'impact': -0.10,
+            })
+        if not earnings_signal:
+            confidence_value -= 0.05
+            confidence_factors.append({
+                'source': 'earnings_surprise',
+                'name_kr': '최근 어닝 시그널',
+                'label': 'MISSING', 'age_human': '없음',
+                'impact': -0.05,
+            })
+        confidence_value = round(max(0.0, min(1.0, confidence_value)), 2)
+
+        # 7) 다음 액션
+        actions: list = []
+        if not kuvic_journal:
+            actions.append({
+                'priority': 1,
+                'text': 'KUVIC 분석 일지 작성 — 결론/TP/Step3 입력',
+                'reason': '자동 산출만으로 판단 불가',
+            })
+        if gap_high_count >= 1:
+            actions.append({
+                'priority': 1,
+                'text': f'자동 TAM vs KUVIC TP 갭 검토 (high {gap_high_count}건)',
+                'reason': '시나리오별 가정 차이 큼',
+            })
+        if earnings_signal and 'BIG' in earnings_signal:
+            actions.append({
+                'priority': 2,
+                'text': f'최근 어닝 {earnings_signal} 영향 재평가',
+                'reason': f'{earnings_year}Q{earnings_quarter} 강한 시그널',
+            })
+        # 데이터 신선도 경고
+        if any(f.get('label') == 'ARCHIVE' for f in confidence_factors):
+            actions.append({
+                'priority': 3,
+                'text': '핵심 데이터 ARCHIVE — 운영 점검 페이지 확인',
+                'reason': 'naver_price/valuation_band/consensus 갱신 필요',
+            })
+        # 반영도 vs 결론 conflict (gap_analysis 일치성과 동일 룰)
+        if kuvic_journal:
+            auto_refl = pf.get('reflection_label')
+            kuvic_concl = kuvic_journal.get('conclusion')
+            check = _check_reflection_conclusion(auto_refl, kuvic_concl)
+            if check and check[0] == 'conflict':
+                actions.append({
+                    'priority': 1,
+                    'text': f'반영도({auto_refl}) ↔ 결론({kuvic_concl}) 불일치 검토',
+                    'reason': check[1],
+                })
+        actions.sort(key=lambda a: a['priority'])
+
+        # 8) 모니터링 일정 (어닝 추정 + KUVIC analysis_date 기반)
+        monitoring: list = []
+        if earnings_year is not None:
+            nq_label, nq_date = _next_quarter_label(earnings_year, earnings_quarter)
+            if nq_label:
+                monitoring.append({
+                    'when': nq_date,
+                    'event': f'{nq_label} 어닝 (추정)',
+                    'kind': 'earnings_estimate',
+                })
+        if kuvic_journal and kuvic_journal.get('analysis_date'):
+            # 분석일 + 30일 → 재검토 알림
+            from datetime import datetime, timedelta
+            try:
+                d = datetime.strptime(kuvic_journal['analysis_date'], '%Y-%m-%d').date()
+                review_date = (d + timedelta(days=30)).isoformat()
+                monitoring.append({
+                    'when': review_date,
+                    'event': 'KUVIC 분석 30일 재검토',
+                    'kind': 'kuvic_review',
+                })
+            except Exception:
+                pass
+
+        return jsonify({
+            'code': code,
+            'name': pf.get('stock_name') or code,
+            'current_price': pf.get('current_price'),
+            'score': {
+                'composite': composite,
+                'stars': _stars_from_score(composite),
+                'recommendation': _rec_from_score(composite),
+                'breakdown': {
+                    'auto': auto_score,
+                    'auto_components': auto_components,
+                    'kuvic': kuvic_score,
+                    'gap_penalty': gap_penalty,
+                    'gap_high_count': gap_high_count,
+                    'has_kuvic': bool(kuvic_journal),
+                },
+            },
+            'confidence': {
+                'value': confidence_value,
+                'label': _confidence_label(confidence_value),
+                'factors': confidence_factors,
+            },
+            'actions': actions[:5],
+            'monitoring': monitoring,
+            'context': {
+                'fwd_per_band_pct': fwd_per_band_pct,
+                'position_pct': position_pct,
+                'earnings_signal': earnings_signal,
+                'earnings_year': earnings_year,
+                'earnings_quarter': earnings_quarter,
+                'kuvic_conclusion': kuvic_journal.get('conclusion') if kuvic_journal else None,
+                'kuvic_priority': kuvic_journal.get('priority') if kuvic_journal else None,
+                'reflection_label': pf.get('reflection_label'),
+            },
+            'errors': errors,
+        })
+    except Exception as exc:
+        log.exception('verification/composite')
+        return jsonify({
+            'code': code, 'error': f'서버 오류: {exc}',
+            'errors': errors,
+        }), 500
+    finally:
+        conn.close()
+
+
+# ============================================================
 # Step 4-5-6: 자동 vs KUVIC Split View — 갭 분석 API
 # ============================================================
 

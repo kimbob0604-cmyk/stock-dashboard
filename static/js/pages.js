@@ -7140,64 +7140,272 @@ function _verifRenderStockCard(container, data, prefill) {
          onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
     </div>
 
-    <div class="verif-stock-card">
-      <div class="verif-stock-header">
-        <div class="verif-stock-title">
-          <span class="verif-stock-name">${_phEsc(data.name)}</span>
-          <span class="verif-stock-code">(${_phEsc(data.code)})</span>
+    <!-- 4-5-7: 2-column 레이아웃 — 좌 메인 / 우 sticky 종합 패널 -->
+    <div class="verif-layout">
+      <div class="verif-main">
+        <div class="verif-stock-card">
+          <div class="verif-stock-header">
+            <div class="verif-stock-title">
+              <span class="verif-stock-name">${_phEsc(data.name)}</span>
+              <span class="verif-stock-code">(${_phEsc(data.code)})</span>
+            </div>
+            <span class="verif-stock-market">${_phEsc(data.market)}</span>
+          </div>
+          ${data.sector ? `<div class="verif-stock-sector">${_phEsc(data.sector)}</div>` : ''}
+          <div class="verif-stock-grid">
+            <div class="verif-stock-field">
+              <div class="verif-field-label">현재가</div>
+              <div class="verif-field-value verif-price">
+                ${_verifFmtNum(data.current_price)}원 ${badgeHtml}
+              </div>
+            </div>
+            <div class="verif-stock-field verif-${upDown}">
+              <div class="verif-field-label">변동률</div>
+              <div class="verif-field-value verif-change">
+                ${sign}${cp.toFixed(2)}% ${arrow}${_verifFmtNum(Math.abs(data.change_amount || 0))}
+              </div>
+            </div>
+            <div class="verif-stock-field">
+              <div class="verif-field-label">시가총액</div>
+              <div class="verif-field-value">${_phEsc(mcap)}</div>
+            </div>
+            <div class="verif-stock-field">
+              <div class="verif-field-label">52주 범위 (${data.week52_days || 0}일)</div>
+              <div class="verif-field-value verif-range">
+                ${data.week52_low ? _verifFmtNum(data.week52_low) : '—'} ~
+                ${data.week52_high ? _verifFmtNum(data.week52_high) : '—'}
+              </div>
+            </div>
+          </div>
         </div>
-        <span class="verif-stock-market">${_phEsc(data.market)}</span>
+
+        ${errs.length ? `
+        <div class="verif-errors-banner">
+          ⚠️ 일부 데이터 불완전: ${errs.map(_phEsc).join(' · ')}
+        </div>` : ''}
+
+        <div class="verif-steps">
+          ${prefill ? _verifRenderStep1(prefill.step1) : _verifStepLoadingRow('STEP 1', '밸류체인 유추')}
+          ${prefill ? _verifRenderStep2(prefill.step2) : _verifStepLoadingRow('STEP 2', '개별 요인')}
+          ${_verifRenderStep3()}
+          ${prefill ? _verifRenderStep4(prefill.step4, prefill.current_price) : _verifStepLoadingRow('STEP 4', 'TAM 모델링')}
+          ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
+        </div>
+
+        <!-- 4-5-6: 자동 vs KUVIC Split View -->
+        <div id="verif-split-wrap"></div>
+
+        <!-- 4-5-5: KUVIC 수동 입력 폼 -->
+        <div id="verif-kuvic-form-wrap"></div>
       </div>
-      ${data.sector ? `<div class="verif-stock-sector">${_phEsc(data.sector)}</div>` : ''}
-      <div class="verif-stock-grid">
-        <div class="verif-stock-field">
-          <div class="verif-field-label">현재가</div>
-          <div class="verif-field-value verif-price">
-            ${_verifFmtNum(data.current_price)}원 ${badgeHtml}
-          </div>
+
+      <!-- 4-5-7: 우측 sticky 종합 패널 -->
+      <aside class="verif-side">
+        <div id="verif-composite-wrap" class="verif-composite-wrap">
+          <div class="verif-loading verif-composite-loading">종합 신호 산출 중…</div>
         </div>
-        <div class="verif-stock-field verif-${upDown}">
-          <div class="verif-field-label">변동률</div>
-          <div class="verif-field-value verif-change">
-            ${sign}${cp.toFixed(2)}% ${arrow}${_verifFmtNum(Math.abs(data.change_amount || 0))}
-          </div>
-        </div>
-        <div class="verif-stock-field">
-          <div class="verif-field-label">시가총액</div>
-          <div class="verif-field-value">${_phEsc(mcap)}</div>
-        </div>
-        <div class="verif-stock-field">
-          <div class="verif-field-label">52주 범위 (${data.week52_days || 0}일)</div>
-          <div class="verif-field-value verif-range">
-            ${data.week52_low ? _verifFmtNum(data.week52_low) : '—'} ~
-            ${data.week52_high ? _verifFmtNum(data.week52_high) : '—'}
-          </div>
-        </div>
-      </div>
-    </div>
+      </aside>
+    </div>`;
 
-    ${errs.length ? `
-    <div class="verif-errors-banner">
-      ⚠️ 일부 데이터 불완전: ${errs.map(_phEsc).join(' · ')}
-    </div>` : ''}
-
-    <div class="verif-steps">
-      ${prefill ? _verifRenderStep1(prefill.step1) : _verifStepLoadingRow('STEP 1', '밸류체인 유추')}
-      ${prefill ? _verifRenderStep2(prefill.step2) : _verifStepLoadingRow('STEP 2', '개별 요인')}
-      ${_verifRenderStep3()}
-      ${prefill ? _verifRenderStep4(prefill.step4, prefill.current_price) : _verifStepLoadingRow('STEP 4', 'TAM 모델링')}
-      ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
-    </div>
-
-    <!-- 4-5-6: 자동 vs KUVIC Split View -->
-    <div id="verif-split-wrap"></div>
-
-    <!-- 4-5-5: KUVIC 수동 입력 폼 -->
-    <div id="verif-kuvic-form-wrap"></div>`;
-
-  // 4-5-6 Split View + 4-5-5 폼 비동기 로드
+  // 4-5-6 Split View + 4-5-5 폼 + 4-5-7 종합 패널 비동기 로드
   _verifSetupSplitView(data.code);
   _verifSetupKuvicForm(data.code);
+  _verifSetupComposite(data.code);
+}
+
+// ============================================================
+// 4-5-7: 종합 신호 sticky 패널
+// ============================================================
+
+async function _verifSetupComposite(code) {
+  const wrap = document.getElementById('verif-composite-wrap');
+  if (!wrap) return;
+  try {
+    const r = await fetch(`/api/verification/${encodeURIComponent(code)}/composite`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    _verifRenderComposite(wrap, data);
+  } catch (e) {
+    console.error('[verification] composite failed:', e);
+    wrap.innerHTML = `<div class="verif-composite-error">종합 신호 로드 실패: ${_phEsc(e.message)}</div>`;
+  }
+}
+
+function _verifRefreshComposite() {
+  // 4-5-5 폼 저장 후 호출
+  if (_verifFormState && _verifFormState.code) {
+    _verifSetupComposite(_verifFormState.code);
+  }
+}
+
+function _verifScoreClass(s) {
+  if (s == null) return 'vc-score-na';
+  if (s >= 61) return 'vc-score-buy';
+  if (s >= 41) return 'vc-score-hold';
+  if (s >= 21) return 'vc-score-holdmin';
+  return 'vc-score-sell';
+}
+function _verifConfidenceClass(v) {
+  if (v >= 0.75) return 'vc-conf-high';
+  if (v >= 0.5)  return 'vc-conf-mid';
+  return 'vc-conf-low';
+}
+
+function _verifRenderComposite(wrap, data) {
+  const score = data.score || {};
+  const bd = score.breakdown || {};
+  const comp = score.composite;
+  const compStr = comp != null ? comp.toFixed(0) : '—';
+  const conf = data.confidence || {};
+  const confPct = Math.round((conf.value || 0) * 100);
+  const ctx = data.context || {};
+  const actions = data.actions || [];
+  const monitoring = data.monitoring || [];
+
+  // 점수 합성 컴포넌트
+  const acomp = bd.auto_components || {};
+  const compRow = (label, v, hint) => {
+    const cls = v == null ? 'vc-bar-na' : 'vc-bar-num';
+    return `
+      <div class="vc-bar-row">
+        <span class="vc-bar-label">${_phEsc(label)}</span>
+        <div class="vc-bar-track">
+          ${v != null ? `<div class="vc-bar-fill" style="width:${Math.max(0, Math.min(100, v))}%"></div>` : ''}
+        </div>
+        <span class="vc-bar-val ${cls}">${v != null ? v + '/100' : '—'}</span>
+        ${hint ? `<span class="vc-bar-hint">${_phEsc(hint)}</span>` : ''}
+      </div>`;
+  };
+
+  // valuation hint
+  const valHint = ctx.fwd_per_band_pct != null
+    ? `PER P${ctx.fwd_per_band_pct}` : '데이터 없음';
+  const earnHint = ctx.earnings_signal
+    ? `${ctx.earnings_year}Q${ctx.earnings_quarter} ${ctx.earnings_signal}` : '시그널 없음';
+  const techHint = ctx.position_pct != null
+    ? `52주 ${ctx.position_pct.toFixed(0)}% 위치` : '데이터 없음';
+
+  // KUVIC 줄
+  let kuvicRow;
+  if (bd.has_kuvic) {
+    kuvicRow = `
+      <div class="vc-bar-row">
+        <span class="vc-bar-label">KUVIC</span>
+        <div class="vc-bar-track">
+          <div class="vc-bar-fill vc-bar-kuvic" style="width:${Math.max(0, Math.min(100, bd.kuvic || 0))}%"></div>
+        </div>
+        <span class="vc-bar-val">${bd.kuvic}/100</span>
+        <span class="vc-bar-hint">${_phEsc(ctx.kuvic_conclusion || '—')} ${_phEsc(ctx.kuvic_priority || '')}</span>
+      </div>`;
+  } else {
+    kuvicRow = `
+      <div class="vc-bar-row vc-bar-row-warn">
+        <span class="vc-bar-label">KUVIC</span>
+        <span class="vc-bar-warn">⚠️ 일지 없음 — auto만 사용</span>
+      </div>`;
+  }
+
+  // 갭 페널티
+  let gapRow = '';
+  if (bd.gap_high_count > 0) {
+    gapRow = `
+      <div class="vc-bar-row vc-bar-row-penalty">
+        <span class="vc-bar-label">갭 페널티</span>
+        <span class="vc-bar-val vc-bar-penalty">−${bd.gap_penalty}</span>
+        <span class="vc-bar-hint">high ${bd.gap_high_count}건 (각 −5)</span>
+      </div>`;
+  }
+
+  // 신뢰도
+  const confFactors = (conf.factors || []).map(f => `
+    <li class="vc-conf-factor">
+      <span class="vc-conf-impact">${f.impact > 0 ? '+' : ''}${(f.impact || 0).toFixed(2)}</span>
+      <span class="vc-conf-name">${_phEsc(f.name_kr || f.source)}</span>
+      <span class="vc-conf-label">${_phEsc(f.label)}${f.age_human ? ` · ${_phEsc(f.age_human)}` : ''}</span>
+    </li>`).join('');
+
+  // 액션
+  const actionsList = actions.map(a => `
+    <li class="vc-action vc-action-p${a.priority}">
+      <span class="vc-action-priority">P${a.priority}</span>
+      <div class="vc-action-body">
+        <div class="vc-action-text">${_phEsc(a.text)}</div>
+        ${a.reason ? `<div class="vc-action-reason">${_phEsc(a.reason)}</div>` : ''}
+      </div>
+    </li>`).join('');
+
+  // 모니터링
+  const monRows = monitoring.map(m => `
+    <li class="vc-mon-row">
+      <span class="vc-mon-when">${_phEsc(m.when || '—')}</span>
+      <span class="vc-mon-event">${_phEsc(m.event)}</span>
+    </li>`).join('');
+
+  wrap.innerHTML = `
+    <div class="vc-card">
+      <div class="vc-head">
+        <span class="vc-head-icon">🎯</span>
+        <span class="vc-head-title">종합 판단</span>
+        <button type="button" class="vc-refresh-btn" id="vc-refresh-btn" title="새로고침">↻</button>
+      </div>
+      <div class="vc-body">
+        <!-- 종합 점수 -->
+        <div class="vc-score-block ${_verifScoreClass(comp)}">
+          <div class="vc-score-stars">${_phEsc(score.stars || '—')}</div>
+          <div class="vc-score-number">${compStr}<span class="vc-score-total">/100</span></div>
+          <div class="vc-score-rec">${_phEsc(score.recommendation || '데이터 부족')}</div>
+        </div>
+
+        <!-- 점수 합성 -->
+        <div class="vc-section">
+          <div class="vc-section-title">📊 점수 합성</div>
+          ${compRow('자동 합계', bd.auto, '50% 가중')}
+          <div class="vc-subbars">
+            ${compRow('  Valuation', acomp.valuation, valHint)}
+            ${compRow('  Earnings', acomp.earnings, earnHint)}
+            ${compRow('  Technical', acomp.technical, techHint)}
+          </div>
+          ${kuvicRow}
+          ${gapRow}
+        </div>
+
+        <!-- 신뢰도 -->
+        <div class="vc-section">
+          <div class="vc-section-title">
+            🛡 신뢰도
+            <span class="vc-conf-pct ${_verifConfidenceClass(conf.value || 0)}">${confPct}% (${_phEsc(conf.label || '—')})</span>
+          </div>
+          <div class="vc-conf-bar">
+            <div class="vc-conf-fill ${_verifConfidenceClass(conf.value || 0)}"
+                 style="width:${confPct}%"></div>
+          </div>
+          ${confFactors ? `
+            <ul class="vc-conf-list">
+              <li class="vc-conf-hdr">감점 요인</li>
+              ${confFactors}
+            </ul>` : `
+            <div class="vc-conf-good">감점 요인 없음</div>`}
+        </div>
+
+        <!-- 다음 액션 -->
+        <div class="vc-section">
+          <div class="vc-section-title">⚡ 다음 액션</div>
+          ${actionsList ? `<ul class="vc-action-list">${actionsList}</ul>`
+                       : '<div class="vc-empty">권장 액션 없음</div>'}
+        </div>
+
+        <!-- 모니터링 -->
+        <div class="vc-section">
+          <div class="vc-section-title">📅 모니터링</div>
+          ${monRows ? `<ul class="vc-mon-list">${monRows}</ul>`
+                    : '<div class="vc-empty">모니터링 이벤트 없음</div>'}
+        </div>
+      </div>
+    </div>`;
+
+  const rb = document.getElementById('vc-refresh-btn');
+  if (rb) rb.addEventListener('click', () => _verifSetupComposite(data.code));
 }
 
 // ============================================================
@@ -8164,6 +8372,8 @@ async function _verifSaveJournal(opts) {
     if (opts.verbose) _verifShowToast('저장 완료', 'success');
     // 4-5-6: 저장 후 Split View 새로고침 (갭 분석 재계산)
     if (typeof _verifRefreshSplitView === 'function') _verifRefreshSplitView();
+    // 4-5-7: 종합 패널 새로고침 (점수 + 신뢰도 + 액션 재계산)
+    if (typeof _verifRefreshComposite === 'function') _verifRefreshComposite();
   } catch (e) {
     console.error('[verification] save failed:', e);
     _verifShowToast(`저장 실패: ${e.message}`, 'error');
