@@ -132,8 +132,12 @@ def read_financial_db(code: str) -> dict | None:
     return dict_from_row(row)
 
 
-def read_flow_db(code: str) -> dict | None:
-    """flow_cache에서 수급 데이터 조회. API 응답 형식과 동일."""
+def read_flow_db(code: str, latest_trading_date: str | None = None) -> dict | None:
+    """flow_cache에서 수급 데이터 조회. API 응답 형식과 동일.
+
+    latest_trading_date(YYYY-MM-DD)가 주어지면 마지막 dates 항목과 비교하여 stale 시 None 반환.
+    호출자는 None을 받으면 HTTP 폴백으로 신선 데이터를 받아와야 함.
+    """
     conn = get_thread_conn()
     row = conn.execute("SELECT * FROM flow_cache WHERE code=?", (code,)).fetchone()
     if not row:
@@ -141,6 +145,10 @@ def read_flow_db(code: str) -> dict | None:
     d = dict_from_row(row)
     if not d:
         return None
+    if latest_trading_date:
+        dates = d.get("dates") or []
+        if dates and dates[-1] < latest_trading_date:
+            return None
     return {
         "code": d.get("code", code),
         "name": d.get("name"),

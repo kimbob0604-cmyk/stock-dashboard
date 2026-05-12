@@ -147,8 +147,39 @@ def _detect_unit_multiplier(cleaned_text: str) -> float:
     return 1.0
 
 
+def detect_scope_from_body(cleaned_text: str) -> Optional[str]:
+    """본문에서 연결/별도 명시를 감지.
+    DART 잠정실적 form은 본문에 항상 '연결재무제표'/'별도재무제표' 또는
+    '연결기준'/'별도기준' 표기가 있음 (제목보다 신뢰도 높음).
+    Returns: 'CONSOLIDATED' | 'STANDALONE' | None.
+    """
+    if not cleaned_text:
+        return None
+    # 우선순위: 명시적 키워드 (먼저 등장한 것이 표 헤더와 관련 가능성 높음)
+    consol_kws = ('연결재무제표', '연결기준', '연결 기준')
+    standalone_kws = ('별도재무제표', '별도기준', '별도 기준')
+    consol_pos = min(
+        (cleaned_text.find(k) for k in consol_kws if cleaned_text.find(k) >= 0),
+        default=-1,
+    )
+    standalone_pos = min(
+        (cleaned_text.find(k) for k in standalone_kws if cleaned_text.find(k) >= 0),
+        default=-1,
+    )
+    if consol_pos >= 0 and (standalone_pos < 0 or consol_pos < standalone_pos):
+        return 'CONSOLIDATED'
+    if standalone_pos >= 0:
+        return 'STANDALONE'
+    return None
+
+
 def parse_preliminary_earnings(html_text: str) -> Dict:
-    """잠정실적 본문 → {revenue, operating_profit, net_income, eps}.
+    """잠정실적 본문 → {revenue, operating_profit, net_income, eps, _scope}.
+    DART 잠정실적 폼 컬럼 순서:
+      구분 / 당기실적 / 전기실적 / 전기대비% / 흑자적자전환 /
+      전년동기실적 / 전년동기대비% / 흑자적자전환
+    → previous 는 컬럼 5 (전년동기실적) — 진짜 YoY 기준.
+       기존 버그: 컬럼 2 (전기실적 = QoQ) 를 previous 로 잘못 사용.
     단위 자동 감지 후 백만원으로 통일 (consensus_quarterly와 동일 단위)."""
     if not html_text:
         return {}
@@ -163,21 +194,52 @@ def parse_preliminary_earnings(html_text: str) -> Dict:
         ('주당순이익', 'eps'),  # EPS 본문은 별도 단위(원). 매핑되면 multiplier 적용 X
     ]
 
+    NUM = r'([\-\d,]+|-)'
+    PCT = r'([\-\d,.]+|-)'
+    TURN = r'(\S+)'  # 흑자적자전환여부 ('흑자전환'/'적자전환'/'-')
+    # 6 그룹: 당기 / 전기 / 전기대비% / 흑자전환1 / 전년동기 / 전년동기대비%
+    PATTERN = (
+        rf'당해실적\s+{NUM}\s+{NUM}\s+{PCT}\s+{TURN}\s+{NUM}\s+{PCT}'
+    )
+
     result = {}
     for label, key in LABEL_MAP:
-        m = re.search(
-            rf'{label}\s+당해실적\s+([\-\d,]+)\s+([\-\d,]+)',
-            cleaned
-        )
-        if m:
-            current = _parse_num(m.group(1))
-            previous = _parse_num(m.group(2))
-            # EPS는 단위 변환 X (이미 원 단위)
-            if key != 'eps' and multiplier != 1.0:
-                if current is not None: current = current * multiplier
-                if previous is not None: previous = previous * multiplier
-            if current is not None or previous is not None:
-                result[key] = {'current': current, 'previous': previous}
+        # 라벨 뒤 가까운 위치의 '당해실적' 행 추출
+        m = re.search(rf'{label}\s+{PATTERN}', cleaned)
+        if not m:
+            # 컬럼 5/6 누락된 단순 폼 (전년동기 없음)
+            m_simple = re.search(rf'{label}\s+당해실적\s+{NUM}\s+{NUM}', cleaned)
+            if m_simple:
+                current = _parse_num(m_simple.group(1))
+                # 컬럼 2 는 전기 — YoY 가 아님. previous 는 None.
+                if key != 'eps' and multiplier != 1.0 and current is not None:
+                    current = current * multiplier
+                if current is not None:
+                    result[key] = {'current': current, 'previous': None,
+                                   'yoy_pct': None}
+            continue
+
+        current = _parse_num(m.group(1))
+        # m.group(2) = 전기실적 (QoQ base) — 사용하지 않음
+        prev_yoy = _parse_num(m.group(5))   # 전년동기실적
+        yoy_pct  = _parse_num(m.group(6))   # 전년동기대비% (DART 표기값)
+
+        # 단위 변환 (EPS 제외)
+        if key != 'eps' and multiplier != 1.0:
+            if current is not None:  current  = current  * multiplier
+            if prev_yoy is not None: prev_yoy = prev_yoy * multiplier
+
+        if current is not None or prev_yoy is not None:
+            result[key] = {
+                'current': current,
+                'previous': prev_yoy,   # 진짜 전년동기 (YoY base)
+                'yoy_pct': yoy_pct,     # DART 본문에 표기된 YoY %
+            }
+
+    # body 기반 scope 감지 (제목보다 신뢰도 높음)
+    scope = detect_scope_from_body(cleaned)
+    if scope:
+        result['_scope'] = scope
 
     return result
 
@@ -229,21 +291,28 @@ def save_earnings_actual(stock_code: str, rcept_no: str, rcept_dt: str,
     ni  = (parsed.get('net_income') or {}).get('current')
     eps = (parsed.get('eps') or {}).get('current')
 
-    # YoY/QoQ 계산용 직전값 (단순화: 그냥 두 번째 숫자가 전기값으로 가정)
-    # 정확한 YoY는 financial_quarterly의 직전 4Q 데이터로 별도 계산
+    # 전년동기 (DART 폼 컬럼 5) — 진짜 YoY base
     prev_rev = (parsed.get('revenue') or {}).get('previous')
     prev_op  = (parsed.get('operating_profit') or {}).get('previous')
 
-    rev_yoy = None
-    op_yoy = None
-    if rev and prev_rev and prev_rev != 0:
+    # DART 본문에 표기된 YoY% 우선 사용 (반올림/단위 일관성). 없으면 직접 계산
+    rev_yoy = (parsed.get('revenue') or {}).get('yoy_pct')
+    op_yoy  = (parsed.get('operating_profit') or {}).get('yoy_pct')
+    if rev_yoy is None and rev is not None and prev_rev and prev_rev != 0:
         rev_yoy = (rev - prev_rev) / abs(prev_rev) * 100
-    if op and prev_op and prev_op != 0:
+    if op_yoy is None and op is not None and prev_op and prev_op != 0:
         op_yoy = (op - prev_op) / abs(prev_op) * 100
 
-    is_consolidated = 1 if doc_type == 'CONSOLIDATED_PRELIMINARY' else (
-        0 if doc_type == 'STANDALONE_PRELIMINARY' else 1
-    )
+    # scope: body 명시 > title 기반 폴백
+    body_scope = parsed.get('_scope')
+    if body_scope == 'CONSOLIDATED':
+        is_consolidated = 1
+    elif body_scope == 'STANDALONE':
+        is_consolidated = 0
+    else:
+        is_consolidated = 1 if doc_type == 'CONSOLIDATED_PRELIMINARY' else (
+            0 if doc_type == 'STANDALONE_PRELIMINARY' else 1
+        )
 
     source_type = {
         'CONSOLIDATED_PRELIMINARY': 'DART_PRELIMINARY',
@@ -350,7 +419,9 @@ def process_disclosure(rcept_no: str, stock_code: str, rcept_dt: str,
         'stock_code': stock_code,
         'doc_type': doc_type,
         'status': 'OK' if ok else 'SAVE_FAIL',
-        'parsed': {k: v.get('current') for k, v in parsed.items()},
+        'parsed': {k: v.get('current') for k, v in parsed.items()
+                   if isinstance(v, dict)},
+        'scope': parsed.get('_scope'),
     }
 
 

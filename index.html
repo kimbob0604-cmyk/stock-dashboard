@@ -20,29 +20,44 @@
     <button class="market-btn active" data-market="kr">🇰🇷 국내</button>
     <button class="market-btn"        data-market="us">🇺🇸 미국</button>
   </div>
+  <!-- Step 4-5-2-B: 시간 컨텍스트 배지 자리 (다음 단계에서 콘텐츠 삽입) -->
+  <div id="market-context-badge" class="market-context"></div>
+
   <ul class="sidebar-menu" id="sidebar-menu">
-    <li class="sidebar-group-label">핵심</li>
+    <!-- 🌍 시장 상태 (Tier 1) -->
+    <li class="sidebar-group-label">🌍 시장 상태</li>
     <li class="sidebar-item"        data-page="dashboard"><span class="mi">📊</span>대시보드</li>
     <li class="sidebar-item active" data-page="thememap"><span class="mi">🗺️</span>테마맵</li>
-    <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
+    <li class="sidebar-item"        data-page="valuechain"><span class="mi">🔗</span>밸류체인</li>
+    <li class="sidebar-item"        data-page="market"><span class="mi">📈</span>시황분석</li>
+    <li class="sidebar-item"        data-page="globalmacro"><span class="mi">🌍</span>글로벌 매크로</li>
+    <li class="sidebar-item"        data-page="disclosure"><span class="mi">📢</span>공시</li>
+
+    <!-- 🔬 분석 작업 (Tier 2) -->
+    <li class="sidebar-group-label">🔬 분석 작업</li>
+    <li class="sidebar-item"        data-page="verification"><span class="mi">✅</span>검증 시트<span class="nav-badge-new">NEW</span></li>
+    <li class="sidebar-item"        data-page="journal"><span class="mi">📓</span>분석 일지<span class="nav-badge-new">NEW</span></li>
     <li class="sidebar-item"        data-page="discover"><span class="mi">🔬</span>종목발굴</li>
     <li class="sidebar-item"        data-page="agent"><span class="mi">🤖</span>AI추천</li>
-
-    <li class="sidebar-group-label">분석</li>
-    <li class="sidebar-item"        data-page="market"><span class="mi">📈</span>시황분석</li>
-    <li class="sidebar-item"        data-page="disclosure"><span class="mi">📢</span>공시</li>
+    <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
     <li class="sidebar-item"        data-page="backtest"><span class="mi">📊</span>백테스트</li>
     <li class="sidebar-item"        data-page="recperf"><span class="mi">🎯</span>추천성과</li>
     <li class="sidebar-item"        data-page="correlation"><span class="mi">🔗</span>상관관계</li>
-    <li class="sidebar-item"        data-page="globalmacro"><span class="mi">🌍</span>글로벌 매크로</li>
-    <li class="sidebar-item"        data-page="valuechain"><span class="mi">🔗</span>밸류체인</li>
 
-    <li class="sidebar-group-label">매매</li>
+    <!-- ⚙ 운영 점검 (Tier 3, NEW) -->
+    <li class="sidebar-group-label">⚙ 운영 점검</li>
+    <li class="sidebar-item"        data-page="ops-freshness"><span class="mi">🌡</span>데이터 신선도<span class="nav-badge-new">NEW</span></li>
+    <li class="sidebar-item"        data-page="ops-cron"><span class="mi">⏱</span>Cron 모니터<span class="nav-badge-new">NEW</span></li>
+    <li class="sidebar-item"        data-page="ops-health"><span class="mi">📊</span>헬스 대시보드<span class="nav-badge-new">NEW</span></li>
+
+    <!-- 💼 매매 -->
+    <li class="sidebar-group-label">💼 매매</li>
     <li class="sidebar-item"        data-page="portfolio"><span class="mi">💼</span>포트폴리오</li>
     <li class="sidebar-item"        data-page="pnljournal"><span class="mi">📈</span>수익률 저널</li>
 
+    <!-- 🛠 더보기 (hidden) -->
     <li class="sidebar-group-label sidebar-toggle" id="sidebar-more-toggle">
-      더보기 <span id="sidebar-more-arrow">▼</span>
+      🛠 더보기 <span id="sidebar-more-arrow">▼</span>
     </li>
     <li class="sidebar-item sidebar-more-item" data-page="research" style="display:none"><span class="mi">📑</span>리서치</li>
     <li class="sidebar-item sidebar-more-item" data-page="etfmap" style="display:none"><span class="mi">📦</span>ETF맵</li>
@@ -274,6 +289,12 @@
     <div id="newhighs-view"></div>
   </div>
 
+  <!-- ========= Phase 4-5-2-A: 신규 페이지 placeholder ========= -->
+  <div class="page" id="page-verification"></div>
+  <div class="page" id="page-ops-freshness"></div>
+  <div class="page" id="page-ops-cron"></div>
+  <div class="page" id="page-ops-health"></div>
+
   <!-- SHARED: CHART PANEL (모든 페이지에서 종목 클릭 시 열림) -->
   <!-- SHARED: CHART MODAL OVERLAY (Phase 18) -->
   <div id="chart-panel-overlay" style="display:none;">
@@ -331,6 +352,8 @@
 
 <!-- Split modules (load before main script) -->
 <script src="/static/js/utils.js"></script>
+<script src="/static/js/freshness.js"></script>
+<script src="/static/js/marketContext.js"></script>
 <script src="/static/js/websocket.js"></script>
 <script src="/static/js/chart.js"></script>
 <script src="/static/js/pages.js"></script>

@@ -235,8 +235,12 @@ def build_prompt(ctx: Dict) -> str:
     op_pct = ctx['op_pct']
     rev_a_eok = (ctx['rev_actual'] or 0) / 100  # 백만원 → 억원
     op_a_eok = (ctx['op_actual'] or 0) / 100
-    rev_c_eok = (ctx['rev_consensus'] or 0) / 100
-    op_c_eok = (ctx['op_consensus'] or 0) / 100
+    rev_c_eok = (ctx['rev_consensus'] or 0) / 100 if ctx.get('rev_consensus') else None
+    op_c_eok = (ctx['op_consensus'] or 0) / 100 if ctx.get('op_consensus') else None
+    rev_pct_str = f"{rev_pct:+.1f}%" if rev_pct is not None else 'N/A'
+    op_pct_str = f"{op_pct:+.1f}%" if op_pct is not None else 'N/A'
+    rev_c_str = f"{rev_c_eok:,.0f}억" if rev_c_eok is not None else '컨센 없음'
+    op_c_str = f"{op_c_eok:,.0f}억" if op_c_eok is not None else '컨센 없음'
 
     kuvic_section = ''
     if ctx.get('kuvic_thesis'):
@@ -263,8 +267,8 @@ def build_prompt(ctx: Dict) -> str:
 - 메모: {ctx['note']}
 
 [실적 vs 컨센서스]
-- 매출: 실제 {rev_a_eok:,.0f}억 vs 컨센 {rev_c_eok:,.0f}억 ({rev_pct:+.1f}%)
-- 영업익: 실제 {op_a_eok:,.0f}억 vs 컨센 {op_c_eok:,.0f}억 ({op_pct:+.1f}%)
+- 매출: 실제 {rev_a_eok:,.0f}억 vs 컨센 {rev_c_str} ({rev_pct_str})
+- 영업익: 실제 {op_a_eok:,.0f}억 vs 컨센 {op_c_str} ({op_pct_str})
 
 [밸류체인]
 {segments_str}
@@ -302,15 +306,17 @@ def build_fallback(ctx: Dict) -> str:
         'INLINE': '·',
     }.get(ctx['signal'], '📊')
 
-    rev_pct = ctx.get('rev_pct') or 0
-    op_pct = ctx.get('op_pct') or 0
+    rev_pct = ctx.get('rev_pct')
+    op_pct = ctx.get('op_pct')
     rev_a_eok = (ctx['rev_actual'] or 0) / 100
     op_a_eok = (ctx['op_actual'] or 0) / 100
+    rev_pct_s = f"{rev_pct:+.1f}%" if rev_pct is not None else 'YoY 기준'
+    op_pct_s = f"{op_pct:+.1f}%" if op_pct is not None else 'YoY 기준'
 
     lines = [
         f"{emoji} {ctx['name']} ({ctx['stock_code']}) — {ctx['signal']}",
         f"{ctx['year']}Q{ctx['quarter']} 잠정실적 발표",
-        f"매출 {rev_a_eok:,.0f}억 ({rev_pct:+.1f}%) / 영업익 {op_a_eok:,.0f}억 ({op_pct:+.1f}%)",
+        f"매출 {rev_a_eok:,.0f}억 ({rev_pct_s}) / 영업익 {op_a_eok:,.0f}억 ({op_pct_s})",
         ctx['note'],
     ]
     if ctx.get('kuvic_thesis'):

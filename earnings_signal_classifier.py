@@ -301,6 +301,36 @@ def process_earnings_announcement(stock_code: str, year: int, quarter: int,
         return _process_yoy_only(stock_code, year, quarter, actual)
 
     consensus = dict(cons_row)
+
+    # Scope guard: actual scope vs consensus scope 불일치 차단.
+    # 1) actual=별도 + 갭 10% 초과 → YoY 폴백
+    # 2) actual=연결이지만 body YoY ≈ 0인데 consensus 대비 갭 > 20% → 본문 잘못 라벨링
+    rev_a = actual.get('revenue')
+    rev_c = consensus.get('revenue_consensus')
+    body_rev_yoy = actual.get('revenue_yoy_pct')
+
+    scope_mismatch_reason = None
+    if rev_a is not None and rev_c and rev_c > 0:
+        external_pct = abs(rev_a - rev_c) / rev_c
+        if actual.get('is_consolidated') == 0 and external_pct > 0.10:
+            scope_mismatch_reason = '별도 actual vs 연결 consensus'
+        elif (actual.get('is_consolidated') == 1
+              and body_rev_yoy is not None and abs(body_rev_yoy) < 10
+              and external_pct > 0.20):
+            # 본문 yoy는 안정적인데 외부 surprise가 큼 → 라벨링 오류로 추정
+            scope_mismatch_reason = (
+                f'본문 매출 YoY {body_rev_yoy:+.1f}% vs 컨센 갭 '
+                f'{external_pct*100:+.1f}% → scope 의심'
+            )
+
+    if scope_mismatch_reason:
+        conn.close()
+        result = _process_yoy_only(stock_code, year, quarter, actual)
+        result['note'] = (result.get('note', '') +
+                          f' [{scope_mismatch_reason} → YoY 폴백]').strip()
+        result['scope_skipped'] = True
+        return result
+
     sanity = sanity_check_consensus(stock_code, year, quarter, consensus)
 
     if sanity['recommendation'] == 'skip':
@@ -320,6 +350,16 @@ def process_earnings_announcement(stock_code: str, year: int, quarter: int,
     triggers_json = json.dumps(signal_data['triggers'], ensure_ascii=False)
     now = datetime.now().isoformat()
 
+    # 기존 alert_sent 플래그 보존 (재분류 시 이미 발송된 알림이 재발송되지 않도록)
+    prev = cur.execute("""
+        SELECT alert_sent, alert_sent_at, alert_message_preview
+        FROM earnings_surprise
+        WHERE stock_code=? AND year=? AND quarter=?
+    """, (stock_code, year, quarter)).fetchone()
+    keep_sent = prev['alert_sent'] if prev else 0
+    keep_sent_at = prev['alert_sent_at'] if prev else None
+    keep_msg = prev['alert_message_preview'] if prev else None
+
     cur.execute("""
         INSERT OR REPLACE INTO earnings_surprise (
             stock_code, year, quarter,
@@ -327,9 +367,10 @@ def process_earnings_announcement(stock_code: str, year: int, quarter: int,
             revenue_actual, op_actual,
             revenue_surprise_pct, op_surprise_pct,
             signal, priority,
-            alert_sent, triggers, note,
+            alert_sent, alert_sent_at, alert_message_preview,
+            triggers, note,
             calculated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         stock_code, year, quarter,
         consensus.get('revenue_consensus'),
@@ -340,6 +381,7 @@ def process_earnings_announcement(stock_code: str, year: int, quarter: int,
         signal_data['op_surprise_pct'],
         signal_data['signal'],
         signal_data['priority'],
+        keep_sent, keep_sent_at, keep_msg,
         triggers_json,
         signal_data['note'],
         now,
@@ -367,16 +409,34 @@ def process_earnings_announcement(stock_code: str, year: int, quarter: int,
 
 
 def _process_yoy_only(stock_code: str, year: int, quarter: int, actual: Dict) -> Dict:
-    conn = _get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT revenue, operating_profit FROM financial_quarterly
-        WHERE stock_code = ? AND year = ? AND quarter = ?
-    """, (stock_code, year - 1, quarter))
-    prev_row = cur.fetchone()
-    conn.close()
+    """YoY-only 시그널.
+    우선순위:
+      1) earnings_actual.revenue_yoy_pct / op_yoy_pct (DART 본문 표기 — 같은 scope 내 비교, 가장 신뢰)
+      2) financial_quarterly 전년동기 (단, scope 일치 보장 X — 별도 actual vs 연결 historical)
+    """
+    rev_yoy_pct = actual.get('revenue_yoy_pct')
+    op_yoy_pct = actual.get('op_yoy_pct')
 
-    if not prev_row:
+    if rev_yoy_pct is None or op_yoy_pct is None:
+        # financial_quarterly 폴백 — scope 불일치 주의
+        conn = _get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT revenue, operating_profit FROM financial_quarterly
+            WHERE stock_code = ? AND year = ? AND quarter = ?
+        """, (stock_code, year - 1, quarter))
+        prev_row = cur.fetchone()
+        conn.close()
+
+        if prev_row:
+            if rev_yoy_pct is None and prev_row['revenue'] and prev_row['revenue'] > 0 \
+               and actual.get('revenue') is not None:
+                rev_yoy_pct = (actual['revenue'] - prev_row['revenue']) / prev_row['revenue'] * 100
+            if op_yoy_pct is None and prev_row['operating_profit'] \
+               and actual.get('operating_profit') is not None:
+                op_yoy_pct = (actual['operating_profit'] - prev_row['operating_profit']) / abs(prev_row['operating_profit']) * 100
+
+    if rev_yoy_pct is None and op_yoy_pct is None:
         return {
             'stock_code': stock_code, 'signal': 'NO_DATA',
             'priority': 5,
@@ -384,22 +444,34 @@ def _process_yoy_only(stock_code: str, year: int, quarter: int, actual: Dict) ->
             'will_alert': False,
         }
 
-    rev_yoy_pct = None
-    op_yoy_pct = None
-    if prev_row['revenue'] and prev_row['revenue'] > 0 and actual.get('revenue') is not None:
-        rev_yoy_pct = (actual['revenue'] - prev_row['revenue']) / prev_row['revenue'] * 100
-    if prev_row['operating_profit'] and actual.get('operating_profit') is not None:
-        op_yoy_pct = (actual['operating_profit'] - prev_row['operating_profit']) / abs(prev_row['operating_profit']) * 100
+    # 흑전/적전 판정: 본문 표기 yoy_pct가 있어도 turnaround/shock은 actual+prev 절대값 필요.
+    # financial_quarterly에서 다시 조회 (이미 위에서 했을 수도, 없으면 None).
+    prev_op_for_turn = None
+    if op_yoy_pct is not None:
+        try:
+            conn = _get_db()
+            cur = conn.cursor()
+            cur.execute("""SELECT operating_profit FROM financial_quarterly
+                           WHERE stock_code=? AND year=? AND quarter=?""",
+                        (stock_code, year - 1, quarter))
+            row = cur.fetchone()
+            conn.close()
+            prev_op_for_turn = row['operating_profit'] if row else None
+        except Exception:
+            prev_op_for_turn = None
 
     signal, priority = 'YOY_INLINE', 5
     triggers = []
     note_parts = []
 
     if op_yoy_pct is not None:
-        if prev_row['operating_profit'] < 0 and actual['operating_profit'] > 0:
+        cur_op = actual.get('operating_profit')
+        if (prev_op_for_turn is not None and cur_op is not None
+                and prev_op_for_turn < 0 and cur_op > 0):
             signal, priority = 'YOY_TURNAROUND', 2
             triggers.append('YOY_TURNAROUND')
-        elif prev_row['operating_profit'] > 0 and actual['operating_profit'] < 0:
+        elif (prev_op_for_turn is not None and cur_op is not None
+              and prev_op_for_turn > 0 and cur_op < 0):
             signal, priority = 'YOY_SHOCK', 2
             triggers.append('YOY_SHOCK')
         elif op_yoy_pct >= 50:
@@ -413,13 +485,54 @@ def _process_yoy_only(stock_code: str, year: int, quarter: int, actual: Dict) ->
     if rev_yoy_pct is not None:
         note_parts.append(f"매출 YoY {rev_yoy_pct:+.1f}%")
 
+    note_text = ' / '.join(note_parts) + ' [컨센 부재 또는 scope 불일치 → YoY 비교]'
+
+    # earnings_surprise에 기록 (5분 cron이 동일 종목 반복 처리하지 않도록).
+    # surprise%는 None — 단순 처리 마커 + YoY 정보 보존.
+    # 기존 alert_sent 플래그 보존 (재발송 방지).
+    try:
+        conn = _get_db()
+        cur = conn.cursor()
+        triggers_json = json.dumps(triggers, ensure_ascii=False)
+        now = datetime.now().isoformat()
+        prev = cur.execute("""
+            SELECT alert_sent, alert_sent_at, alert_message_preview
+            FROM earnings_surprise
+            WHERE stock_code=? AND year=? AND quarter=?
+        """, (stock_code, year, quarter)).fetchone()
+        keep_sent = prev['alert_sent'] if prev else 0
+        keep_sent_at = prev['alert_sent_at'] if prev else None
+        keep_msg = prev['alert_message_preview'] if prev else None
+        cur.execute("""
+            INSERT OR REPLACE INTO earnings_surprise (
+                stock_code, year, quarter,
+                revenue_consensus, op_consensus,
+                revenue_actual, op_actual,
+                revenue_surprise_pct, op_surprise_pct,
+                signal, priority,
+                alert_sent, alert_sent_at, alert_message_preview,
+                triggers, note,
+                calculated_at
+            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            stock_code, year, quarter,
+            actual.get('revenue'), actual.get('operating_profit'),
+            signal, priority,
+            keep_sent, keep_sent_at, keep_msg,
+            triggers_json, note_text, now,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
     return {
         'stock_code': stock_code, 'year': year, 'quarter': quarter,
         'signal': signal, 'priority': priority,
         'revenue_yoy_pct': round(rev_yoy_pct, 2) if rev_yoy_pct else None,
         'op_yoy_pct': round(op_yoy_pct, 2) if op_yoy_pct else None,
         'triggers': triggers,
-        'note': ' / '.join(note_parts) + ' [컨센 부재, YoY 비교]',
+        'note': note_text,
         'will_alert': priority <= 3,
     }
 

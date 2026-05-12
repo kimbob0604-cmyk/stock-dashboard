@@ -876,7 +876,8 @@ const PAGE_RENDERERS = {
   research:  () => { renderResearchPage(); },
   newhighs:  () => { renderNewHighsPage(); },
   portfolio: () => { renderPortfolioPage(); },
-  journal:   () => { renderJournalPage(); },
+  // journal: 분석 일지로 재할당 (Phase 4-5-2-A) — 매매일지는 portfolio로 통합됨
+  journal:   () => { renderJournalPlaceholder(); },
   etfmap:    () => { renderETFMapPage(); },
   dividend:  () => { renderDividendPage(); },
   disclosure: () => { renderDisclosurePage(); },
@@ -897,10 +898,17 @@ function navigateTo(page) {
     flow: 'market',
     calendar: 'market',
     sector: 'thememap',
-    journal: 'portfolio',
+    // 4-5-2-A: journal 키는 분석 일지로 재할당. 매매일지는 portfolio로 통합돼 자체 메뉴 없음.
   };
   if (_REDIRECTS[page]) page = _REDIRECTS[page];
   if (!(page in PAGE_RENDERERS)) page = 'thememap';
+
+  // 4-5-12: ops 페이지 이탈 시 자동 갱신 타이머 정리
+  const _prevPage = APP.page;
+  if (_prevPage && _prevPage !== page && _prevPage.startsWith('ops-')) {
+    const key = _prevPage.replace('ops-', '');
+    if (typeof _opsClearTimer === 'function') _opsClearTimer(key);
+  }
   APP.page = page;
 
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -912,7 +920,8 @@ function navigateTo(page) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain');
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain',
+                                  'page-verification','page-ops-freshness','page-ops-cron','page-ops-health');
   document.body.classList.add(`page-${page}`);
 
   try { PAGE_RENDERERS[page](); }
@@ -6824,3 +6833,457 @@ window.vc2Refresh       = vc2Refresh;
 window.vc2ToggleBreakdown = vc2ToggleBreakdown;
 window.vc2RemoveStock   = vc2RemoveStock;
 window.vc2PromptAddStock = vc2PromptAddStock;
+
+// ============================================================
+// Phase 4-5-2-A: 신규 페이지 placeholder 5종
+// (verification, journal, ops-freshness, ops-cron, ops-health)
+// ============================================================
+
+function _phEsc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function renderVerificationPlaceholder() {
+  const c = document.getElementById('page-verification');
+  if (!c) return;
+  c.innerHTML = `
+    <div class="page-header">
+      <h2>✅ 검증 시트</h2>
+      <p class="page-desc">KUVIC 5단계 분석 프레임 + 자동 산출 데이터 통합</p>
+    </div>
+    <div class="placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <div class="placeholder-title">Phase 4-5-3에서 구축 예정</div>
+      <div class="placeholder-desc">
+        <p><strong>준비 중인 기능:</strong></p>
+        <ul>
+          <li>종목 검색 + 자동 prefill (5단계 자동 채움)</li>
+          <li>KUVIC 수동 입력 + 운영자 메모</li>
+          <li>자동 vs 수동 비교 (Split View)</li>
+          <li>종합 점수 + 신호 합성 패널</li>
+          <li>어닝 시그널 통합 + Markdown export</li>
+        </ul>
+        <p style="margin-top:16px;color:var(--text-secondary,#94a3b8);font-size:13px;">
+          임시 진입: <a href="/verification/039440" style="color:#3b82f6;">/verification/039440 (에스티아이 테스트)</a>
+        </p>
+      </div>
+    </div>`;
+}
+
+function renderJournalPlaceholder() {
+  const c = document.getElementById('page-journal');
+  if (!c) return;
+  c.innerHTML = `
+    <div class="page-header">
+      <h2>📓 분석 일지</h2>
+      <p class="page-desc">analysis_journal CRUD — KUVIC 분석 보관/검색</p>
+    </div>
+    <div class="placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <div class="placeholder-title">Phase 4-5-9에서 구축 예정</div>
+      <div class="placeholder-desc">
+        <p>현재 데이터: <strong id="journal-count-target">…</strong>건</p>
+        <p style="font-size:12px;color:var(--text-secondary,#94a3b8);">
+          임시 확인: <code>curl http://localhost:8080/api/journal/recent</code>
+        </p>
+      </div>
+    </div>`;
+  // 카운트 fetch (실패 시 무시)
+  fetch('/api/journal/recent?limit=1')
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      const t = document.getElementById('journal-count-target');
+      if (!t || !d) return;
+      const n = (d.count != null) ? d.count
+              : (Array.isArray(d) ? d.length
+              : (d.items ? d.items.length : '?'));
+      t.textContent = String(n);
+    })
+    .catch(() => {
+      const t = document.getElementById('journal-count-target');
+      if (t) t.textContent = '?';
+    });
+}
+
+// ============================================================
+// Phase 4-5-12: 운영 대시보드 — 공통 헬퍼
+// ============================================================
+const _OPS_REFRESH_INTERVAL = 30000;  // 30초
+const _opsTimers = {};
+
+function _opsClearTimer(key) {
+  if (_opsTimers[key]) { clearTimeout(_opsTimers[key]); _opsTimers[key] = null; }
+}
+function _opsScheduleNext(key, fn) {
+  _opsClearTimer(key);
+  _opsTimers[key] = setTimeout(fn, _OPS_REFRESH_INTERVAL);
+}
+
+function _opsScoreClass(score) {
+  if (score == null) return '';
+  if (score >= 80) return 'ok';
+  if (score >= 50) return 'warn';
+  return 'bad';
+}
+function _opsHumanSec(sec) {
+  if (sec == null) return '—';
+  if (sec < 0) return `${Math.abs(sec)}초 지남`;
+  if (sec < 60) return `${sec}초 후`;
+  if (sec < 3600) return `${Math.floor(sec/60)}분 후`;
+  if (sec < 86400) return `${Math.floor(sec/3600)}시간 후`;
+  return `${Math.floor(sec/86400)}일 후`;
+}
+
+// ============================================================
+// ops-freshness — 데이터 신선도 모니터
+// ============================================================
+async function renderOpsFreshnessPlaceholder() {
+  const c = document.getElementById('page-ops-freshness');
+  if (!c) return;
+  if (!c.dataset.inited) {
+    c.dataset.inited = '1';
+    c.innerHTML = `
+      <div class="ops-header">
+        <h2>🌡 데이터 신선도</h2>
+        <div class="ops-meta">
+          <span id="ops-freshness-ts">로딩…</span>
+          <button class="ops-btn" id="ops-freshness-refresh">↻ 새로고침</button>
+        </div>
+      </div>
+      <div class="ops-score-grid" id="ops-freshness-cards"></div>
+      <div class="ops-filter-bar" id="ops-freshness-filters"></div>
+      <table class="ops-table">
+        <thead><tr>
+          <th>소스</th><th>카테고리</th><th>라벨</th>
+          <th>나이</th><th>마지막 갱신</th><th>다음 예상</th>
+        </tr></thead>
+        <tbody id="ops-freshness-rows">
+          <tr><td colspan="6" class="ops-loading">…</td></tr>
+        </tbody>
+      </table>`;
+    document.getElementById('ops-freshness-refresh')
+      .addEventListener('click', renderOpsFreshnessPlaceholder);
+  }
+  try {
+    const r = await fetch('/api/freshness/all', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const sources = d.sources || [];
+    const sum = d.summary || {};
+    const bl = sum.by_label || {};
+
+    document.getElementById('ops-freshness-ts').textContent =
+      `검사: ${sum.checked_at || '—'}`;
+
+    const score = sum.health_score ?? 0;
+    document.getElementById('ops-freshness-cards').innerHTML = `
+      <div class="ops-score-card">
+        <div class="ops-score-label">헬스 점수</div>
+        <div class="ops-score-value ${_opsScoreClass(score)}">${score}<span style="font-size:14px;color:var(--text-muted,#888);">/100</span></div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">LIVE</div>
+        <div class="ops-score-value ok">🟢 ${bl.LIVE || 0}</div>
+        <div class="ops-score-sub">정상</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">DELAY</div>
+        <div class="ops-score-value warn">🟡 ${bl.DELAY || 0}</div>
+        <div class="ops-score-sub">지연</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">ARCHIVE / NO_DATA</div>
+        <div class="ops-score-value bad">⚪ ${bl.ARCHIVE || 0} / 🔴 ${bl.NO_DATA || 0}</div>
+        <div class="ops-score-sub">갱신 필요</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">MANUAL</div>
+        <div class="ops-score-value" style="color:#3b82f6;">👤 ${bl.MANUAL || 0}</div>
+        <div class="ops-score-sub">사용자 입력</div>
+      </div>`;
+
+    const cats = {};
+    sources.forEach(s => { cats[s.category] = (cats[s.category] || 0) + 1; });
+    const activeCat = c._activeCat || 'all';
+    const filterRow = ['all', ...Object.keys(cats)].map(k => {
+      const cnt = k === 'all' ? sources.length : cats[k];
+      const cls = (activeCat === k) ? 'ops-filter active' : 'ops-filter';
+      return `<button class="${cls}" data-cat="${_phEsc(k)}">${_phEsc(k)}<span class="count">${cnt}</span></button>`;
+    }).join('');
+    const fb = document.getElementById('ops-freshness-filters');
+    fb.innerHTML = filterRow;
+    fb.querySelectorAll('.ops-filter').forEach(b => {
+      b.addEventListener('click', () => {
+        c._activeCat = b.getAttribute('data-cat');
+        renderOpsFreshnessPlaceholder();
+      });
+    });
+
+    const filtered = activeCat === 'all'
+      ? sources
+      : sources.filter(s => s.category === activeCat);
+    const order = { NO_DATA: 0, ARCHIVE: 1, DELAY: 2, MANUAL: 3, LIVE: 4 };
+    const sorted = filtered.slice().sort(
+      (a, b) => (order[a.label] ?? 9) - (order[b.label] ?? 9));
+    if (!sorted.length) {
+      document.getElementById('ops-freshness-rows').innerHTML =
+        '<tr><td colspan="6" class="ops-empty">소스 없음</td></tr>';
+    } else {
+      document.getElementById('ops-freshness-rows').innerHTML =
+        sorted.map(s => {
+          const isIssue = ['ARCHIVE','DELAY','NO_DATA'].includes(s.label) && s.category !== 'manual';
+          const cls = isIssue ? 'ops-row-issue' : '';
+          const badge = (typeof freshnessBadge === 'function')
+            ? freshnessBadge(s.label, { title: s.age_human })
+            : `<span>${_phEsc(s.label)}</span>`;
+          return `<tr class="${cls}">
+            <td><strong>${_phEsc(s.name_kr)}</strong>
+                <div style="font-size:10.5px;color:var(--text-muted,#888);">${_phEsc(s.source)}</div></td>
+            <td><span class="ops-cat-tag">${_phEsc(s.category)}</span></td>
+            <td>${badge}</td>
+            <td>${_phEsc(s.age_human || '—')}</td>
+            <td class="ops-when">${_phEsc(s.last_updated_kst || '—')}</td>
+            <td class="ops-when">${_phEsc(s.expected_next || '—')}</td>
+          </tr>`;
+        }).join('');
+    }
+  } catch (e) {
+    document.getElementById('ops-freshness-rows').innerHTML =
+      `<tr><td colspan="6" class="ops-empty" style="color:#ef4444;">로드 실패: ${_phEsc(e.message)}</td></tr>`;
+  }
+  _opsScheduleNext('freshness', renderOpsFreshnessPlaceholder);
+}
+
+// ============================================================
+// ops-cron — APScheduler 잡 모니터
+// ============================================================
+async function renderOpsCronPlaceholder() {
+  const c = document.getElementById('page-ops-cron');
+  if (!c) return;
+  if (!c.dataset.inited) {
+    c.dataset.inited = '1';
+    c.innerHTML = `
+      <div class="ops-header">
+        <h2>⏱ Cron 모니터</h2>
+        <div class="ops-meta">
+          <span id="ops-cron-ts">로딩…</span>
+          <button class="ops-btn" id="ops-cron-refresh">↻ 새로고침</button>
+        </div>
+      </div>
+      <div class="ops-score-grid" id="ops-cron-cards"></div>
+      <div class="ops-filter-bar" id="ops-cron-filters"></div>
+      <table class="ops-table">
+        <thead><tr>
+          <th>잡 ID</th><th>카테고리</th><th>트리거</th>
+          <th>다음 실행</th><th>남은 시간</th><th>액션</th>
+        </tr></thead>
+        <tbody id="ops-cron-rows">
+          <tr><td colspan="6" class="ops-loading">…</td></tr>
+        </tbody>
+      </table>`;
+    document.getElementById('ops-cron-refresh')
+      .addEventListener('click', renderOpsCronPlaceholder);
+  }
+  try {
+    const r = await fetch('/api/ops/cron/jobs', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const jobs = d.jobs || [];
+    const cats = d.categories || {};
+
+    document.getElementById('ops-cron-ts').textContent =
+      `검사: ${d.checked_at || '—'} · 스케줄러: ${d.scheduler_running ? '✅ 실행 중' : '❌ 정지'}`;
+
+    const dueCount = jobs.filter(j => (j.next_run_in_sec ?? 999) <= 60).length;
+    const pausedCount = jobs.filter(j => j.status === 'paused').length;
+    document.getElementById('ops-cron-cards').innerHTML = `
+      <div class="ops-score-card">
+        <div class="ops-score-label">등록된 잡</div>
+        <div class="ops-score-value">${jobs.length}</div>
+        <div class="ops-score-sub">${d.scheduler_running ? '실행 중' : '정지'}</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">1분 내 실행</div>
+        <div class="ops-score-value ${dueCount ? 'ok' : ''}">${dueCount}</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">일시 정지</div>
+        <div class="ops-score-value ${pausedCount ? 'warn' : ''}">${pausedCount}</div>
+      </div>`;
+
+    const activeCat = c._activeCat || 'all';
+    const filterRow = ['all', ...Object.keys(cats)].map(k => {
+      const cnt = k === 'all' ? jobs.length : cats[k];
+      const cls = (activeCat === k) ? 'ops-filter active' : 'ops-filter';
+      return `<button class="${cls}" data-cat="${_phEsc(k)}">${_phEsc(k)}<span class="count">${cnt}</span></button>`;
+    }).join('');
+    const fb = document.getElementById('ops-cron-filters');
+    fb.innerHTML = filterRow;
+    fb.querySelectorAll('.ops-filter').forEach(b => {
+      b.addEventListener('click', () => {
+        c._activeCat = b.getAttribute('data-cat');
+        renderOpsCronPlaceholder();
+      });
+    });
+
+    const filtered = activeCat === 'all' ? jobs : jobs.filter(j => j.category === activeCat);
+    if (!filtered.length) {
+      document.getElementById('ops-cron-rows').innerHTML =
+        '<tr><td colspan="6" class="ops-empty">잡 없음</td></tr>';
+    } else {
+      document.getElementById('ops-cron-rows').innerHTML =
+        filtered.map(j => {
+          const sec = j.next_run_in_sec;
+          let whenCls = 'ops-when';
+          if (sec != null && sec <= 0) whenCls = 'ops-when ops-when-due';
+          else if (sec != null && sec <= 300) whenCls = 'ops-when ops-when-soon';
+          return `<tr>
+            <td><strong>${_phEsc(j.id)}</strong>
+                <div style="font-size:10.5px;color:var(--text-muted,#888);">${_phEsc(j.func || '')}</div></td>
+            <td><span class="ops-cat-tag">${_phEsc(j.category_label || j.category)}</span></td>
+            <td style="font-family:ui-monospace,monospace;font-size:11px;">${_phEsc(j.trigger)}</td>
+            <td class="ops-when">${_phEsc(j.next_run_at || '—')}</td>
+            <td class="${whenCls}">${_phEsc(_opsHumanSec(sec))}</td>
+            <td>
+              <button class="ops-btn" data-trigger-id="${_phEsc(j.id)}">즉시 실행</button>
+            </td>
+          </tr>`;
+        }).join('');
+      document.querySelectorAll('[data-trigger-id]').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+          const id = ev.target.getAttribute('data-trigger-id');
+          if (!confirm(`'${id}' 잡을 지금 즉시 실행할까요?`)) return;
+          ev.target.disabled = true;
+          ev.target.textContent = '실행 중…';
+          try {
+            const rr = await fetch(`/api/ops/cron/trigger/${encodeURIComponent(id)}`,
+                                   { method: 'POST' });
+            const jd = await rr.json();
+            if (jd.ok) {
+              ev.target.textContent = '✓ 발행';
+              setTimeout(renderOpsCronPlaceholder, 2000);
+            } else {
+              ev.target.textContent = '실패';
+              alert('트리거 실패: ' + (jd.error || 'unknown'));
+              ev.target.disabled = false;
+              ev.target.textContent = '즉시 실행';
+            }
+          } catch (e) {
+            alert('네트워크 오류');
+            ev.target.disabled = false;
+            ev.target.textContent = '즉시 실행';
+          }
+        });
+      });
+    }
+  } catch (e) {
+    document.getElementById('ops-cron-rows').innerHTML =
+      `<tr><td colspan="6" class="ops-empty" style="color:#ef4444;">로드 실패: ${_phEsc(e.message)}</td></tr>`;
+  }
+  _opsScheduleNext('cron', renderOpsCronPlaceholder);
+}
+
+// ============================================================
+// ops-health — 종합 헬스 대시보드
+// ============================================================
+async function renderOpsHealthPlaceholder() {
+  const c = document.getElementById('page-ops-health');
+  if (!c) return;
+  if (!c.dataset.inited) {
+    c.dataset.inited = '1';
+    c.innerHTML = `
+      <div class="ops-header">
+        <h2>📊 헬스 대시보드</h2>
+        <div class="ops-meta">
+          <span id="ops-health-ts">로딩…</span>
+          <button class="ops-btn" id="ops-health-refresh">↻ 새로고침</button>
+        </div>
+      </div>
+      <div class="ops-score-grid" id="ops-health-cards"></div>
+      <h3 style="margin:20px 0 8px;font-size:14px;">🔍 데이터 신선도 문제</h3>
+      <div id="ops-health-issues"></div>
+      <h3 style="margin:20px 0 8px;font-size:14px;">💾 DB 통계</h3>
+      <table class="ops-table"><tbody id="ops-health-db"></tbody></table>
+      <h3 style="margin:20px 0 8px;font-size:14px;">📨 텔레그램 + 🤖 LLM 캐시</h3>
+      <table class="ops-table"><tbody id="ops-health-tg"></tbody></table>`;
+    document.getElementById('ops-health-refresh')
+      .addEventListener('click', renderOpsHealthPlaceholder);
+  }
+  try {
+    const r = await fetch('/api/ops/health', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    document.getElementById('ops-health-ts').textContent =
+      `검사: ${d.checked_at || '—'} · 가동: ${Math.floor((d.uptime_sec || 0) / 60)}분`;
+
+    const score = d.overall_score ?? 0;
+    const fr = d.freshness || {};
+    const sc = d.scheduler || {};
+    document.getElementById('ops-health-cards').innerHTML = `
+      <div class="ops-score-card">
+        <div class="ops-score-label">종합 점수</div>
+        <div class="ops-score-value ${_opsScoreClass(score)}">${score}<span style="font-size:14px;color:var(--text-muted,#888);">/100</span></div>
+        <div class="ops-score-sub">freshness 60% · scheduler 30% · db 10%</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">신선도</div>
+        <div class="ops-score-value ${_opsScoreClass(fr.health_score)}">${fr.health_score ?? '—'}<span style="font-size:14px;color:var(--text-muted,#888);">/100</span></div>
+        <div class="ops-score-sub">문제 ${fr.issues_count ?? 0}건 / 전체 ${fr.total ?? 0}</div>
+      </div>
+      <div class="ops-score-card">
+        <div class="ops-score-label">스케줄러</div>
+        <div class="ops-score-value ${sc.running ? 'ok' : 'bad'}">${sc.running ? '실행' : '정지'}</div>
+        <div class="ops-score-sub">활성 ${sc.jobs_active ?? 0} / 정지 ${sc.jobs_paused ?? 0}</div>
+      </div>`;
+
+    const issues = (fr.issues_top || []);
+    document.getElementById('ops-health-issues').innerHTML = issues.length
+      ? `<table class="ops-table"><tbody>${issues.map(i => `
+          <tr class="ops-row-issue">
+            <td><strong>${_phEsc(i.name_kr || i.source)}</strong></td>
+            <td><span class="ops-cat-tag">${_phEsc(i.category)}</span></td>
+            <td>${(typeof freshnessBadge === 'function')
+                ? freshnessBadge(i.label) : _phEsc(i.label)}</td>
+            <td>${_phEsc(i.age_human)}</td>
+          </tr>`).join('')}</tbody></table>`
+      : '<div class="ops-empty">문제 소스 없음 ✅</div>';
+
+    const db = d.db || {};
+    const rows = db.rows || {};
+    document.getElementById('ops-health-db').innerHTML = `
+      <tr><td><strong>크기</strong></td><td>${db.size_mb ?? '—'} MB</td></tr>
+      ${Object.entries(rows).map(([t, n]) =>
+        `<tr><td>${_phEsc(t)}</td><td>${(n != null ? n.toLocaleString() : '—')} rows</td></tr>`
+      ).join('')}`;
+
+    const tg = d.telegram || {};
+    const llm = d.llm_cache || {};
+    document.getElementById('ops-health-tg').innerHTML = `
+      <tr><td><strong>텔레그램 최근 24h</strong></td><td>${tg.last_24h ?? 0} 건</td></tr>
+      <tr><td>텔레그램 최근 7d</td><td>${tg.last_7d ?? 0} 건</td></tr>
+      <tr><td>텔레그램 누적</td><td>전송 ${tg.sent_total ?? 0} / 실패 ${tg.fail_total ?? 0}</td></tr>
+      <tr><td><strong>LLM 캐시</strong></td>
+          <td>엔트리 ${llm.entries ?? 0} · 히트 누적 ${llm.total_hits ?? 0} · ${llm.size_mb ?? 0} MB</td></tr>`;
+  } catch (e) {
+    document.getElementById('ops-health-cards').innerHTML =
+      `<div class="ops-empty" style="color:#ef4444;">로드 실패: ${_phEsc(e.message)}</div>`;
+  }
+  _opsScheduleNext('health', renderOpsHealthPlaceholder);
+}
+
+// PAGE_RENDERERS에 신규 placeholder 등록
+if (typeof PAGE_RENDERERS !== 'undefined') {
+  PAGE_RENDERERS.verification     = renderVerificationPlaceholder;
+  // PAGE_RENDERERS.journal 은 위에서 const 정의 시점에 이미 placeholder로 교체됨
+  PAGE_RENDERERS['ops-freshness'] = renderOpsFreshnessPlaceholder;
+  PAGE_RENDERERS['ops-cron']      = renderOpsCronPlaceholder;
+  PAGE_RENDERERS['ops-health']    = renderOpsHealthPlaceholder;
+}
+
+window.renderVerificationPlaceholder  = renderVerificationPlaceholder;
+window.renderJournalPlaceholder       = renderJournalPlaceholder;
+window.renderOpsFreshnessPlaceholder  = renderOpsFreshnessPlaceholder;
+window.renderOpsCronPlaceholder       = renderOpsCronPlaceholder;
+window.renderOpsHealthPlaceholder     = renderOpsHealthPlaceholder;

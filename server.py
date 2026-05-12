@@ -790,9 +790,12 @@ def route_data_json():
     try:
         data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
         data = _overlay_live_prices_on_data(data)
-        # KOSPI/KOSDAQ stale 보강 (Render에서 data_fetcher 비활성화 시 필수)
-        if (not data.get("kospi") or not data.get("kospi", {}).get("value")
-            or not data.get("kosdaq") or not data.get("kosdaq", {}).get("value")):
+        # KOSPI/KOSDAQ stale 보강 — 값 없거나 actual_date 가 오늘 아닐 때 라이브 덮어쓰기
+        today_str = now_kst().strftime("%Y%m%d")
+        data_stale = data.get("actual_date") != today_str
+        kr_missing = (not data.get("kospi") or not data.get("kospi", {}).get("value")
+                      or not data.get("kosdaq") or not data.get("kosdaq", {}).get("value"))
+        if kr_missing or data_stale or is_market_hours():
             live_idx = _fetch_kr_indices_live()
             if live_idx.get("kospi"):
                 data["kospi"] = live_idx["kospi"]
@@ -1528,9 +1531,12 @@ def sync_us_market_to_db_from_cache() -> dict:
     today = now_kst().strftime("%Y%m%d")
     cache_file = BASE_DIR / "cache" / f"us_market_{today}.json"
     if not cache_file.exists():
-        # 가장 최근 캐시
+        # 가장 최근 캐시 — us_market_summary_*.json (시황 텔레그램용)는 제외
         try:
-            files = sorted(BASE_DIR.glob("cache/us_market_*.json"), reverse=True)
+            files = sorted(
+                BASE_DIR.glob("cache/us_market_2[0-9][0-9][0-9][0-9][0-9][0-9][0-9].json"),
+                reverse=True,
+            )
             cache_file = files[0] if files else None
         except Exception:
             cache_file = None
@@ -6136,7 +6142,8 @@ def _startup():
                            max_instances=1)
         log.info("[KR universe] 매일 08:00 자동 빌드 cron 등록")
 
-        # ── 매일 US 시장 데이터 빌드 (07:00 KST — US 정규장 마감 후) ──
+        # ── 매일 US 시장 데이터 빌드 (05:50 KST — US 장마감 05:00 KST(DST) 직후) ──
+        # 06:10 텔레그램 발송 전에 데이터가 갖춰지도록 빌드를 앞당김.
         def _daily_us_market_build():
             try:
                 _fetch_us_market_data(force=True)
@@ -6145,9 +6152,9 @@ def _startup():
             except Exception as exc:
                 log.warning("[US market] daily build: %s", exc)
         _scheduler.add_job(_daily_us_market_build, "cron",
-                           day_of_week="tue-sat", hour=7, minute=0,
+                           day_of_week="tue-sat", hour=5, minute=50,
                            id="us_market_daily", max_instances=1)
-        log.info("[US market] 화~토 07:00 자동 빌드 + DB 동기화 cron 등록")
+        log.info("[US market] 화~토 05:50 자동 빌드 + DB 동기화 cron 등록")
 
         # ── DB 핵심 테이블 백업 (매시 30분) ──
         def _hourly_db_backup():
@@ -9911,6 +9918,11 @@ def _run_stage2_kr() -> list | None:
     charts:     dict[str, dict] = {}
 
     today_date = _get_trading_date()
+    # YYYYMMDD → YYYY-MM-DD (flow_cache stale 비교용)
+    today_iso = (
+        f"{today_date[:4]}-{today_date[4:6]}-{today_date[6:8]}"
+        if len(today_date) == 8 else None
+    )
     _fetch_done = [0]  # mutable counter for progress
     _db_hits = [0]
     _http_falls = [0]
@@ -9924,7 +9936,7 @@ def _run_stage2_kr() -> list | None:
             # SQLite 직접 조회 (HTTP 오버헤드 제거)
             if USE_SQLITE and _SQLITE_OK:
                 fin   = _read_financial_db(code) or {}
-                flow  = _read_flow_db(code) or {}
+                flow  = _read_flow_db(code, latest_trading_date=today_iso) or {}
                 chart = _read_chart_db(code, 180, today_date) or {}
                 if chart:
                     _db_hits[0] += 1
@@ -9937,9 +9949,9 @@ def _run_stage2_kr() -> list | None:
             if not fin.get("per") and not fin.get("pbr"):
                 if _market_open:
                     fin = _call_api_internal(f"/api/financial/{code}") or {}
+            # flow는 staleness 발생 시(주말/공휴일 포함) HTTP 폴백 — /api/flow 자체가 60분 캐시
             if not flow.get("foreign_value"):
-                if _market_open:
-                    flow = _call_api_internal(f"/api/flow/{code}") or {}
+                flow = _call_api_internal(f"/api/flow/{code}") or {}
         except Exception as exc:
             log.debug("stage2 kr fetch fail %s: %s", code, exc)
         _fetch_done[0] += 1
@@ -11880,8 +11892,51 @@ def api_market_summary_us():
     return jsonify(build_us_market_summary())
 
 
+def _ensure_us_data_for_summary() -> None:
+    """미국 시황 빌드 직전 데이터 readiness 보장.
+    1) 오늘자 us_market 캐시 없고 가장 최근 캐시가 18h 초과 stale → 강제 재빌드
+    2) stocks 테이블에 market='US' 행이 0개 → sync 트리거
+    빌드/싱크 실패해도 본 함수는 silent — 텔레그램 발송은 계속 진행."""
+    today = now_kst().strftime("%Y%m%d")
+    cache_today = BASE_DIR / "cache" / f"us_market_{today}.json"
+    if not cache_today.exists():
+        try:
+            files = sorted(
+                BASE_DIR.glob("cache/us_market_2[0-9][0-9][0-9][0-9][0-9][0-9][0-9].json"),
+                reverse=True,
+            )
+            if files:
+                latest = files[0]
+                age_h = (now_kst().timestamp() - latest.stat().st_mtime) / 3600
+                if age_h > 18:
+                    log.info("[US summary] 캐시 stale %.1fh — 강제 재빌드", age_h)
+                    _fetch_us_market_data(force=True)
+            else:
+                log.info("[US summary] 캐시 없음 — 강제 빌드")
+                _fetch_us_market_data(force=True)
+        except Exception as exc:
+            log.warning("[US summary] 빌드 시도 실패: %s", exc)
+
+    if _SQLITE_OK and USE_SQLITE:
+        try:
+            with _get_db() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM stocks WHERE market='US'"
+                ).fetchone()
+                cnt = row["c"] if row else 0
+            if cnt == 0:
+                log.info("[US summary] stocks 빈 상태 — 캐시→DB 동기화 트리거")
+                sync_us_market_to_db_from_cache()
+        except Exception as exc:
+            log.warning("[US summary] DB readiness 체크 실패: %s", exc)
+
+
 def send_us_market_summary_telegram():
     """미국 장마감 시황 텔레그램 발송 (KST 06:10 cron)."""
+    try:
+        _ensure_us_data_for_summary()
+    except Exception:
+        log.exception("ensure_us_data fail")
     try:
         data = build_us_market_summary()
     except Exception:
@@ -13408,6 +13463,600 @@ def api_analysis_journal_stats():
     except Exception as e:
         log.exception("journal/stats")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# Step 4-5-1-C: 데이터 신선도 API
+# ============================================================
+
+@app.route("/api/freshness/source/<source_key>", methods=["GET"])
+def api_freshness_source(source_key):
+    """단일 소스 신선도 조회. 404 = 등록되지 않은 소스."""
+    try:
+        from data_freshness import get_freshness, DATA_SOURCE_CONFIG
+        if source_key not in DATA_SOURCE_CONFIG:
+            return jsonify({
+                "error": f"등록되지 않은 소스: {source_key}",
+                "available_sources": list(DATA_SOURCE_CONFIG.keys()),
+            }), 404
+        return jsonify(get_freshness(source_key).to_dict())
+    except Exception as exc:
+        log.exception("freshness/source")
+        return jsonify({"error": str(exc), "source": source_key}), 500
+
+
+@app.route("/api/freshness/all", methods=["GET"])
+def api_freshness_all():
+    """전체 소스 신선도 + 요약 통계.
+    Query: category=<key>, issues_only=true
+    """
+    try:
+        from data_freshness import get_all_sources_status, get_freshness_summary
+        category = request.args.get("category")
+        issues_only = (request.args.get("issues_only", "false").lower() == "true")
+        all_results = get_all_sources_status()
+        filtered = all_results
+        if category:
+            filtered = [r for r in filtered if r.category == category]
+        if issues_only:
+            filtered = [
+                r for r in filtered
+                if r.label in ("DELAY", "ARCHIVE", "NO_DATA")
+                and r.category != "manual"
+            ]
+        return jsonify({
+            "sources": [r.to_dict() for r in filtered],
+            "summary": get_freshness_summary(),
+            "filters_applied": {
+                "category": category,
+                "issues_only": issues_only,
+            },
+        })
+    except Exception as exc:
+        log.exception("freshness/all")
+        return jsonify({"error": str(exc)}), 500
+
+
+# ============================================================
+# Step 4-5-2-B: 시장 컨텍스트 API
+# ============================================================
+
+# 한국 거래소 휴장일 (2026 — KRX 공식 일정 발표 시 보강)
+_KR_HOLIDAYS_2026 = {
+    "2026-01-01",  # 신정
+    "2026-02-16", "2026-02-17", "2026-02-18",  # 설날
+    "2026-03-02",  # 삼일절 대체 (3/1 일요일)
+    "2026-05-05",  # 어린이날
+    "2026-05-25",  # 부처님오신날 대체 (5/24 일요일)
+    "2026-06-06",  # 현충일 (토요일이지만 KRX 휴장)
+    "2026-08-15",  # 광복절 (토요일)
+    "2026-09-24", "2026-09-25", "2026-09-28",  # 추석 + 대체월요일
+    "2026-10-03",  # 개천절 (토요일)
+    "2026-10-09",  # 한글날
+    "2026-12-25",  # 성탄절
+    "2026-12-31",  # 연말 휴장
+}
+
+
+def _is_kr_holiday(dt: datetime) -> bool:
+    """주말 또는 한국 공휴일이면 True."""
+    if dt.weekday() >= 5:
+        return True
+    return dt.strftime("%Y-%m-%d") in _KR_HOLIDAYS_2026
+
+
+def _next_trading_open_kst(now: datetime) -> datetime:
+    """now 이후 가장 가까운 거래일 09:00 KST 시각."""
+    cand = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if cand <= now:
+        cand += timedelta(days=1)
+    while _is_kr_holiday(cand):
+        cand += timedelta(days=1)
+    return cand
+
+
+def _humanize_duration(seconds: int) -> str:
+    """초 → '2시간 18분' / '11h 25m'."""
+    if seconds < 0:
+        seconds = 0
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    mins = (seconds % 3600) // 60
+    if days >= 1:
+        return f"{days}일 {hours}시간"
+    if hours >= 1:
+        return f"{hours}시간 {mins}분"
+    return f"{mins}분"
+
+
+def _market_state_kst(now: datetime) -> tuple[str, str]:
+    """state, state_label 결정. now는 KST aware datetime."""
+    if _is_kr_holiday(now):
+        return "CLOSED", "휴장"
+    t = now.hour * 100 + now.minute
+    if 900 <= t <= 1530:
+        return "OPEN", "장중"
+    if t < 900:
+        return "BEFORE", "장 시작 전"
+    return "AFTER", "장후"
+
+
+_STATE_META = {
+    "OPEN":   {"color": "green",  "emoji": "🟢"},
+    "BEFORE": {"color": "gray",   "emoji": "⏳"},
+    "AFTER":  {"color": "yellow", "emoji": "🟡"},
+    "CLOSED": {"color": "gray",   "emoji": "⚪"},
+}
+
+
+def _load_kr_indices(state: str) -> tuple[dict, dict]:
+    """KOSPI/KOSDAQ value/change_pct.
+    OPEN/AFTER 상태에서는 Naver 실시간 우선, 실패 시 data.json 폴백.
+    그 외 상태에서도 data.json 이 stale (오늘 거래일 아님) 이면 라이브 시도."""
+    kospi = {"value": None, "change": None, "is_realtime": state == "OPEN"}
+    kosdaq = {"value": None, "change": None, "is_realtime": state == "OPEN"}
+
+    # 1) data.json 기본값
+    data_date = None
+    try:
+        if DATA_JSON.exists():
+            d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+            data_date = d.get("actual_date")
+            ks = d.get("kospi") or {}
+            kq = d.get("kosdaq") or {}
+            if ks.get("value") is not None:
+                kospi["value"] = ks["value"]
+                kospi["change"] = ks.get("change_pct")
+            if kq.get("value") is not None:
+                kosdaq["value"] = kq["value"]
+                kosdaq["change"] = kq.get("change_pct")
+    except Exception:
+        pass
+
+    # 2) 라이브 덮어쓰기: OPEN/AFTER 또는 data.json 이 오늘 거래일 아닐 때
+    today_str = now_kst().strftime("%Y%m%d")
+    is_stale = data_date != today_str
+    if state in ("OPEN", "AFTER") or is_stale:
+        try:
+            live = _fetch_kr_indices_live()
+            if live.get("kospi", {}).get("value") is not None:
+                kospi["value"] = live["kospi"]["value"]
+                kospi["change"] = live["kospi"]["change_pct"]
+            if live.get("kosdaq", {}).get("value") is not None:
+                kosdaq["value"] = live["kosdaq"]["value"]
+                kosdaq["change"] = live["kosdaq"]["change_pct"]
+        except Exception:
+            pass
+
+    return kospi, kosdaq
+
+
+@app.route("/api/market/context", methods=["GET"])
+def api_market_context():
+    """사이드바 시간 컨텍스트 배지용. 30~60초 간격 호출 가정.
+
+    Returns 예시:
+      OPEN: state=OPEN, label='장중', kospi/kosdaq 실시간(또는 최근값)
+      BEFORE: state=BEFORE, label='장 시작 전', time_until_open='2시간 18분'
+      AFTER: state=AFTER, label='장후', next_trading_label='5/8(금)'
+      CLOSED: state=CLOSED, label='휴장', time_until_next_trading='1일 14시간'
+    """
+    try:
+        now = now_kst()
+        state, label = _market_state_kst(now)
+        meta = _STATE_META[state]
+        weekday_kr = "월화수목금토일"[now.weekday()]
+        kospi, kosdaq = _load_kr_indices(state)
+
+        result = {
+            "state": state,
+            "state_label": label,
+            "state_color": meta["color"],
+            "state_emoji": meta["emoji"],
+            "now_kst": now.strftime("%H:%M"),
+            "weekday_kr": weekday_kr,
+            "date": now.strftime("%Y-%m-%d"),
+            "kospi": kospi,
+            "kosdaq": kosdaq,
+            "last_updated": now.isoformat(),
+        }
+
+        # 다음 개장 시각 — BEFORE/AFTER/CLOSED 공통
+        next_open = _next_trading_open_kst(now)
+        secs = int((next_open - now).total_seconds())
+        if state == "BEFORE":
+            result["time_until_open"] = _humanize_duration(secs)
+        if state in ("AFTER", "CLOSED"):
+            wd_kr = "월화수목금토일"[next_open.weekday()]
+            result["next_trading_day"] = next_open.strftime("%Y-%m-%d")
+            result["next_trading_label"] = f"{next_open.month}/{next_open.day}({wd_kr})"
+            result["time_until_next_trading"] = _humanize_duration(secs)
+
+        return jsonify(result)
+    except Exception as exc:
+        log.exception("market/context")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/freshness-demo", methods=["GET"])
+def freshness_demo_page():
+    """4-5-1-D 시각 검증 페이지 — 모든 라벨 + 실제 API 호출 결과."""
+    return Response(_FRESHNESS_DEMO_HTML, content_type="text/html; charset=utf-8")
+
+
+_FRESHNESS_DEMO_HTML = """<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Freshness 컴포넌트 데모</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  body { font-family: 'Noto Sans KR', sans-serif; padding: 24px; max-width: 1100px; margin: 0 auto; line-height: 1.55; color: #222; }
+  h1 { margin: 0 0 8px; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 28px; }
+  .row { margin: 8px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .label-cell { display: inline-block; width: 90px; color: #555; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: 220px 1fr; gap: 6px 16px; align-items: center; }
+  .grid > .key { font-size: 12px; color: #555; font-family: ui-monospace, monospace; }
+  .note { font-size: 12px; color: #888; }
+  pre { background: #f5f5f5; padding: 8px 12px; border-radius: 6px; font-size: 12px; overflow: auto; }
+</style>
+</head><body>
+
+<h1>🟢 Freshness 컴포넌트 데모</h1>
+<p class="note">Step 4-5-1-D · <code>freshness.js</code> + <code>style.css</code> 시각 검증 페이지</p>
+
+<h2>1. 라벨 5종 (정적)</h2>
+<div class="grid" id="static-labels"></div>
+
+<h2>2. 라벨 5종 — compact 모드 (점만)</h2>
+<div class="grid" id="compact-labels"></div>
+
+<h2>3. 출처 배지 (mock)</h2>
+<div id="mock-source"></div>
+
+<h2>4. 실제 API 응답 (전체 20개 소스)</h2>
+<div class="note">서버에서 <code>/api/freshness/all</code> 호출 후 <code>sourceBadge()</code>로 렌더.</div>
+<div id="api-rendered" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;"></div>
+
+<h2>5. data-freshness 자동 렌더 (refreshAllBadges)</h2>
+<div class="note">DOM에 <code>&lt;span data-freshness="naver_price"&gt;</code> 식으로 두면 자동 채워짐.</div>
+<div style="display:flex;flex-direction:column;gap:4px;margin-top:8px;">
+  <div>네이버 가격: <span data-freshness="naver_price"></span></div>
+  <div>분석 일지: <span data-freshness="analysis_journal"></span></div>
+  <div>등록 안 된 소스: <span data-freshness="fake_source"></span></div>
+  <div>compact 모드: <span data-freshness="ohlcv_kr" data-compact></span></div>
+</div>
+
+<script src="/static/js/freshness.js"></script>
+<script>
+const LABELS = ['LIVE','DELAY','ARCHIVE','MANUAL','NO_DATA'];
+
+// 1. 정적 라벨
+const g1 = document.getElementById('static-labels');
+LABELS.forEach(l => {
+  g1.insertAdjacentHTML('beforeend',
+    `<div class="key">${l}</div><div>${freshnessBadge(l, {title: 'tooltip text'})}</div>`);
+});
+
+// 2. compact
+const g2 = document.getElementById('compact-labels');
+LABELS.forEach(l => {
+  g2.insertAdjacentHTML('beforeend',
+    `<div class="key">${l}</div><div>${freshnessBadge(l, {compact: true})}</div>`);
+});
+
+// 3. mock 출처 배지
+const mock = {
+  source: 'naver_price',
+  name_kr: '네이버 가격 (KR)',
+  label: 'LIVE',
+  last_updated_kst: '2026-05-06 17:23:45 KST',
+  age_human: '3분 전',
+  description: 'stocks 테이블 KR 가격',
+};
+document.getElementById('mock-source').innerHTML =
+  '<div class="row">기본: ' + sourceBadge(mock) + '</div>'
+  + '<div class="row">신선도 표시 끔: ' + sourceBadge(mock, {withFreshness: false}) + '</div>';
+
+// 4. 전체 API 호출
+fetch('/api/freshness/all').then(r => r.json()).then(j => {
+  const root = document.getElementById('api-rendered');
+  for (const s of (j.sources || [])) {
+    const div = document.createElement('div');
+    div.innerHTML = sourceBadge(s);
+    root.appendChild(div);
+  }
+}).catch(e => {
+  document.getElementById('api-rendered').textContent = '로드 실패: ' + e;
+});
+
+// 5. data-freshness 자동
+refreshAllBadges();
+</script>
+</body></html>
+"""
+
+
+@app.route("/api/freshness/categories", methods=["GET"])
+def api_freshness_categories():
+    """카테고리 목록 + 소속 소스 (UI 필터용)."""
+    try:
+        from data_freshness import DATA_SOURCE_CONFIG
+        CATEGORY_NAMES_KR = {
+            "realtime":  "🟢 실시간 (분 단위)",
+            "frequent":  "🟡 빈번 (분~시간)",
+            "hourly":    "🟠 시간 단위",
+            "daily":     "🔵 일간",
+            "weekly":    "⚪ 주간",
+            "monthly":   "⚪ 월간",
+            "quarterly": "⚪ 분기",
+            "ohlcv":     "📊 일봉 (OHLCV)",
+            "manual":    "👤 수동 입력",
+            "static":    "🔧 정적",
+        }
+        cat_dict: dict[str, list] = {}
+        for source, config in DATA_SOURCE_CONFIG.items():
+            cat = config.get("category", "unknown")
+            cat_dict.setdefault(cat, []).append({
+                "source": source,
+                "name_kr": config.get("name_kr", source),
+            })
+        cat_order = ["realtime", "frequent", "hourly", "daily", "weekly",
+                     "monthly", "quarterly", "ohlcv", "manual", "static"]
+        result = []
+        for cat in cat_order:
+            if cat in cat_dict:
+                result.append({
+                    "key": cat,
+                    "name_kr": CATEGORY_NAMES_KR.get(cat, cat),
+                    "count": len(cat_dict[cat]),
+                    "sources": cat_dict[cat],
+                })
+        return jsonify({"categories": result})
+    except Exception as exc:
+        log.exception("freshness/categories")
+        return jsonify({"error": str(exc)}), 500
+
+
+# ============================================================
+# Phase 4-5-12: 운영 대시보드 API
+# ============================================================
+
+# Cron 잡 카테고리 매핑 (id 패턴 → 그룹). UI 필터링/색상용.
+_CRON_CATEGORIES = {
+    "alert":     ("📨 알림", ("tg_", "alert_", "watchlist", "_check_trailing")),
+    "market":    ("📈 시세/데이터", ("market_update", "_refresh_prices",
+                                    "_refresh_briefing", "_refresh_global",
+                                    "sync_us_market", "us_market_build",
+                                    "naver_universe", "stage2", "agent",
+                                    "etf", "themes_mapping", "us_universe")),
+    "earnings":  ("💎 어닝/공시", ("earnings_", "consensus", "dart_",
+                                  "poll_dart", "init_dart")),
+    "infra":     ("⚙ 인프라", ("self_keep_alive", "db_backup",
+                                "universe_sync", "options_signal")),
+}
+
+
+def _classify_cron_job(job_id: str) -> tuple[str, str]:
+    """job id → (category_key, label_kr). 패턴 매칭 폴백."""
+    jid = (job_id or "").lower()
+    for key, (label, prefixes) in _CRON_CATEGORIES.items():
+        if any(p.lower().strip("_") in jid for p in prefixes):
+            return key, label
+    return "other", "🔹 기타"
+
+
+def _trigger_summary(trigger) -> str:
+    """APScheduler trigger 객체 → 사람이 읽을 수 있는 요약."""
+    try:
+        s = str(trigger)
+        # IntervalTrigger: 'interval[0:05:00]'
+        # CronTrigger: 'cron[day_of_week='mon-fri', hour='9-15', minute='5,35']'
+        return s[:160]
+    except Exception:
+        return "(unknown)"
+
+
+@app.route("/api/ops/cron/jobs", methods=["GET"])
+def api_ops_cron_jobs():
+    """APScheduler 등록 잡 + 다음 실행시각 + 카테고리.
+    Query: category=<key>, status=running|paused
+    """
+    try:
+        if _scheduler is None or not getattr(_scheduler, "running", False):
+            return jsonify({
+                "scheduler_running": False,
+                "jobs": [],
+                "count": 0,
+                "categories": {},
+            })
+        category_filter = request.args.get("category")
+        status_filter = request.args.get("status")
+        now = now_kst()
+        rows = []
+        for j in _scheduler.get_jobs():
+            cat_key, cat_label = _classify_cron_job(j.id)
+            nrt = getattr(j, "next_run_time", None)
+            next_run_iso = None
+            sec_until = None
+            if nrt is not None:
+                next_run_iso = nrt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
+                sec_until = int((nrt.astimezone(KST) - now).total_seconds())
+            job_status = "paused" if nrt is None else (
+                "due" if sec_until is not None and sec_until <= 0 else "scheduled"
+            )
+            rows.append({
+                "id": j.id,
+                "name": j.name or j.id,
+                "func": getattr(j.func_ref, "__name__", str(j.func_ref))
+                        if hasattr(j, "func_ref") else str(getattr(j, "func", "")),
+                "trigger": _trigger_summary(j.trigger),
+                "category": cat_key,
+                "category_label": cat_label,
+                "next_run_at": next_run_iso,
+                "next_run_in_sec": sec_until,
+                "status": job_status,
+                "max_instances": getattr(j, "max_instances", None),
+            })
+        if category_filter:
+            rows = [r for r in rows if r["category"] == category_filter]
+        if status_filter:
+            rows = [r for r in rows if r["status"] == status_filter]
+        # 다음 실행 임박순 정렬
+        rows.sort(key=lambda r: (r["next_run_in_sec"] if r["next_run_in_sec"] is not None else 1 << 30))
+        # 카테고리 분포
+        cat_dist: dict[str, int] = {}
+        for r in rows:
+            cat_dist[r["category"]] = cat_dist.get(r["category"], 0) + 1
+        return jsonify({
+            "scheduler_running": True,
+            "jobs": rows,
+            "count": len(rows),
+            "categories": cat_dist,
+            "checked_at": now.strftime("%Y-%m-%d %H:%M:%S KST"),
+        })
+    except Exception as exc:
+        log.exception("ops/cron/jobs")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/ops/cron/trigger/<job_id>", methods=["POST"])
+def api_ops_cron_trigger(job_id: str):
+    """수동 트리거 — 등록된 잡을 즉시 한 번 실행 (다음 정기 실행은 유지)."""
+    try:
+        if _scheduler is None or not _scheduler.running:
+            return jsonify({"ok": False, "error": "scheduler not running"}), 409
+        job = _scheduler.get_job(job_id)
+        if not job:
+            return jsonify({"ok": False, "error": f"job not found: {job_id}"}), 404
+        # 다음 실행을 지금으로 당김 (modify) — 그러면 즉시 실행 후 trigger 가 다음 시각 자동 계산
+        from datetime import datetime as _dt
+        _scheduler.modify_job(job_id, next_run_time=_dt.now())
+        return jsonify({
+            "ok": True,
+            "job_id": job_id,
+            "name": job.name or job_id,
+            "triggered_at": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+        })
+    except Exception as exc:
+        log.exception("ops/cron/trigger")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/ops/health", methods=["GET"])
+def api_ops_health():
+    """헬스 대시보드용 통합 메트릭.
+    구성: data freshness summary + scheduler + DB + LLM cache + telegram count.
+    """
+    try:
+        result: dict = {
+            "checked_at": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+            "uptime_sec": round(time.time() - _start_time),
+        }
+
+        # 1) 데이터 신선도 요약
+        try:
+            from data_freshness import get_freshness_summary
+            fr = get_freshness_summary()
+            result["freshness"] = {
+                "health_score": fr.get("health_score"),
+                "by_label": fr.get("by_label"),
+                "total": fr.get("total_sources"),
+                "issues_count": len(fr.get("issues", [])),
+                "issues_top": fr.get("issues", [])[:5],
+            }
+        except Exception as exc:
+            result["freshness"] = {"error": str(exc)}
+
+        # 2) 스케줄러
+        try:
+            sched_running = bool(_scheduler and _scheduler.running)
+            jobs = _scheduler.get_jobs() if sched_running else []
+            paused = sum(1 for j in jobs if getattr(j, "next_run_time", None) is None)
+            result["scheduler"] = {
+                "running": sched_running,
+                "jobs_total": len(jobs),
+                "jobs_paused": paused,
+                "jobs_active": len(jobs) - paused,
+            }
+        except Exception as exc:
+            result["scheduler"] = {"error": str(exc)}
+
+        # 3) DB 크기 + 핵심 테이블 row count
+        try:
+            db_path = BASE_DIR / "db" / "dashboard.db"
+            size_mb = round(db_path.stat().st_size / (1024 * 1024), 1) if db_path.exists() else None
+            tables_count = {}
+            with _get_db() as conn:
+                for tbl in ("stocks", "ohlcv", "disclosure_history",
+                            "earnings_surprise", "alert_history_v2",
+                            "analysis_journal"):
+                    try:
+                        cur = conn.execute(f"SELECT COUNT(*) FROM {tbl}")
+                        tables_count[tbl] = cur.fetchone()[0]
+                    except Exception:
+                        tables_count[tbl] = None
+            result["db"] = {"size_mb": size_mb, "rows": tables_count}
+        except Exception as exc:
+            result["db"] = {"error": str(exc)}
+
+        # 4) LLM 캐시 (qwen3:14b)
+        try:
+            cache_db = BASE_DIR / "db" / "llm_cache.db"
+            if cache_db.exists():
+                conn_lc = sqlite3.connect(str(cache_db))
+                row = conn_lc.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(hit_count),0) FROM llm_cache"
+                ).fetchone()
+                conn_lc.close()
+                result["llm_cache"] = {
+                    "entries": row[0],
+                    "total_hits": row[1],
+                    "size_mb": round(cache_db.stat().st_size / (1024 * 1024), 2),
+                }
+            else:
+                result["llm_cache"] = {"entries": 0, "total_hits": 0, "size_mb": 0}
+        except Exception as exc:
+            result["llm_cache"] = {"error": str(exc)}
+
+        # 5) 텔레그램 발송 통계 (alert_history_v2 활용)
+        try:
+            with _get_db() as conn:
+                cur = conn.execute("""
+                    SELECT
+                        SUM(CASE WHEN sent_at >= datetime('now','-1 day') THEN 1 ELSE 0 END) AS day,
+                        SUM(CASE WHEN sent_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS week,
+                        SUM(CASE WHEN sent_status = 'SENT' THEN 1 ELSE 0 END) AS sent_total,
+                        SUM(CASE WHEN sent_status != 'SENT' THEN 1 ELSE 0 END) AS fail_total
+                    FROM alert_history_v2
+                """)
+                r = cur.fetchone()
+                result["telegram"] = {
+                    "last_24h": r[0] or 0,
+                    "last_7d": r[1] or 0,
+                    "sent_total": r[2] or 0,
+                    "fail_total": r[3] or 0,
+                }
+        except Exception as exc:
+            result["telegram"] = {"error": str(exc)}
+
+        # 종합 점수 (0~100): freshness 가중 60% + scheduler 30% + db 10%
+        try:
+            f_score = result.get("freshness", {}).get("health_score") or 0
+            s = result.get("scheduler", {})
+            s_score = 100 if s.get("running") else 0
+            if s.get("jobs_total"):
+                s_score = int(round(100 * (s["jobs_active"] / s["jobs_total"])))
+            db_score = 100 if (result.get("db", {}).get("size_mb") or 0) > 0 else 0
+            overall = int(round(0.6 * f_score + 0.3 * s_score + 0.1 * db_score))
+            result["overall_score"] = overall
+        except Exception:
+            result["overall_score"] = None
+
+        return jsonify(result)
+    except Exception as exc:
+        log.exception("ops/health")
+        return jsonify({"error": str(exc)}), 500
 
 
 # gunicorn 이 모듈을 import 하는 시점에 자동 실행

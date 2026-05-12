@@ -5293,3 +5293,305 @@ tr:hover td {
     text-align: left;
   }
 }
+
+/* ==============================================================
+ * Step 4-5-1-D: 신선도 / 출처 배지
+ * ============================================================== */
+.frb {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.frb-live    { background: rgba(40,180,80,0.12);  color: #1f8b3a; border-color: rgba(40,180,80,0.35); }
+.frb-delay   { background: rgba(220,170,30,0.15); color: #a37700; border-color: rgba(220,170,30,0.40); }
+.frb-archive { background: rgba(120,120,120,0.12); color: #555;   border-color: rgba(120,120,120,0.30); }
+.frb-manual  { background: rgba(50,120,210,0.12); color: #2562b8; border-color: rgba(50,120,210,0.35); }
+.frb-nodata  { background: rgba(220,55,55,0.12);  color: #b22; border-color: rgba(220,55,55,0.40); }
+
+/* 출처 배지 */
+.src-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(120,120,120,0.08);
+  border: 1px solid rgba(120,120,120,0.20);
+  font-size: 11px;
+  color: var(--text-muted, #666);
+  white-space: nowrap;
+  vertical-align: middle;
+  max-width: 100%;
+  overflow: hidden;
+}
+.src-badge .src-name { color: var(--text, #222); font-weight: 500; }
+.src-badge .src-sep  { opacity: 0.5; }
+.src-badge .src-time { font-family: ui-monospace, "SFMono-Regular", monospace; font-size: 10.5px; }
+.src-badge .frb { font-size: 10px; padding: 1px 5px; }
+.src-loading, .src-error, .src-empty { font-style: italic; opacity: 0.7; }
+.src-error  { color: #b22; }
+
+/* 다크 모드 대응 (기존 dark 모드 변수 사용) */
+@media (prefers-color-scheme: dark) {
+  .frb-archive { color: #aaa; }
+  .src-badge   { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.12); }
+  .src-badge .src-name { color: #ddd; }
+}
+
+/* ==============================================================
+ * Phase 4-5-2-A: 사이드바 신규 요소 + Placeholder 페이지
+ * ============================================================== */
+.nav-badge-new {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  border-radius: 4px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+
+/* 시장 컨텍스트 배지 자리 (4-5-2-B에서 채움) */
+.market-context {
+  margin: 8px 16px 12px 16px;
+  padding: 8px 12px;
+  background: var(--bg-card, rgba(120,120,120,0.06));
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.market-context:empty::before {
+  content: "시장 상태 로딩…";
+  opacity: 0.6;
+}
+
+/* Placeholder 페이지 (검증시트/분석일지/운영점검 신규 5개) */
+.placeholder-card {
+  max-width: 720px;
+  margin: 40px auto;
+  padding: 48px 32px;
+  background: var(--bg-card, rgba(120,120,120,0.04));
+  border: 1px solid rgba(120,120,120,0.18);
+  border-radius: 12px;
+  text-align: center;
+}
+.placeholder-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+.placeholder-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text, #222);
+  margin-bottom: 16px;
+}
+.placeholder-desc {
+  color: var(--text-muted, #666);
+  text-align: left;
+  line-height: 1.6;
+  font-size: 14px;
+}
+.placeholder-desc ul {
+  margin: 12px 0;
+  padding-left: 24px;
+}
+.placeholder-desc li { margin: 6px 0; }
+.placeholder-desc code {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  background: rgba(120,120,120,0.10);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.placeholder-desc a { color: #3b82f6; }
+
+.page-header { margin-bottom: 24px; }
+.page-header h2 {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 4px 0;
+}
+.page-desc {
+  color: var(--text-muted, #666);
+  font-size: 13px;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .market-context { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.10); }
+  .placeholder-card { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.10); }
+  .placeholder-title { color: #f1f5f9; }
+}
+
+/* ==============================================================
+ * Phase 4-5-2-B: 시장 컨텍스트 배지 본격 콘텐츠
+ * ============================================================== */
+.market-context {
+  /* 4-5-2-A의 자리 holder 스타일 override */
+  display: block;
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 11px;
+}
+.market-context.mc-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.market-context.mc-open    { border-left: 3px solid #22c55e; }
+.market-context.mc-after   { border-left: 3px solid #f59e0b; }
+.market-context.mc-before  { border-left: 3px solid #6b7280; }
+.market-context.mc-closed  { border-left: 3px solid #94a3b8; }
+
+.mc-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.mc-emoji { font-size: 13px; }
+.mc-state { font-size: 12px; color: var(--text, #222); }
+.mc-time {
+  margin-left: auto;
+  font-family: ui-monospace, "SF Mono", monospace;
+  color: var(--text-muted, #888);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.mc-indices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0;
+}
+.mc-idx {
+  display: flex;
+  align-items: center;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+}
+.mc-idx-name { color: var(--text-muted, #888); width: 50px; font-size: 10px; }
+.mc-idx-val  { color: var(--text, #222); flex: 1; text-align: right; margin-right: 6px; }
+.mc-idx-chg  { font-weight: 600; width: 56px; text-align: right; }
+
+/* 한국식 색상 (상승 빨강 / 하락 초록) */
+.mc-idx.mc-up   .mc-idx-chg { color: #ef4444; }
+.mc-idx.mc-down .mc-idx-chg { color: #22c55e; }
+.mc-idx.mc-flat .mc-idx-chg { color: var(--text-muted, #888); }
+
+.mc-countdown,
+.mc-next-trading {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(120,120,120,0.15);
+  color: var(--text-muted, #888);
+  font-size: 10.5px;
+  text-align: center;
+}
+.mc-countdown { color: #f59e0b; font-weight: 500; }
+
+@media (prefers-color-scheme: dark) {
+  .mc-countdown,
+  .mc-next-trading { border-top-color: rgba(255,255,255,0.06); }
+  .mc-state, .mc-idx-val { color: #f1f5f9; }
+}
+
+/* ==============================================================
+ * Phase 4-5-12: 운영 대시보드 (ops-freshness / ops-cron / ops-health)
+ * ============================================================== */
+.ops-header { display:flex; align-items:center; justify-content:space-between;
+              gap:12px; margin:0 0 16px; flex-wrap:wrap; }
+.ops-header h2 { margin:0; font-size:20px; }
+.ops-meta { font-size:12px; color: var(--text-muted, #888); }
+.ops-actions { display:flex; gap:8px; }
+.ops-btn {
+  padding: 4px 10px; border:1px solid rgba(120,120,120,0.3); border-radius:6px;
+  background: transparent; cursor: pointer; font-size:12px;
+  color: var(--text, #222);
+}
+.ops-btn:hover { background: rgba(120,120,120,0.12); }
+.ops-btn.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+.ops-btn.primary:hover { background:#2563eb; }
+.ops-btn:disabled { opacity:0.5; cursor:not-allowed; }
+
+/* 헬스 점수 카드 */
+.ops-score-grid {
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap:10px; margin-bottom:16px;
+}
+.ops-score-card {
+  padding:12px 14px; border-radius:8px;
+  border:1px solid rgba(120,120,120,0.2);
+  background: rgba(120,120,120,0.04);
+}
+.ops-score-label { font-size:11px; color: var(--text-muted, #888);
+                   text-transform: uppercase; letter-spacing: 0.5px; }
+.ops-score-value { font-size:28px; font-weight:700; margin-top:2px;
+                   line-height:1.2; }
+.ops-score-sub   { font-size:11px; color: var(--text-muted, #888); margin-top:2px; }
+.ops-score-value.ok { color:#16a34a; }
+.ops-score-value.warn { color:#f59e0b; }
+.ops-score-value.bad { color:#ef4444; }
+
+/* 표 */
+.ops-table { width:100%; border-collapse: collapse; font-size:12.5px; }
+.ops-table th, .ops-table td {
+  padding: 8px 10px; text-align:left; border-bottom:1px solid rgba(120,120,120,0.15);
+  vertical-align: middle;
+}
+.ops-table th { font-weight:600; color: var(--text-muted, #666);
+                background: rgba(120,120,120,0.04); font-size:11px;
+                text-transform: uppercase; letter-spacing: 0.4px; }
+.ops-table tbody tr:hover { background: rgba(120,120,120,0.06); }
+.ops-row-issue { background: rgba(245,158,11,0.05); }
+.ops-row-issue:hover { background: rgba(245,158,11,0.10); }
+.ops-row-fail  { background: rgba(220,38,38,0.05); }
+.ops-cat-tag {
+  display:inline-block; padding:1px 6px; border-radius:4px;
+  font-size:10.5px; background: rgba(120,120,120,0.12);
+}
+.ops-when { font-family: ui-monospace, "SFMono-Regular", monospace; font-size:11.5px;
+            color: var(--text, #444); }
+.ops-when-soon { color: #16a34a; font-weight: 600; }
+.ops-when-due  { color: #ef4444; font-weight: 600; }
+
+/* 카테고리 필터 */
+.ops-filter-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom: 10px; }
+.ops-filter {
+  padding: 4px 10px; border-radius: 14px; font-size:12px;
+  border:1px solid rgba(120,120,120,0.3);
+  background: transparent; cursor: pointer;
+  color: var(--text, #222);
+}
+.ops-filter.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+.ops-filter .count { opacity:0.75; margin-left:4px; }
+
+.ops-loading { padding:24px; text-align:center; color: var(--text-muted, #888); }
+.ops-empty   { padding:24px; text-align:center; color: var(--text-muted, #888);
+               border:1px dashed rgba(120,120,120,0.3); border-radius:8px; }
+
+@media (prefers-color-scheme: dark) {
+  .ops-score-card { background: rgba(255,255,255,0.03);
+                    border-color: rgba(255,255,255,0.10); }
+  .ops-table th { background: rgba(255,255,255,0.04); }
+  .ops-table tbody tr:hover { background: rgba(255,255,255,0.06); }
+  .ops-when { color:#cbd5e1; }
+}

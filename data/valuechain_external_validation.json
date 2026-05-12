@@ -1,0 +1,363 @@
+{
+  "validated_at": "2026-04-28T17:23:51.756667",
+  "method": "NAVER_COINFO_KEYWORD_MATCH",
+  "count": 23,
+  "results": [
+    {
+      "code": "017670",
+      "name": "SK텔레콤",
+      "sector": "무선통신서비스",
+      "theme": "AI_SEMI",
+      "layer": "L1_silicon",
+      "segment": "npu_asic",
+      "segment_name": "NPU/ASIC",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1984년 설립된 국내 대표 이동통신사업자로, 2019년 세계 최초 5G 상용화를 통해 프리미엄 네트워크 사업자로서의 위상을 확립함. 무선통신사업, 유선통신사업, 기타사업을 영위하며 SK브로드밴드, 피에스앤마케팅 등 19개 종속회사 보유함. 5G 가입자 기반 안정적 매출 확보와 네트워크 투자 효율화로 수익성 유지하며, 고객 선택권 "
+    },
+    {
+      "code": "005070",
+      "name": "코스모신소재",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "materials_chemicals",
+      "segment_name": "소재/케미칼",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [
+        "소재"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 1967년 설립되어 1987년 상장한 기업으로, 충주공장에서 MLCC용 이형필름과 양극활물질 등을 생산하고 있음. 양극활물질은 리튬 이차전지의 핵심 소재로, MLCC용 이형필름은 제조 공정에 사용됨. 동사는 제조 및 품질 관리 기술을 기반으로 IT 기기, 전기차 등에 적용될 고밀도 양극활물질을 양산하며 시장 점유율을 확대 중임. 친"
+    },
+    {
+      "code": "014680",
+      "name": "한솔케미칼",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "materials_chemicals",
+      "segment_name": "소재/케미칼",
+      "verdict": "VALID",
+      "main_hits": [
+        "전자재료"
+      ],
+      "sub_hits": [
+        "반도체",
+        "소재",
+        "화학"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 1980년 설립된 중견기업으로, 정밀화학, 제지/환경, 전자 및 이차전지소재를 사업으로 함. 7개의 연결대상 종속회사를 보유하고 있음. 정밀화학 제품으로 과산화수소 등과 제지/환경 제품으로 라텍스 등을 생산하며, 전자 및 이차전지소재로는 반도체 박막소재 등을 개발 및 생산함. 동사는 전자재료와 합성기술 기반으로 정밀화학 분야 검토와"
+    },
+    {
+      "code": "104830",
+      "name": "원익머트리얼즈",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "materials_chemicals",
+      "segment_name": "소재/케미칼",
+      "verdict": "PARTIAL",
+      "main_hits": [],
+      "sub_hits": [
+        "반도체",
+        "디스플레이"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 2006년 산업용 가스 제조 및 판매를 목적으로 설립되었으며, 미국법인 1개, 중국법인 2개를 보유하고 있음. 고순도 특수가스를 생산하며 N2O, NH3 등의 제품과 CO2, Si2H6 등의 상품을 글로벌 반도체 및 디스플레이 회사에 납품하고 있음. 반도체 기술 변화 및 고객사 설비 증설에 대응하여 기존 제품 증설과 신규 제품군 양"
+    },
+    {
+      "code": "104830",
+      "name": "원익머트리얼즈",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "inspection_cleaning",
+      "segment_name": "검사/세정",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [
+        "반도체"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 2006년 산업용 가스 제조 및 판매를 목적으로 설립되었으며, 미국법인 1개, 중국법인 2개를 보유하고 있음. 고순도 특수가스를 생산하며 N2O, NH3 등의 제품과 CO2, Si2H6 등의 상품을 글로벌 반도체 및 디스플레이 회사에 납품하고 있음. 반도체 기술 변화 및 고객사 설비 증설에 대응하여 기존 제품 증설과 신규 제품군 양"
+    },
+    {
+      "code": "104830",
+      "name": "원익머트리얼즈",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "specialty_gas",
+      "segment_name": "특수가스",
+      "verdict": "VALID",
+      "main_hits": [
+        "특수가스",
+        "N2O",
+        "NH3",
+        "Si2H6"
+      ],
+      "sub_hits": [
+        "반도체",
+        "디스플레이",
+        "가스"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 2006년 산업용 가스 제조 및 판매를 목적으로 설립되었으며, 미국법인 1개, 중국법인 2개를 보유하고 있음. 고순도 특수가스를 생산하며 N2O, NH3 등의 제품과 CO2, Si2H6 등의 상품을 글로벌 반도체 및 디스플레이 회사에 납품하고 있음. 반도체 기술 변화 및 고객사 설비 증설에 대응하여 기존 제품 증설과 신규 제품군 양"
+    },
+    {
+      "code": "093370",
+      "name": "후성",
+      "sector": "화학",
+      "theme": "AI_SEMI",
+      "layer": "L2_soboojang",
+      "segment": "specialty_gas",
+      "segment_name": "특수가스",
+      "verdict": "VALID",
+      "main_hits": [
+        "특수가스"
+      ],
+      "sub_hits": [
+        "반도체",
+        "가스"
+      ],
+      "profile_excerpt": "기업개요 기업개요 동사는 2006년 설립되어 한국거래소에 상장, 2022년 주식교환으로 (주)한텍을 종속회사로 편입함. 불소화학 기술과 노하우를 기반으로 냉매, 2차전지 소재, 반도체 특수가스 등을 생산하며, 한텍은 비철류 분야에서 독보적 기술력을 가진 화공기기를 제조함. 2차전지 전해질 및 반도체용 특수가스를 제조하며, 국내 선도적 위치를 점유, 글로벌 "
+    },
+    {
+      "code": "060370",
+      "name": "LS마린솔루션",
+      "sector": "건설",
+      "theme": "AI_SEMI",
+      "layer": "L3_optical",
+      "segment": "submarine_cable",
+      "segment_name": "해저케이블",
+      "verdict": "VALID",
+      "main_hits": [
+        "해저",
+        "케이블",
+        "시공"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1995년 설립되어 2002년 코스닥에 상장하였고, 2023년 LS마린솔루션으로 상호를 변경함. 2024년 LS빌드윈을 연결 자회사로 편입하여 시공 전문성과 효율성을 강화하고 해저시공과 지중시공을 결합한 턴키 솔루션을 갖추고 있음. 해저전력/통신케이블 건설, 유지보수, 특수케이블 설치 등을 영위하며, 차별화된 장비로 대심도 해저케이"
+    },
+    {
+      "code": "053080",
+      "name": "케이엔솔",
+      "sector": "기계",
+      "theme": "AI_SEMI",
+      "layer": "L4_server_idc",
+      "segment": "cooling",
+      "segment_name": "냉각/액침",
+      "verdict": "VALID",
+      "main_hits": [
+        "냉각",
+        "액침"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1989년 설립되어 2020년 코스닥시장에 상장한 클린룸 및 교량거더 전문기업임. 2019년 특수목적회사 원방삼현을 설립하여 교량거더 전문업체 삼현에이치를 인수하며 교량건설업에 진출하였고, 현재 (주)삼현비앤이로 사명을 변경하여 운영 중임. 산업용 클린룸, 드라이룸, 바이오 클린룸, IDC 액침냉각, 교량건설업 부문을 영위하며 삼성"
+    },
+    {
+      "code": "035420",
+      "name": "NAVER",
+      "sector": "양방향미디어와서비스",
+      "theme": "AI_SEMI",
+      "layer": "L4_server_idc",
+      "segment": "cloud_idc",
+      "segment_name": "클라우드/IDC",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1999년 설립되어 2002년 코스닥 상장, 2008년 유가증권시장 이전 상장하였고, 2013년 한게임 사업부문을 인적분할함. 국내 1위 인터넷 검색 포털 네이버 서비스를 기반으로 광고, 커머스, 핀테크, 콘텐츠, 엔터프라이즈 등 다양한 사업을 진행 중임. 초거대 AI HyperCLOVA X를 중심으로 검색, 커머스 등의 AI 기술"
+    },
+    {
+      "code": "030200",
+      "name": "KT",
+      "sector": "다각화된통신서비스",
+      "theme": "AI_SEMI",
+      "layer": "L4_server_idc",
+      "segment": "cloud_idc",
+      "segment_name": "클라우드/IDC",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1981년 설립, 1998년 유가증권시장 상장하고, 2025년 기준 78개의 연결대상 종속회사를 보유함. 동사는 무선통신, 초고속인터넷, IPTV 등 통신사업을 바탕으로 금융, 위성방송, 부동산, 콘텐츠, 정보기술 등 다각화된 포트폴리오를 운영함. 글로벌 빅테크와의 파트너십으로 B2B AX 사업을 성장시키고 있으며, 국내 1위 IP"
+    },
+    {
+      "code": "259960",
+      "name": "크래프톤",
+      "sector": "게임엔터테인먼트",
+      "theme": "AI_SEMI",
+      "layer": "L6_agent_app",
+      "segment": "game_creative",
+      "segment_name": "게임/창작 AI",
+      "verdict": "VALID",
+      "main_hits": [
+        "게임",
+        "게임 개발"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 2007년 설립된 게임 개발 및 퍼블리싱 기업으로 2021년 상장함. 2025년 넵튠 투자로 애드테크 사업 확장 검토하고, 일본 ADK 그룹 인수로 광고·콘텐츠 부문으로 영역 확장하며 게임 매출 90.3%와 광고 매출 9.7% 기록함. 글로벌 IP PUBG를 200개국 이상 서비스하며 PC, 모바일, 콘솔 전 플랫폼 게임 사업을 영"
+    },
+    {
+      "code": "078600",
+      "name": "대주전자재료",
+      "sector": "전자장비와기기",
+      "theme": "BATTERY_ESS",
+      "layer": "L1_minerals",
+      "segment": "anode",
+      "segment_name": "음극재",
+      "verdict": "PARTIAL",
+      "main_hits": [
+        "음극재"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1981년 설립된 후 2003년 대주전자재료로 사명을 변경하고 중국과 베트남 포함 6개 종속회사 보유하고 있음. 전도성 페이스트, 태양전지 전극재료 등 다양한 전자부품과 전기차, 자율주행용 부품 시장에 제품을 공급하고 있음. 2018년부터 실리콘 산화물 기반 음극재를 전기차 배터리에 공급하며, 차세대 실리콘 복합산화물 음극재 개발 "
+    },
+    {
+      "code": "357780",
+      "name": "솔브레인",
+      "sector": "반도체와반도체장비",
+      "theme": "BATTERY_ESS",
+      "layer": "L1_minerals",
+      "segment": "electrolyte_separator",
+      "segment_name": "전해질/분리막",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 2020년 솔브레인홀딩스로부터 반도체, 디스플레이, 2차전지 관련 화학 소재 사업을 인적분할하여 설립되었으며, 코스닥 상장함. 반도체·디스플레이 공정용 화학 소재와 2차전지 소재를 생산하며 삼성전자, SK하이닉스 등 주요 제조사에 공급하고 있음. 중국과 미국 현지법인을 설립하여 해외 진출을 모색하고, 고객과 협력하여 신규 물질 및 "
+    },
+    {
+      "code": "096770",
+      "name": "SK이노베이션",
+      "sector": "석유와가스",
+      "theme": "BATTERY_ESS",
+      "layer": "L2_cell",
+      "segment": "ncm_cell",
+      "segment_name": "NCM 셀",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 2007년 설립되었으며, 2024년 SK E&S와의 합병으로 아시아·태평양 최대 종합 에너지 회사가 됨. 석유·화학, LNG, 전력, 배터리를 아우르는 Energy Portfolio를 구축, 석유사업 59%, E&S CIC 15% 등으로 구성됨. 전기사업자로의 전환을 위해 글로벌 LNG 밸류체인 확대, ESS 사업 포트폴리오 다각화"
+    },
+    {
+      "code": "011070",
+      "name": "LG이노텍",
+      "sector": "전자장비와기기",
+      "theme": "BATTERY_ESS",
+      "layer": "L3_pack_bms",
+      "segment": "bms",
+      "segment_name": "BMS/모듈",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1976년 설립, 2008년 유가증권시장 상장 및 2009년 LG마이크론과 합병한 소재·부품 전문기업임. 광학솔루션, 패키지솔루션, 모빌리티솔루션 사업부를 운영하며 모바일, 자동차, 디스플레이, 반도체, 사물인터넷 관련 부품을 제조·판매함. 차별화 기술로 신제품 개발 및 제조 경쟁력 향상하며, 자율주행 등 미래 유망 분야에서 신규 "
+    },
+    {
+      "code": "033500",
+      "name": "동성화인텍",
+      "sector": "화학",
+      "theme": "SHIPBUILDING",
+      "layer": "L2_components",
+      "segment": "lng_insulation",
+      "segment_name": "LNG화물창/단열재",
+      "verdict": "VALID",
+      "main_hits": [
+        "LNG",
+        "단열재",
+        "화물창"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1985년 설립 후 1997년 코스닥 상장한 초저온보냉재 전문 기업임. 1990년 프레온가스 대체 물질 Polyurethane 개발을 시작으로 난연 PU foam 상업화, LNG배관용 초저온보냉재 국산화, LNG선박용 R-PUF 개발 등 글로벌 Low BOR 기술 보유함. PU단열재사업은 LNG운반선 화물창, 연료탱크, 파이프용 초"
+    },
+    {
+      "code": "002380",
+      "name": "KCC",
+      "sector": "건축자재",
+      "theme": "SHIPBUILDING",
+      "layer": "L3_steel_paint",
+      "segment": "marine_paint",
+      "segment_name": "선박도료",
+      "verdict": "PARTIAL",
+      "main_hits": [
+        "도료"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1958년 설립 이후 1973년 유가증권시장 상장과 2000년 고려화학 흡수합병, 2019년 미국 Momentive 인수, 2021년 실리콘 사업부문 수직계열화 진행함. 건자재 부문은 석고보드와 마이톤, 도료 부문은 자동차·선박·공업·건축용 도료를 공급하며, 실리콘 부문은 유일하게 일괄 생산체계 있음. 기타 부문은 반도체·기판·무기"
+    },
+    {
+      "code": "000320",
+      "name": "노루홀딩스",
+      "sector": "건축자재",
+      "theme": "SHIPBUILDING",
+      "layer": "L3_steel_paint",
+      "segment": "marine_paint",
+      "segment_name": "선박도료",
+      "verdict": "PARTIAL",
+      "main_hits": [
+        "도료"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1945년 설립, 2006년 지주회사로 전환 후, 2025년 제외되었으나 지배사업, 상표권, 임대사업 지속함. 5개 사업부문 아래 25개 종속기업으로 구성되어 있으며, 건축/공업용 도료, 자동차용 도료, PCM용 도료, 농생명, 기타 부문에 여러 자회사를 보유함. 1987년부터 색채연구소 운영하며 다양한 분야에서 컬러 서비스 선도,"
+    },
+    {
+      "code": "086960",
+      "name": "MDS테크",
+      "sector": "소프트웨어",
+      "theme": "DEFENSE",
+      "layer": "L2_subsystems",
+      "segment": "optics_electro",
+      "segment_name": "광학/EO",
+      "verdict": "INVALID",
+      "main_hits": [],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1998년 설립, 2006년 코스닥 상장하였으며, 주요 종속회사 ㈜알파녹스 지분을 매각하여 연결범위 제외되었음. 임베디드SW 솔루션 및 플랫폼을 제공하고, ㈜MDS인텔리전스를 통해 AI, IoT, 빅데이터, 클라우드, 디지털트윈 등 미래 성장산업 솔루션을 제공하고 있음. 4차산업혁명 시장에서 R&D투자와 신규사업 확보로 솔루션 사업"
+    },
+    {
+      "code": "103140",
+      "name": "풍산",
+      "sector": "비철금속",
+      "theme": "DEFENSE",
+      "layer": "L3_munitions",
+      "segment": "ammunition",
+      "segment_name": "탄약/포탄",
+      "verdict": "VALID",
+      "main_hits": [
+        "탄약",
+        "추진화약",
+        "정밀 단조"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1968년 풍산홀딩스로부터 2008년 인적분할 설립되어 한국거래소 유가증권시장에 재상장했음. 신동사업 부문에서 동 및 동합금 판·대, 리드프레임 소재, 봉·선, 주화용 소전 등과 방산사업 부문에서 각종 탄약, 추진화약, 정밀 단조품 등을 생산하고 있음. PMX Industries 등 주요 종속회사와 현지법인을 통해 미국, 중국, 동"
+    },
+    {
+      "code": "034020",
+      "name": "두산에너빌리티",
+      "sector": "기계",
+      "theme": "DATACENTER_POWER",
+      "layer": "L3_generation",
+      "segment": "gas_turbine",
+      "segment_name": "가스터빈",
+      "verdict": "VALID",
+      "main_hits": [
+        "가스터빈",
+        "발전"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1962년 현대양행으로 설립되어 2001년 두산그룹에 인수된 후 2022년 두산에너빌리티로 사명을 변경함. 주조/단조 기반 기초 소재 생산부터 원자력·복합화력 발전설비 설계·제작, 발전플랜트 EPC, 해상풍력발전기 등 신재생에너지 기자재를 제작·공급하는 발전설비 전문 기업임. 대형 가스터빈 상업운전 성공, 체코 신규원전 수주, SM"
+    },
+    {
+      "code": "034020",
+      "name": "두산에너빌리티",
+      "sector": "기계",
+      "theme": "DATACENTER_POWER",
+      "layer": "L3_generation",
+      "segment": "nuclear_smr",
+      "segment_name": "원전/SMR",
+      "verdict": "VALID",
+      "main_hits": [
+        "SMR",
+        "원전"
+      ],
+      "sub_hits": [],
+      "profile_excerpt": "기업개요 기업개요 동사는 1962년 현대양행으로 설립되어 2001년 두산그룹에 인수된 후 2022년 두산에너빌리티로 사명을 변경함. 주조/단조 기반 기초 소재 생산부터 원자력·복합화력 발전설비 설계·제작, 발전플랜트 EPC, 해상풍력발전기 등 신재생에너지 기자재를 제작·공급하는 발전설비 전문 기업임. 대형 가스터빈 상업운전 성공, 체코 신규원전 수주, SM"
+    }
+  ]
+}
