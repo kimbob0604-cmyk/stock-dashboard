@@ -13621,26 +13621,30 @@ def api_verification_prefill(code):
         except Exception as exc:
             errors.append(f'financial_quarterly: {exc}')
 
-        # 3) 최근 어닝 시그널 (earnings_surprise)
+        # 3) 최근 어닝 시그널 (earnings_surprise) — 최근 4분기 히스토리
         earnings = None
+        earnings_history: list = []
         try:
-            row = conn.execute("""
+            rows = conn.execute("""
                 SELECT year, quarter, signal, priority,
                        revenue_surprise_pct, op_surprise_pct, note,
                        calculated_at
                 FROM earnings_surprise
                 WHERE stock_code = ?
-                ORDER BY year DESC, quarter DESC LIMIT 1
-            """, (code,)).fetchone()
-            if row:
-                earnings = {
-                    'year': row['year'], 'quarter': row['quarter'],
-                    'signal': row['signal'], 'priority': row['priority'],
-                    'revenue_surprise_pct': row['revenue_surprise_pct'],
-                    'op_surprise_pct': row['op_surprise_pct'],
-                    'note': row['note'],
-                    'calculated_at': row['calculated_at'],
-                }
+                ORDER BY year DESC, quarter DESC LIMIT 4
+            """, (code,)).fetchall()
+            for r in rows:
+                earnings_history.append({
+                    'year': r['year'], 'quarter': r['quarter'],
+                    'signal': r['signal'], 'priority': r['priority'],
+                    'revenue_surprise_pct': r['revenue_surprise_pct'],
+                    'op_surprise_pct': r['op_surprise_pct'],
+                    'note': r['note'],
+                    'calculated_at': r['calculated_at'],
+                })
+            if earnings_history:
+                # 가장 최근 1건을 단일 필드에도 유지 (기존 코드 호환)
+                earnings = earnings_history[0]
         except Exception as exc:
             errors.append(f'earnings_surprise: {exc}')
 
@@ -13745,6 +13749,7 @@ def api_verification_prefill(code):
                 'freshness': fr_band,
             },
             'earnings': {**earnings, 'freshness': fr_earn} if earnings else None,
+            'earnings_history': earnings_history,  # 4-5-8: 최근 4분기 시그널 배열
         }
 
         step3 = None  # 4-5-5 에서 채움

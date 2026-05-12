@@ -7281,8 +7281,10 @@ function _verifRenderComposite(wrap, data) {
   // valuation hint
   const valHint = ctx.fwd_per_band_pct != null
     ? `PER P${ctx.fwd_per_band_pct}` : '데이터 없음';
+  // 4-5-8: earnings hint 에 배지 emoji 통합
   const earnHint = ctx.earnings_signal
-    ? `${ctx.earnings_year}Q${ctx.earnings_quarter} ${ctx.earnings_signal}` : '시그널 없음';
+    ? `${ctx.earnings_year}Q${ctx.earnings_quarter} ${_verifEarnSigEmoji(ctx.earnings_signal)} ${ctx.earnings_signal}`
+    : '시그널 없음';
   const techHint = ctx.position_pct != null
     ? `52주 ${ctx.position_pct.toFixed(0)}% 위치` : '데이터 없음';
 
@@ -7659,6 +7661,46 @@ function _verifSrcLine(label, fresh) {
   return `<span class="verif-src">${_phEsc(label)} ${_verifBadgeFresh(fresh)}</span>`;
 }
 
+// 4-5-8: 어닝 시그널 헬퍼
+function _verifEarnSigCls(signal) {
+  if (!signal) return 'verif-sig-neutral';
+  if (signal.includes('BEAT_BIG') || signal === 'YOY_TURNAROUND'
+      || signal === 'TURNAROUND_FULL') return 'verif-sig-beat-big';
+  if (signal.includes('BEAT') || signal === 'YOY_SURGE') return 'verif-sig-beat';
+  if (signal === 'SHOCK_FULL' || signal === 'MISS_BIG' || signal === 'YOY_SHOCK')
+    return 'verif-sig-miss-big';
+  if (signal.includes('MISS') || signal === 'YOY_PLUNGE') return 'verif-sig-miss';
+  return 'verif-sig-neutral';
+}
+
+function _verifEarnSigEmoji(signal) {
+  if (!signal) return '·';
+  const map = {
+    BEAT_BIG: '🔥', BEAT: '📈',
+    MISS_BIG: '🚨', MISS: '📉',
+    SHOCK_FULL: '⚠️',
+    TURNAROUND_FULL: '💎', TURNAROUND_PARTIAL: '✨',
+    REVENUE_BEAT_OP_INLINE: '⚖️', REVENUE_MISS_OP_BEAT: '💪',
+    INLINE: '·',
+    YOY_SURGE: '🚀', YOY_PLUNGE: '⬇️',
+    YOY_TURNAROUND: '🔄', YOY_SHOCK: '💥',
+    YOY_INLINE: '·',
+  };
+  return map[signal] || '📊';
+}
+
+function _verifEarnPill(e) {
+  if (!e) return '';
+  const cls = _verifEarnSigCls(e.signal);
+  const emoji = _verifEarnSigEmoji(e.signal);
+  return `
+    <div class="verif-earn-pill ${cls}" title="${_phEsc(e.note || '')}">
+      <span class="verif-earn-pill-q">${e.year}Q${e.quarter}</span>
+      <span class="verif-earn-pill-emoji">${emoji}</span>
+      <span class="verif-earn-pill-sig">${_phEsc(e.signal || '—')}</span>
+    </div>`;
+}
+
 // STEP 1: 밸류체인 유추 (자동 + KUVIC)
 function _verifRenderStep1(step1) {
   if (!step1) return '';
@@ -7781,26 +7823,31 @@ function _verifRenderStep2(step2) {
       ${_verifSrcLine('valuation_band', val.freshness)}
     </div>`;
 
-  // 어닝
+  // 어닝 — 4-5-8: 단일 행 → 시그널 타임라인 + 최근 노트
+  const history = (step2.earnings_history || []);
   let earnHtml;
-  if (earn) {
-    const sigCls = earn.signal && earn.signal.includes('BEAT') ? 'verif-sig-beat'
-                 : earn.signal && earn.signal.includes('MISS') ? 'verif-sig-miss'
-                 : 'verif-sig-neutral';
+  if (history.length) {
+    const timelineRow = history.map(e => _verifEarnPill(e)).join('');
+    // 최근 어닝 상세
+    const latest = history[0];
+    const sigCls = _verifEarnSigCls(latest.signal);
     earnHtml = `
-      <div class="verif-kv-grid">
-        <div class="verif-kv"><span class="verif-k">${earn.year}Q${earn.quarter} 시그널</span>
-          <span class="verif-v"><span class="verif-earn-sig ${sigCls}">${_phEsc(earn.signal || '—')}</span>
-          (P${earn.priority || '—'})</span></div>
-        ${earn.revenue_surprise_pct != null || earn.op_surprise_pct != null ? `
+      <div class="verif-earn-timeline">
+        ${timelineRow}
+      </div>
+      <div class="verif-kv-grid" style="margin-top:8px;">
+        <div class="verif-kv"><span class="verif-k">${latest.year}Q${latest.quarter} 시그널</span>
+          <span class="verif-v"><span class="verif-earn-sig ${sigCls}">${_phEsc(latest.signal || '—')}</span>
+          (P${latest.priority || '—'})</span></div>
+        ${latest.revenue_surprise_pct != null || latest.op_surprise_pct != null ? `
         <div class="verif-kv"><span class="verif-k">매출/영업익 서프</span>
-          <span class="verif-v">매출 ${earn.revenue_surprise_pct != null ? earn.revenue_surprise_pct.toFixed(1) + '%' : '—'}
-            / 영업익 ${earn.op_surprise_pct != null ? earn.op_surprise_pct.toFixed(1) + '%' : '—'}</span></div>` : ''}
-        ${earn.note ? `<div class="verif-kv verif-kv-full"><span class="verif-k">노트</span>
-          <span class="verif-v">${_phEsc(earn.note)}</span></div>` : ''}
+          <span class="verif-v">매출 ${latest.revenue_surprise_pct != null ? latest.revenue_surprise_pct.toFixed(1) + '%' : '—'}
+            / 영업익 ${latest.op_surprise_pct != null ? latest.op_surprise_pct.toFixed(1) + '%' : '—'}</span></div>` : ''}
+        ${latest.note ? `<div class="verif-kv verif-kv-full"><span class="verif-k">노트</span>
+          <span class="verif-v">${_phEsc(latest.note)}</span></div>` : ''}
       </div>
       <div class="verif-step-srcline">
-        ${_verifSrcLine('earnings_surprise', earn.freshness)}
+        ${_verifSrcLine(`earnings_surprise · ${history.length}분기`, (earn || {}).freshness)}
       </div>`;
   } else {
     earnHtml = '<div class="verif-empty">최근 어닝 시그널 없음</div>';
