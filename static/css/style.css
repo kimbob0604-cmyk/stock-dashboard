@@ -5809,3 +5809,339 @@ tr:hover td {
   .verif-up   .verif-field-value { color: #f87171; }
   .verif-down .verif-field-value { color: #60a5fa; }
 }
+
+/* ==============================================================
+ * Phase 4-5-4: 5단계 자동 prefill — Step 카드 4종 + TAM + 슬라이더
+ * ============================================================== */
+
+/* errors banner */
+.verif-errors-banner {
+  margin: -8px 0 16px;
+  padding: 8px 12px;
+  background: rgba(245,158,11,0.10);
+  border: 1px solid rgba(245,158,11,0.30);
+  border-radius: 6px;
+  color: #a37700;
+  font-size: 12px;
+}
+
+/* steps container */
+.verif-steps {
+  display: flex; flex-direction: column; gap: 14px;
+}
+
+.verif-step-card {
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.verif-step-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px;
+  background: rgba(120,120,120,0.05);
+  border-bottom: 1px solid rgba(120,120,120,0.12);
+}
+.verif-step-head .verif-step-num {
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-weight: 700; color: #3b82f6;
+  background: rgba(59,130,246,0.10);
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 12px; width: auto;
+}
+.verif-step-head .verif-step-name {
+  font-size: 15px; font-weight: 600; flex: 1; color: var(--text, #222);
+}
+.verif-step-mode {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  font-weight: 500;
+  background: rgba(120,120,120,0.10); color: var(--text-muted, #666);
+}
+.verif-mode-auto   { background: rgba(34,197,94,0.12); color: #16a34a; }
+.verif-mode-manual { background: rgba(59,130,246,0.12); color: #2563eb; }
+.verif-mode-mixed  { background: rgba(168,85,247,0.12); color: #9333ea; }
+
+.verif-step-body {
+  padding: 14px 18px;
+}
+.verif-step-subtitle {
+  font-size: 12px;
+  font-weight: 600; color: var(--text-muted, #666);
+  margin: 6px 0 8px;
+  text-transform: none;
+}
+.verif-step-divider {
+  height: 1px; background: rgba(120,120,120,0.15);
+  margin: 14px 0;
+}
+.verif-step-srcline {
+  margin-top: 8px; font-size: 11px;
+  color: var(--text-muted, #888);
+}
+.verif-src { display: inline-flex; align-items: center; gap: 6px; }
+.verif-step-placeholder {
+  padding: 24px; text-align: center;
+  color: var(--text-muted, #888);
+  background: rgba(120,120,120,0.05);
+  border: 1px dashed rgba(120,120,120,0.25);
+  border-radius: 6px; font-size: 13px;
+}
+.verif-step-placeholder-hint {
+  margin-top: 6px; font-size: 11px; opacity: 0.8;
+}
+.verif-empty {
+  padding: 14px; text-align: center;
+  color: var(--text-muted, #888); font-size: 12px;
+}
+
+/* STEP 1 — valuechain rows */
+.verif-vc-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; padding: 4px 0;
+  flex-wrap: wrap;
+}
+.verif-vc-theme  { color: #3b82f6; font-weight: 600; }
+.verif-vc-layer  { color: var(--text, #222); }
+.verif-vc-seg    { color: var(--text, #222); font-weight: 500; }
+.verif-vc-arrow  { color: var(--text-muted, #888); }
+.verif-bottleneck {
+  background: rgba(239,68,68,0.12); color: #dc2626;
+  padding: 1px 6px; border-radius: 3px; font-size: 10px;
+}
+.verif-vc-empty {
+  font-size: 12px; color: var(--text-muted, #888);
+  font-style: italic; padding: 6px 0;
+}
+
+/* STEP 1 — KUVIC */
+.verif-kuvic-block {
+  background: rgba(168,85,247,0.05);
+  border-left: 3px solid #9333ea;
+  border-radius: 4px;
+  padding: 10px 14px;
+}
+.verif-kuvic-thesis {
+  font-size: 14px; color: var(--text, #222);
+  font-weight: 500; line-height: 1.5;
+  margin-bottom: 6px;
+}
+.verif-kuvic-meta {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.verif-kuvic-tag {
+  font-size: 11px; padding: 1px 8px; border-radius: 10px;
+  background: rgba(168,85,247,0.15); color: #7c3aed;
+}
+.verif-kuvic-date {
+  font-size: 11px; color: var(--text-muted, #888);
+  font-family: ui-monospace, monospace;
+}
+.verif-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.verif-tag {
+  font-size: 10px; padding: 1px 6px;
+  background: rgba(59,130,246,0.10); color: #2563eb;
+  border-radius: 8px;
+}
+.verif-kuvic-empty {
+  padding: 14px; text-align: center;
+  font-size: 12px; color: var(--text-muted, #888);
+  background: rgba(120,120,120,0.04);
+  border: 1px dashed rgba(120,120,120,0.20);
+  border-radius: 6px;
+}
+
+/* STEP 2 — KV grid */
+.verif-kv-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+.verif-kv {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 0;
+}
+.verif-kv-full { grid-column: 1 / -1; }
+.verif-k {
+  font-size: 11px; color: var(--text-muted, #888);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.verif-v {
+  font-size: 14px; color: var(--text, #222);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-weight: 500;
+}
+.verif-hint {
+  font-size: 11px; color: var(--text-muted, #888);
+  font-family: inherit; font-weight: normal; margin-left: 6px;
+}
+.verif-cheap     { color: #16a34a; font-weight: 600; }
+.verif-expensive { color: #ef4444; font-weight: 600; }
+.verif-trend-up   { color: #ef4444; margin-left: 4px; }
+.verif-trend-down { color: #2563eb; margin-left: 4px; }
+.verif-trend-flat { color: var(--text-muted, #888); margin-left: 4px; }
+
+/* STEP 2 — earnings signal */
+.verif-earn-sig {
+  font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  font-weight: 600;
+}
+.verif-sig-beat    { background: rgba(34,197,94,0.15); color: #15803d; }
+.verif-sig-miss    { background: rgba(239,68,68,0.15); color: #b91c1c; }
+.verif-sig-neutral { background: rgba(120,120,120,0.15); color: var(--text-muted, #666); }
+
+/* STEP 4 — TAM 테이블 */
+.verif-tam-table {
+  width: 100%; border-collapse: collapse;
+  margin-bottom: 10px;
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+}
+.verif-tam-table th, .verif-tam-table td {
+  padding: 8px 12px; text-align: center;
+  border-bottom: 1px solid rgba(120,120,120,0.15);
+  font-size: 13px;
+}
+.verif-tam-table th {
+  font-weight: 600; font-size: 11px;
+  color: var(--text-muted, #888);
+  background: rgba(120,120,120,0.05);
+}
+.verif-tam-table td:first-child {
+  text-align: left; color: var(--text-muted, #888);
+  font-size: 11px; text-transform: uppercase;
+}
+.verif-tam-meta {
+  font-size: 11.5px; color: var(--text-muted, #888);
+  margin-top: 4px;
+}
+.verif-tam-srcgrid {
+  margin-top: 10px;
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 10.5px; color: var(--text-muted, #888);
+}
+.verif-tam-srcline { font-family: ui-monospace, monospace; }
+.verif-src-tag {
+  background: rgba(120,120,120,0.10);
+  padding: 1px 5px; border-radius: 3px; margin-right: 2px;
+}
+.verif-up-cell   { color: #ef4444; font-weight: 600; }
+.verif-down-cell { color: #2563eb; font-weight: 600; }
+
+/* STEP 5 — 52주 슬라이더 */
+.verif-slider-row {
+  display: flex; align-items: center;
+  gap: 12px;
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 13px;
+}
+.verif-slider-low, .verif-slider-high {
+  color: var(--text-muted, #666);
+  flex-shrink: 0;
+}
+.verif-slider-track {
+  flex: 1; height: 8px; position: relative;
+  background: linear-gradient(to right,
+    rgba(34,197,94,0.20) 0%,
+    rgba(245,158,11,0.20) 50%,
+    rgba(239,68,68,0.20) 100%);
+  border-radius: 4px;
+  margin: 24px 0 0;
+}
+.verif-slider-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: 1px;
+}
+.verif-slider-current {
+  position: absolute; top: -20px;
+  transform: translateX(-50%);
+}
+.verif-slider-pin {
+  color: #3b82f6; font-size: 14px;
+  text-align: center; line-height: 1;
+}
+.verif-slider-pin-label {
+  color: var(--text, #222); font-size: 11px;
+  font-weight: 600; margin-top: 2px;
+  white-space: nowrap;
+}
+.verif-slider-meta {
+  margin-top: 14px; font-size: 12px;
+  color: var(--text-muted, #888);
+  text-align: center;
+}
+
+/* STEP 5 — 반영도 라벨 */
+.verif-reflection {
+  padding: 12px 16px;
+  border-radius: 8px;
+  border-left: 4px solid var(--refl-color, #3b82f6);
+  background: rgba(120,120,120,0.05);
+}
+.verif-refl-undervalued { --refl-color: #16a34a; background: rgba(34,197,94,0.06); }
+.verif-refl-mid         { --refl-color: #f59e0b; background: rgba(245,158,11,0.05); }
+.verif-refl-priced      { --refl-color: #6b7280; background: rgba(120,120,120,0.05); }
+.verif-refl-overheated  { --refl-color: #ef4444; background: rgba(239,68,68,0.06); }
+.verif-refl-unknown     { --refl-color: #94a3b8; }
+.verif-refl-label {
+  font-size: 16px; font-weight: 700; color: var(--text, #222);
+  margin-bottom: 4px;
+}
+.verif-refl-score {
+  font-size: 11px; color: var(--text-muted, #888);
+  margin-bottom: 8px;
+  font-family: ui-monospace, monospace;
+}
+.verif-refl-reasons {
+  margin: 4px 0 0; padding-left: 18px;
+  font-size: 12.5px; color: var(--text, #222);
+  line-height: 1.6;
+}
+
+/* STEP 5 — KUVIC 비교 */
+.verif-kuvic-match {
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+.verif-match-ok  { background: rgba(34,197,94,0.06);
+                   border: 1px solid rgba(34,197,94,0.20); }
+.verif-match-gap { background: rgba(245,158,11,0.06);
+                   border: 1px solid rgba(245,158,11,0.25); }
+.verif-kuvic-match-row {
+  display: flex; justify-content: space-between;
+  padding: 3px 0; font-size: 13px;
+}
+
+/* 다크 모드 */
+@media (prefers-color-scheme: dark) {
+  .verif-step-card {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.10);
+  }
+  .verif-step-head {
+    background: rgba(255,255,255,0.04);
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  .verif-step-divider { background: rgba(255,255,255,0.08); }
+  .verif-step-placeholder, .verif-empty, .verif-kuvic-empty,
+  .verif-reflection, .verif-vc-empty {
+    color: #94a3b8;
+  }
+  .verif-kuvic-thesis, .verif-vc-seg, .verif-vc-layer,
+  .verif-refl-label, .verif-refl-reasons, .verif-v,
+  .verif-slider-pin-label { color: #f1f5f9; }
+  .verif-tam-table th { background: rgba(255,255,255,0.04); }
+  .verif-tam-table th, .verif-tam-table td {
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  .verif-up-cell   { color: #f87171; }
+  .verif-down-cell { color: #60a5fa; }
+  .verif-cheap     { color: #4ade80; }
+  .verif-expensive { color: #f87171; }
+}
+
+/* 모바일 */
+@media (max-width: 768px) {
+  .verif-kv-grid { grid-template-columns: 1fr; }
+  .verif-tam-table { font-size: 11px; }
+  .verif-tam-table th, .verif-tam-table td { padding: 6px 8px; }
+  .verif-slider-row { gap: 6px; font-size: 11px; }
+}

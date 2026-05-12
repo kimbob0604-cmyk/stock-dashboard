@@ -7074,7 +7074,7 @@ async function _verifDoSearch(query) {
   }
 }
 
-// 종목 정보 화면 — params.code 있을 때
+// 종목 정보 화면 — params.code 있을 때. stock + prefill 병렬 fetch.
 async function renderVerificationStockView(container, code) {
   container.innerHTML = `
     <div class="page-header">
@@ -7082,22 +7082,33 @@ async function renderVerificationStockView(container, code) {
       <a href="/verification" class="verif-back-link"
          onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
     </div>
-    <div class="verif-loading">종목 정보 로딩 중…</div>`;
+    <div class="verif-loading">종목 정보 + 5단계 prefill 로딩 중…</div>`;
   try {
-    const r = await fetch(`/api/verification/stock/${encodeURIComponent(code)}`);
-    const data = await r.json();
+    const [stockResp, prefillResp] = await Promise.all([
+      fetch(`/api/verification/stock/${encodeURIComponent(code)}`),
+      fetch(`/api/verification/${encodeURIComponent(code)}/prefill`),
+    ]);
+    const data = await stockResp.json();
     if (!data.found) {
       _verifRenderNotFound(container, code, data.error);
       return;
     }
-    _verifRenderStockCard(container, data);
+    // prefill 은 실패해도 stock 카드는 그림
+    let prefill = null;
+    if (prefillResp.ok) {
+      try { prefill = await prefillResp.json(); }
+      catch (e) { console.warn('[verification] prefill parse failed:', e); }
+    } else {
+      console.warn('[verification] prefill HTTP', prefillResp.status);
+    }
+    _verifRenderStockCard(container, data, prefill);
   } catch (e) {
     console.error('[verification] stock fetch failed:', e);
     _verifRenderError(container, code, e.message);
   }
 }
 
-function _verifRenderStockCard(container, data) {
+function _verifRenderStockCard(container, data, prefill) {
   const cp = data.change_pct || 0;
   const upDown = cp > 0 ? 'up' : cp < 0 ? 'down' : 'flat';
   const arrow  = cp > 0 ? '↑' : cp < 0 ? '↓' : '·';
@@ -7110,6 +7121,7 @@ function _verifRenderStockCard(container, data) {
     });
   }
   const mcap = _verifMcapDisplay(data.market_cap);
+  const errs = (prefill && prefill.errors) || [];
 
   container.innerHTML = `
     <div class="page-header">
@@ -7154,34 +7166,416 @@ function _verifRenderStockCard(container, data) {
       </div>
     </div>
 
-    <div class="verif-steps-container">
-      <h3 class="verif-steps-title">📋 KUVIC 5단계 분석</h3>
-      <div class="verif-steps-placeholder">
-        <div class="verif-step-row">
-          <span class="verif-step-num">STEP 1.</span>
-          <span class="verif-step-name">밸류체인 유추</span>
-          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+    ${errs.length ? `
+    <div class="verif-errors-banner">
+      ⚠️ 일부 데이터 불완전: ${errs.map(_phEsc).join(' · ')}
+    </div>` : ''}
+
+    <div class="verif-steps">
+      ${prefill ? _verifRenderStep1(prefill.step1) : _verifStepLoadingRow('STEP 1', '밸류체인 유추')}
+      ${prefill ? _verifRenderStep2(prefill.step2) : _verifStepLoadingRow('STEP 2', '개별 요인')}
+      ${_verifRenderStep3()}
+      ${prefill ? _verifRenderStep4(prefill.step4, prefill.current_price) : _verifStepLoadingRow('STEP 4', 'TAM 모델링')}
+      ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
+    </div>`;
+}
+
+// ============================================================
+// 검증 시트 — Step 카드 렌더러 (4-5-4)
+// ============================================================
+
+function _verifStepLoadingRow(num, name) {
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">${_phEsc(num)}</span>
+        <span class="verif-step-name">${_phEsc(name)}</span>
+        <span class="verif-step-mode">⏳ 로딩 중</span>
+      </div>
+    </div>`;
+}
+
+function _verifBadgeFresh(fresh) {
+  if (!fresh) return '';
+  if (typeof freshnessBadge !== 'function') return '';
+  return freshnessBadge(fresh.label, { title: fresh.age_human });
+}
+
+function _verifModeBadge(mode) {
+  // mode: 'auto' | 'manual' | 'mixed'
+  const map = {
+    auto:   { cls: 'verif-mode-auto',   icon: '🟢', label: '자동' },
+    manual: { cls: 'verif-mode-manual', icon: '👤', label: '수동' },
+    mixed:  { cls: 'verif-mode-mixed',  icon: '🔵', label: '혼합' },
+  };
+  const m = map[mode] || map.auto;
+  return `<span class="verif-step-mode ${m.cls}">${m.icon} ${m.label}</span>`;
+}
+
+function _verifSrcLine(label, fresh) {
+  if (!fresh) return '';
+  return `<span class="verif-src">${_phEsc(label)} ${_verifBadgeFresh(fresh)}</span>`;
+}
+
+// STEP 1: 밸류체인 유추 (자동 + KUVIC)
+function _verifRenderStep1(step1) {
+  if (!step1) return '';
+  const vc = step1.valuechain || {};
+  const ku = step1.kuvic_analysis;
+  const hasKuvic = !!ku;
+  const mode = hasKuvic ? 'mixed' : 'auto';
+
+  const segments = (vc.segments || []);
+  let vcHtml = '';
+  if (segments.length) {
+    vcHtml = segments.map(s => `
+      <div class="verif-vc-row">
+        <span class="verif-vc-theme">${_phEsc(s.theme_id || '—')}</span>
+        <span class="verif-vc-arrow">›</span>
+        <span class="verif-vc-layer">${_phEsc(s.layer_id || '—')}</span>
+        <span class="verif-vc-arrow">›</span>
+        <span class="verif-vc-seg">${_phEsc(s.segment_name_kr || s.segment_id || '—')}</span>
+        ${s.is_bottleneck ? '<span class="verif-bottleneck">⚡ 병목</span>' : ''}
+      </div>`).join('');
+  } else {
+    vcHtml = '<div class="verif-vc-empty">매핑된 segment 없음</div>';
+  }
+
+  let kuvicHtml = '';
+  if (hasKuvic) {
+    const tags = (ku.tags || []).map(t => `<span class="verif-tag">${_phEsc(t)}</span>`).join('');
+    kuvicHtml = `
+      <div class="verif-kuvic-block">
+        <div class="verif-kuvic-thesis">${_phEsc(ku.thesis || '')}</div>
+        <div class="verif-kuvic-meta">
+          ${ku.conclusion ? `<span class="verif-kuvic-tag">결론 ${_phEsc(ku.conclusion)}</span>` : ''}
+          ${ku.priority ? `<span class="verif-kuvic-tag">${_phEsc(ku.priority)}</span>` : ''}
+          ${ku.session_date ? `<span class="verif-kuvic-date">${_phEsc(ku.session_date)}</span>` : ''}
         </div>
-        <div class="verif-step-row">
-          <span class="verif-step-num">STEP 2.</span>
-          <span class="verif-step-name">개별 요인</span>
-          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        ${tags ? `<div class="verif-tags">${tags}</div>` : ''}
+        <div class="verif-step-srcline">
+          ${_verifSrcLine('KUVIC 일지', ku.freshness)}
         </div>
-        <div class="verif-step-row">
-          <span class="verif-step-num">STEP 3.</span>
-          <span class="verif-step-name">동종 비교</span>
-          <span class="verif-step-status">⏳ Phase 4-5-5</span>
+      </div>`;
+  } else {
+    kuvicHtml = `
+      <div class="verif-kuvic-empty">
+        📝 KUVIC 분석 일지 없음 — Phase 4-5-9 에서 추가 입력 가능
+      </div>`;
+  }
+
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">STEP 1</span>
+        <span class="verif-step-name">밸류체인 유추</span>
+        ${_verifModeBadge(mode)}
+      </div>
+      <div class="verif-step-body">
+        <div class="verif-step-subtitle">🤖 자동 발견</div>
+        ${vcHtml}
+        <div class="verif-step-srcline">
+          ${_verifSrcLine('valuechain_map', vc.freshness)}
         </div>
-        <div class="verif-step-row">
-          <span class="verif-step-num">STEP 4.</span>
-          <span class="verif-step-name">TAM 모델링</span>
-          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        <div class="verif-step-divider"></div>
+        <div class="verif-step-subtitle">📝 KUVIC 분석</div>
+        ${kuvicHtml}
+      </div>
+    </div>`;
+}
+
+// STEP 2: 개별 요인 (재무 + 밸류에이션 + 어닝)
+function _verifRenderStep2(step2) {
+  if (!step2) return '';
+  const fin = step2.financial;
+  const val = step2.valuation || {};
+  const earn = step2.earnings;
+
+  // 재무
+  let finHtml;
+  if (fin) {
+    const arrowMap = { up: '↑', down: '↓', flat: '→' };
+    const arrow = arrowMap[fin.opm_trend] || '→';
+    const arrowCls = fin.opm_trend === 'up' ? 'verif-trend-up'
+                   : fin.opm_trend === 'down' ? 'verif-trend-down' : 'verif-trend-flat';
+    // 매출 단위: 원 → 억원
+    const revEok = fin.avg_revenue_4q ? (fin.avg_revenue_4q / 1e8) : null;
+    finHtml = `
+      <div class="verif-kv-grid">
+        <div class="verif-kv"><span class="verif-k">최근 4Q 매출 평균</span>
+          <span class="verif-v">${revEok ? _verifFmtNum(revEok) + '억' : '—'}</span></div>
+        <div class="verif-kv"><span class="verif-k">OPM 평균</span>
+          <span class="verif-v">${fin.avg_opm_4q != null ? fin.avg_opm_4q.toFixed(1) + '%' : '—'}
+            <span class="${arrowCls}">${arrow}</span></span></div>
+      </div>
+      <div class="verif-step-srcline">
+        ${_verifSrcLine('financial_quarterly', fin.freshness)}
+      </div>`;
+  } else {
+    finHtml = '<div class="verif-empty">분기 재무 데이터 없음</div>';
+  }
+
+  // 밸류에이션
+  const fper = val.fwd_per != null ? val.fwd_per.toFixed(1) + 'x' : '—';
+  const fperPct = val.fwd_per_band_pct != null ? `P${val.fwd_per_band_pct}` : '—';
+  const fperPctCls = val.fwd_per_band_pct == null ? '' :
+                     (val.fwd_per_band_pct <= 35 ? 'verif-cheap' :
+                      val.fwd_per_band_pct >= 65 ? 'verif-expensive' : '');
+  const fperHint = val.fwd_per_band_pct == null ? '' :
+                   (val.fwd_per_band_pct <= 35 ? '저평가' :
+                    val.fwd_per_band_pct >= 65 ? '고평가' : '중앙');
+  const valHtml = `
+    <div class="verif-kv-grid">
+      <div class="verif-kv"><span class="verif-k">Fwd PER</span>
+        <span class="verif-v">${fper} <span class="${fperPctCls}">${fperPct}${fperHint ? ' — ' + fperHint : ''}</span></span></div>
+      <div class="verif-kv"><span class="verif-k">OPM 추정</span>
+        <span class="verif-v">${val.opm_estimate != null ? val.opm_estimate.toFixed(1) + '%' : '—'}
+          ${val.opm_source ? `<span class="verif-hint">${_phEsc(val.opm_source)}</span>` : ''}</span></div>
+      ${val.per_band ? `
+      <div class="verif-kv"><span class="verif-k">5년 PER 분위</span>
+        <span class="verif-v">P25 ${val.per_band.p25?.toFixed(1)} · P50 ${val.per_band.p50?.toFixed(1)} · P75 ${val.per_band.p75?.toFixed(1)} (${val.per_band.quarters}Q)</span></div>` : ''}
+    </div>
+    <div class="verif-step-srcline">
+      ${_verifSrcLine('valuation_band', val.freshness)}
+    </div>`;
+
+  // 어닝
+  let earnHtml;
+  if (earn) {
+    const sigCls = earn.signal && earn.signal.includes('BEAT') ? 'verif-sig-beat'
+                 : earn.signal && earn.signal.includes('MISS') ? 'verif-sig-miss'
+                 : 'verif-sig-neutral';
+    earnHtml = `
+      <div class="verif-kv-grid">
+        <div class="verif-kv"><span class="verif-k">${earn.year}Q${earn.quarter} 시그널</span>
+          <span class="verif-v"><span class="verif-earn-sig ${sigCls}">${_phEsc(earn.signal || '—')}</span>
+          (P${earn.priority || '—'})</span></div>
+        ${earn.revenue_surprise_pct != null || earn.op_surprise_pct != null ? `
+        <div class="verif-kv"><span class="verif-k">매출/영업익 서프</span>
+          <span class="verif-v">매출 ${earn.revenue_surprise_pct != null ? earn.revenue_surprise_pct.toFixed(1) + '%' : '—'}
+            / 영업익 ${earn.op_surprise_pct != null ? earn.op_surprise_pct.toFixed(1) + '%' : '—'}</span></div>` : ''}
+        ${earn.note ? `<div class="verif-kv verif-kv-full"><span class="verif-k">노트</span>
+          <span class="verif-v">${_phEsc(earn.note)}</span></div>` : ''}
+      </div>
+      <div class="verif-step-srcline">
+        ${_verifSrcLine('earnings_surprise', earn.freshness)}
+      </div>`;
+  } else {
+    earnHtml = '<div class="verif-empty">최근 어닝 시그널 없음</div>';
+  }
+
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">STEP 2</span>
+        <span class="verif-step-name">개별 요인</span>
+        ${_verifModeBadge('auto')}
+      </div>
+      <div class="verif-step-body">
+        <div class="verif-step-subtitle">📊 매출/이익 구조 (분기)</div>
+        ${finHtml}
+        <div class="verif-step-divider"></div>
+        <div class="verif-step-subtitle">📐 5년 밸류에이션 위치</div>
+        ${valHtml}
+        <div class="verif-step-divider"></div>
+        <div class="verif-step-subtitle">💎 최근 어닝</div>
+        ${earnHtml}
+      </div>
+    </div>`;
+}
+
+// STEP 3: 동종 비교 — 4-5-5 자리만
+function _verifRenderStep3() {
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">STEP 3</span>
+        <span class="verif-step-name">동종 비교</span>
+        ${_verifModeBadge('manual')}
+      </div>
+      <div class="verif-step-body">
+        <div class="verif-step-placeholder">
+          ⏳ Phase 4-5-5 에서 KUVIC 수동 입력 폼 추가
+          <div class="verif-step-placeholder-hint">동종 기업, 비교 포인트, 차별화 요소</div>
         </div>
-        <div class="verif-step-row">
-          <span class="verif-step-num">STEP 5.</span>
-          <span class="verif-step-name">주가 검증</span>
-          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+      </div>
+    </div>`;
+}
+
+// STEP 4: TAM 모델링 (자동)
+function _verifRenderStep4(step4, currentPrice) {
+  if (!step4 || !step4.tam) return '';
+  const tam = step4.tam;
+  const cp = currentPrice || tam.current_price;
+
+  const cell = (sc, key) => {
+    const v = tam[sc] && tam[sc][key];
+    return (v == null) ? '—' : v;
+  };
+  const tpCell = sc => {
+    const tp = tam[sc] && tam[sc].tp;
+    const up = tam[sc] && tam[sc].upside_pct;
+    if (tp == null) return '—';
+    const upCls = up == null ? '' : (up >= 0 ? 'verif-up-cell' : 'verif-down-cell');
+    const upStr = up == null ? '' : ` (${up > 0 ? '+' : ''}${up.toFixed(1)}%)`;
+    return `${_verifFmtNum(tp)} <span class="${upCls}">${upStr}</span>`;
+  };
+
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">STEP 4</span>
+        <span class="verif-step-name">TAM 모델링</span>
+        ${_verifModeBadge('auto')}
+      </div>
+      <div class="verif-step-body">
+        <div class="verif-step-subtitle">🎯 시나리오별 목표가</div>
+        <table class="verif-tam-table">
+          <thead><tr><th></th><th>Bear</th><th>Base</th><th>Bull</th></tr></thead>
+          <tbody>
+            <tr><td>EPS</td>
+              <td>${cell('bear','eps') != null ? _verifFmtNum(cell('bear','eps')) : '—'}</td>
+              <td>${cell('base','eps') != null ? _verifFmtNum(cell('base','eps')) : '—'}</td>
+              <td>${cell('bull','eps') != null ? _verifFmtNum(cell('bull','eps')) : '—'}</td></tr>
+            <tr><td>PER</td>
+              <td>${cell('bear','per') != null ? cell('bear','per').toFixed(2) + 'x' : '—'}</td>
+              <td>${cell('base','per') != null ? cell('base','per').toFixed(2) + 'x' : '—'}</td>
+              <td>${cell('bull','per') != null ? cell('bull','per').toFixed(2) + 'x' : '—'}</td></tr>
+            <tr><td>TP</td>
+              <td>${tpCell('bear')}</td>
+              <td>${tpCell('base')}</td>
+              <td>${tpCell('bull')}</td></tr>
+          </tbody>
+        </table>
+        <div class="verif-tam-meta">
+          현재가 <strong>${_verifFmtNum(cp)}원</strong> 기준
+          · method: ${_phEsc(tam.method || '—')}
+          ${tam.consensus_tp ? ` · consensus TP ${_verifFmtNum(tam.consensus_tp)}` : ''}
         </div>
+        <div class="verif-tam-srcgrid">
+          <div class="verif-tam-srcline">
+            <span class="verif-src-tag">Bear EPS</span> ${_phEsc(cell('bear','eps_source') || '—')}
+            · <span class="verif-src-tag">PER</span> ${_phEsc(cell('bear','per_source') || '—')}
+          </div>
+          <div class="verif-tam-srcline">
+            <span class="verif-src-tag">Base EPS</span> ${_phEsc(cell('base','eps_source') || '—')}
+            · <span class="verif-src-tag">PER</span> ${_phEsc(cell('base','per_source') || '—')}
+          </div>
+          <div class="verif-tam-srcline">
+            <span class="verif-src-tag">Bull EPS</span> ${_phEsc(cell('bull','eps_source') || '—')}
+            · <span class="verif-src-tag">PER</span> ${_phEsc(cell('bull','per_source') || '—')}
+          </div>
+        </div>
+        <div class="verif-step-srcline">
+          ${_verifSrcLine('tam_modeler (밸류에이션 밴드+컨센)', tam.freshness)}
+        </div>
+      </div>
+    </div>`;
+}
+
+// STEP 5: 주가 검증 (52주 + 반영도)
+function _verifRenderStep5(step5) {
+  if (!step5) return '';
+  const pos = step5.price_position;
+  const ret = step5.returns || {};
+  const refl = step5.reflection || {};
+  const km = step5.kuvic_match;
+
+  // 52주 슬라이더 (text 기반)
+  let sliderHtml = '<div class="verif-empty">52주 데이터 없음</div>';
+  if (pos && pos.week52_low && pos.week52_high) {
+    const pct = pos.position_pct || 50;
+    sliderHtml = `
+      <div class="verif-slider-row">
+        <span class="verif-slider-low">${_verifFmtNum(pos.week52_low)}</span>
+        <div class="verif-slider-track">
+          <div class="verif-slider-fill" style="left:${pct}%"></div>
+          <div class="verif-slider-current" style="left:${pct}%">
+            <div class="verif-slider-pin">▼</div>
+            <div class="verif-slider-pin-label">${_verifFmtNum(pos.current)}</div>
+          </div>
+        </div>
+        <span class="verif-slider-high">${_verifFmtNum(pos.week52_high)}</span>
+      </div>
+      <div class="verif-slider-meta">위치 ${pct.toFixed(1)}% — ${
+        pct < 30 ? '하단 (저가권)'
+        : pct < 70 ? '중간'
+        : '상단 (고가권)'
+      }</div>
+      <div class="verif-step-srcline">
+        ${_verifSrcLine('ohlcv 365일', pos.freshness)}
+      </div>`;
+  }
+
+  // 수익률
+  const retCell = (v) => v == null ? '—' :
+    `<span class="${v > 0 ? 'verif-up-cell' : v < 0 ? 'verif-down-cell' : ''}">${v > 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
+  const retsHtml = `
+    <div class="verif-kv-grid">
+      <div class="verif-kv"><span class="verif-k">52주 수익률</span><span class="verif-v">${retCell(ret.return_52w)}</span></div>
+      <div class="verif-kv"><span class="verif-k">6개월</span><span class="verif-v">${retCell(ret.return_6m)}</span></div>
+      <div class="verif-kv"><span class="verif-k">3개월</span><span class="verif-v">${retCell(ret.return_3m)}</span></div>
+    </div>`;
+
+  // 자동 반영도
+  const labelCls = ({
+    '미반영': 'verif-refl-undervalued',
+    '부분반영': 'verif-refl-mid',
+    '반영완료': 'verif-refl-priced',
+    '과열': 'verif-refl-overheated',
+    'UNKNOWN': 'verif-refl-unknown',
+  })[refl.auto_label] || 'verif-refl-mid';
+  const reflIcon = ({
+    '미반영': '🔥', '부분반영': '🟡', '반영완료': '⚪', '과열': '🔴',
+  })[refl.auto_label] || '⚪';
+  const reasonsHtml = (refl.reasons || []).map(r => `<li>${_phEsc(r)}</li>`).join('');
+
+  // KUVIC 비교
+  let kmHtml = '';
+  if (km && km.auto_label) {
+    const matches = (km.kuvic_conclusion === 'BUY' && (km.auto_label === '미반영' || km.auto_label === '부분반영'))
+                 || (km.kuvic_conclusion === 'SELL' && (km.auto_label === '반영완료' || km.auto_label === '과열'))
+                 || (km.kuvic_conclusion === 'HOLD' && km.auto_label === '부분반영');
+    kmHtml = `
+      <div class="verif-step-divider"></div>
+      <div class="verif-step-subtitle">🤝 KUVIC 비교</div>
+      <div class="verif-kuvic-match ${matches ? 'verif-match-ok' : 'verif-match-gap'}">
+        <div class="verif-kuvic-match-row">
+          <span class="verif-k">자동 라벨</span>
+          <span class="verif-v">${reflIcon} ${_phEsc(km.auto_label)}</span>
+        </div>
+        <div class="verif-kuvic-match-row">
+          <span class="verif-k">KUVIC 결론</span>
+          <span class="verif-v">${_phEsc(km.kuvic_conclusion || '—')}</span>
+        </div>
+        <div class="verif-kuvic-match-row">
+          <span class="verif-k">일치 여부</span>
+          <span class="verif-v">${matches ? '✅ 일치' : '⚠️ 불일치 — 재검토'}</span>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="verif-step-card">
+      <div class="verif-step-head">
+        <span class="verif-step-num">STEP 5</span>
+        <span class="verif-step-name">주가 검증</span>
+        ${_verifModeBadge('auto')}
+      </div>
+      <div class="verif-step-body">
+        <div class="verif-step-subtitle">📍 52주 위치</div>
+        ${sliderHtml}
+        <div class="verif-step-divider"></div>
+        <div class="verif-step-subtitle">📈 수익률</div>
+        ${retsHtml}
+        <div class="verif-step-divider"></div>
+        <div class="verif-step-subtitle">🎯 자동 반영도</div>
+        <div class="verif-reflection ${labelCls}">
+          <div class="verif-refl-label">${reflIcon} ${_phEsc(refl.auto_label || '—')}</div>
+          ${refl.vc_score != null ? `<div class="verif-refl-score">vc_score ${refl.vc_score}</div>` : ''}
+          <ul class="verif-refl-reasons">${reasonsHtml}</ul>
+        </div>
+        ${kmHtml}
       </div>
     </div>`;
 }

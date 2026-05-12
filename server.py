@@ -13485,7 +13485,348 @@ def api_analysis_journal_stats():
 
 # ============================================================
 # Step 4-5-3: 검증 시트 기본 정보 API
+# Step 4-5-4: 5단계 자동 prefill API
 # ============================================================
+
+
+def _verification_freshness(source_key: str, conn) -> dict:
+    """data_freshness 라벨 + 색 + age. 실패 시 NO_DATA 폴백."""
+    try:
+        from data_freshness import get_freshness
+        f = get_freshness(source_key, conn)
+        return {
+            'source': source_key,
+            'label': f.label,
+            'color': f.color,
+            'age_human': f.age_human,
+            'last_updated': f.last_updated_kst,
+        }
+    except Exception:
+        return {
+            'source': source_key, 'label': 'NO_DATA',
+            'color': 'red', 'age_human': '알 수 없음', 'last_updated': None,
+        }
+
+
+def _classify_auto_reflection(per_pct, return_52w_pct):
+    """자동 반영도 라벨링 (Step 5).
+    valuechain.calculate_reflection_score 와 별도로, 검증 시트 전용 간소 판단:
+      - per_pct: 5년 PER 백분위 (낮을수록 저평가)
+      - return_52w_pct: 52주 수익률 %
+    """
+    reasons = []
+    if per_pct is None:
+        return {'label': 'UNKNOWN', 'reasons': ['밸류에이션 데이터 부족']}
+
+    # PER 분위
+    if per_pct <= 35:
+        per_signal = 'LOW'
+        reasons.append(f'Fwd PER P{int(per_pct)} (역사 하단)')
+    elif per_pct <= 65:
+        per_signal = 'MID'
+        reasons.append(f'Fwd PER P{int(per_pct)} (역사 중앙)')
+    else:
+        per_signal = 'HIGH'
+        reasons.append(f'Fwd PER P{int(per_pct)} (역사 상단)')
+
+    # 52주 수익률
+    if return_52w_pct is None:
+        ret_signal = 'UNKNOWN'
+    elif return_52w_pct < 30:
+        ret_signal = 'LOW'
+        reasons.append(f'52주 +{return_52w_pct:.0f}% (상승폭 30% 미만)')
+    elif return_52w_pct < 100:
+        ret_signal = 'MID'
+        reasons.append(f'52주 +{return_52w_pct:.0f}%')
+    else:
+        ret_signal = 'HIGH'
+        reasons.append(f'52주 +{return_52w_pct:.0f}% (강한 상승)')
+
+    # 조합 → 라벨
+    if per_signal == 'LOW' and ret_signal in ('LOW', 'UNKNOWN'):
+        label = '미반영'
+    elif per_signal == 'HIGH' and ret_signal == 'HIGH':
+        label = '과열'
+    elif per_signal == 'HIGH' or ret_signal == 'HIGH':
+        label = '반영완료'
+    else:
+        label = '부분반영'
+
+    return {'label': label, 'reasons': reasons,
+            'per_signal': per_signal, 'return_signal': ret_signal}
+
+
+@app.route('/api/verification/<code>/prefill', methods=['GET'])
+def api_verification_prefill(code):
+    """검증 시트 5단계 자동 prefill.
+    build_prefill_data 어댑터 — step1/step2/step4/step5 구조로 재포장.
+    step3 는 null (4-5-5 에서 사용자 수동 입력).
+    부분 실패해도 errors[] 누적 + 가능한 step 표시."""
+    if not code or not code.isdigit() or len(code) != 6:
+        return jsonify({
+            'error': '6자리 숫자 종목 코드만 허용', 'code': code,
+        }), 400
+
+    errors: list = []
+    conn = sqlite3.connect(str(BASE_DIR / 'db' / 'dashboard.db'), timeout=10)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        # 1) build_prefill_data (이미 valuechain + analysis_journal + tam 통합)
+        pf: dict = {}
+        try:
+            from analysis_journal_helper import build_prefill_data
+            pf = build_prefill_data(code) or {}
+            errors.extend(pf.get('errors', []))
+        except Exception as exc:
+            errors.append(f'build_prefill_data: {exc}')
+
+        if not pf:
+            return jsonify({
+                'code': code,
+                'error': 'prefill 데이터 산출 실패',
+                'errors': errors,
+            }), 500
+
+        # 2) financial_quarterly 최근 4분기 평균 (직접 쿼리)
+        financial = None
+        try:
+            rows = conn.execute("""
+                SELECT year, quarter, revenue, operating_profit, opm
+                FROM financial_quarterly
+                WHERE stock_code = ? AND revenue IS NOT NULL
+                ORDER BY year DESC, quarter DESC LIMIT 4
+            """, (code,)).fetchall()
+            if rows:
+                # opm trend: 최근 2분기 vs 이전 2분기
+                opms = [r['opm'] for r in rows if r['opm'] is not None]
+                trend = 'flat'
+                if len(opms) >= 4:
+                    recent = sum(opms[:2]) / 2
+                    prior = sum(opms[2:4]) / 2
+                    if recent - prior >= 1.5: trend = 'up'
+                    elif prior - recent >= 1.5: trend = 'down'
+                avg_rev = sum(r['revenue'] for r in rows if r['revenue']) / len(rows)
+                avg_opm = (sum(opms) / len(opms)) if opms else None
+                financial = {
+                    'avg_revenue_4q': round(avg_rev, 0) if avg_rev else None,
+                    'avg_opm_4q': round(avg_opm, 2) if avg_opm is not None else None,
+                    'opm_trend': trend,
+                    'quarters': [
+                        {'year': r['year'], 'quarter': r['quarter'],
+                         'revenue': r['revenue'], 'opm': r['opm']}
+                        for r in rows
+                    ],
+                }
+        except Exception as exc:
+            errors.append(f'financial_quarterly: {exc}')
+
+        # 3) 최근 어닝 시그널 (earnings_surprise)
+        earnings = None
+        try:
+            row = conn.execute("""
+                SELECT year, quarter, signal, priority,
+                       revenue_surprise_pct, op_surprise_pct, note,
+                       calculated_at
+                FROM earnings_surprise
+                WHERE stock_code = ?
+                ORDER BY year DESC, quarter DESC LIMIT 1
+            """, (code,)).fetchone()
+            if row:
+                earnings = {
+                    'year': row['year'], 'quarter': row['quarter'],
+                    'signal': row['signal'], 'priority': row['priority'],
+                    'revenue_surprise_pct': row['revenue_surprise_pct'],
+                    'op_surprise_pct': row['op_surprise_pct'],
+                    'note': row['note'],
+                    'calculated_at': row['calculated_at'],
+                }
+        except Exception as exc:
+            errors.append(f'earnings_surprise: {exc}')
+
+        # 4) OHLCV 52주 high/low/현재가 + 수익률
+        price_position = None
+        returns = None
+        try:
+            row = conn.execute("""
+                SELECT MIN(close) AS low, MAX(close) AS high,
+                       (SELECT close FROM ohlcv WHERE code=? ORDER BY date DESC LIMIT 1) AS current
+                FROM ohlcv
+                WHERE code = ? AND date >= date('now', '-365 days')
+            """, (code, code)).fetchone()
+            if row and row['low'] and row['high'] and row['current']:
+                lo, hi, cur = row['low'], row['high'], row['current']
+                pos_pct = round((cur - lo) / (hi - lo) * 100, 1) if hi > lo else 50.0
+                price_position = {
+                    'week52_low': lo,
+                    'week52_high': hi,
+                    'current': cur,
+                    'position_pct': pos_pct,
+                }
+            # 수익률 (52w / 6m / 3m)
+            ret_rows = conn.execute("""
+                SELECT date, close FROM ohlcv WHERE code=?
+                ORDER BY date DESC LIMIT 250
+            """, (code,)).fetchall()
+            if ret_rows:
+                today_close = ret_rows[0]['close']
+                def _ret(days_back):
+                    if days_back >= len(ret_rows): return None
+                    past = ret_rows[days_back]['close']
+                    if not past: return None
+                    return round((today_close - past) / past * 100, 2)
+                returns = {
+                    'return_52w': _ret(min(249, len(ret_rows) - 1)),
+                    'return_6m':  _ret(min(125, len(ret_rows) - 1)),
+                    'return_3m':  _ret(min(60, len(ret_rows) - 1)),
+                }
+        except Exception as exc:
+            errors.append(f'ohlcv: {exc}')
+
+        # 5) 자동 반영도 분류
+        auto_reflection = _classify_auto_reflection(
+            pf.get('fwd_per_band_pct'),
+            pf.get('return_52w'),
+        )
+
+        # 6) KUVIC match
+        kuvic_session = pf.get('kuvic_session')
+        kuvic_match = None
+        if kuvic_session and pf.get('reflection_label'):
+            kuvic_match = {
+                'kuvic_conclusion': kuvic_session.get('conclusion'),
+                'auto_label': pf.get('reflection_label'),
+                'thesis': kuvic_session.get('thesis'),
+                'journal_id': None,  # analysis_journal id (없으면 None)
+            }
+
+        # 7) 신선도 라벨 attach
+        fr_naver = _verification_freshness('naver_price', conn)
+        fr_finq  = _verification_freshness('financial_quarterly', conn)
+        fr_band  = _verification_freshness('valuation_band', conn)
+        fr_earn  = _verification_freshness('earnings_pipeline', conn)
+        fr_ohlcv = _verification_freshness('ohlcv_kr', conn)
+
+        # 8) Step 정형화
+        step1 = {
+            'valuechain': {
+                'theme_id': pf.get('theme_id'),
+                'layer_id': pf.get('layer_id'),
+                'segment_id': pf.get('segment_id'),
+                'segments': pf.get('matched_segments') or [],
+                'is_bottleneck': bool(pf.get('is_bottleneck')),
+                'freshness': {'source': 'valuechain_map',
+                              'label': 'ARCHIVE', 'color': 'gray',
+                              'age_human': '정적 데이터', 'last_updated': None},
+            },
+            'kuvic_analysis': {
+                'thesis': kuvic_session.get('thesis') if kuvic_session else None,
+                'conclusion': kuvic_session.get('conclusion') if kuvic_session else None,
+                'priority': kuvic_session.get('priority') if kuvic_session else None,
+                'tags': kuvic_session.get('tags') if kuvic_session else [],
+                'session_date': kuvic_session.get('session_date') if kuvic_session else None,
+                'has_manual_tp': bool(kuvic_session.get('has_manual_tp')) if kuvic_session else False,
+                'freshness': {'source': 'kuvic_session',
+                              'label': 'MANUAL', 'color': 'blue',
+                              'age_human': '수동 입력', 'last_updated': None},
+            } if kuvic_session else None,
+        }
+
+        step2 = {
+            'financial': {**(financial or {}),
+                          'freshness': fr_finq} if financial else None,
+            'valuation': {
+                'fwd_per': pf.get('fwd_per'),
+                'fwd_per_band_pct': pf.get('fwd_per_band_pct'),
+                'opm_estimate': pf.get('opm_estimate'),
+                'opm_source': pf.get('opm_source'),
+                'per_band': pf.get('_per_band'),
+                'opm_range': pf.get('_opm_range'),
+                'freshness': fr_band,
+            },
+            'earnings': {**earnings, 'freshness': fr_earn} if earnings else None,
+        }
+
+        step3 = None  # 4-5-5 에서 채움
+
+        step4 = {
+            'tam': {
+                'bear': {
+                    'eps': pf.get('bear_eps'),
+                    'eps_source': pf.get('bear_eps_source'),
+                    'per': pf.get('bear_per'),
+                    'per_source': pf.get('bear_per_source'),
+                    'tp': pf.get('bear_tp'),
+                },
+                'base': {
+                    'eps': pf.get('base_eps'),
+                    'eps_source': pf.get('base_eps_source'),
+                    'per': pf.get('base_per'),
+                    'per_source': pf.get('base_per_source'),
+                    'tp': pf.get('base_tp'),
+                },
+                'bull': {
+                    'eps': pf.get('bull_eps'),
+                    'eps_source': pf.get('bull_eps_source'),
+                    'per': pf.get('bull_per'),
+                    'per_source': pf.get('bull_per_source'),
+                    'tp': pf.get('bull_tp'),
+                },
+                'current_price': pf.get('current_price'),
+                'method': pf.get('_tam_method'),
+                'consensus_tp': pf.get('_consensus_tp'),
+                'freshness': fr_band,  # TAM 은 valuation_band+consensus 위에서 산출
+            },
+        }
+
+        step5 = {
+            'price_position': {**(price_position or {}),
+                               'freshness': fr_ohlcv} if price_position else None,
+            'returns': returns,
+            'reflection': {
+                'auto_label': auto_reflection['label'],
+                'reasons': auto_reflection['reasons'],
+                'per_signal': auto_reflection.get('per_signal'),
+                'return_signal': auto_reflection.get('return_signal'),
+                # valuechain.calculate_reflection_score 결과도 병기
+                'vc_score': pf.get('reflection_score'),
+                'vc_label': pf.get('reflection_label'),
+            },
+            'kuvic_match': kuvic_match,
+        }
+
+        # TP 별 upside%
+        cur_price = pf.get('current_price') or 0
+        if cur_price:
+            for k in ('bear', 'base', 'bull'):
+                tp = step4['tam'][k].get('tp')
+                if tp:
+                    step4['tam'][k]['upside_pct'] = round((tp - cur_price) / cur_price * 100, 1)
+
+        return jsonify({
+            'code': code,
+            'name': pf.get('stock_name') or code,
+            'analysis_date': pf.get('analysis_date'),
+            'current_price': pf.get('current_price'),
+            'return_52w': pf.get('return_52w'),
+            'step1': step1,
+            'step2': step2,
+            'step3': step3,
+            'step4': step4,
+            'step5': step5,
+            'data_sources': pf.get('data_sources', []),
+            'errors': errors,
+        })
+    except Exception as exc:
+        log.exception('verification/prefill')
+        return jsonify({
+            'code': code,
+            'error': f'서버 오류: {exc}',
+            'errors': errors,
+        }), 500
+    finally:
+        conn.close()
+
 
 @app.route('/api/verification/stock/<code>', methods=['GET'])
 def api_verification_stock(code):
