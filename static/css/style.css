@@ -6351,3 +6351,272 @@ tr:hover td {
   .verif-form-savemark { margin-left: 0; margin-top: 4px; }
   #verif-toast { right: 12px; left: 12px; bottom: 12px; }
 }
+
+/* ==============================================================
+ * Phase 4-5-6: 자동 vs KUVIC Split View
+ * ============================================================== */
+.vsv-section { margin-top: 20px; }
+.vsv-section-title {
+  font-size: 16px; font-weight: 700;
+  color: var(--text, #222);
+  margin: 0 0 12px;
+}
+.vsv-split-loading, .vsv-split-error {
+  padding: 24px; text-align: center;
+  background: rgba(120,120,120,0.04);
+  border: 1px dashed rgba(120,120,120,0.20);
+  border-radius: 8px;
+  color: var(--text-muted, #888);
+}
+.vsv-split-error { color: #ef4444; }
+
+/* 2-열 그리드 */
+.vsv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.vsv-card {
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.vsv-card-auto  { border-top: 3px solid #3b82f6; }
+.vsv-card-kuvic { border-top: 3px solid #9333ea; }
+.vsv-card-empty { border-top: 3px solid rgba(120,120,120,0.40); opacity: 0.85; }
+
+.vsv-card-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: rgba(120,120,120,0.05);
+  border-bottom: 1px solid rgba(120,120,120,0.10);
+}
+.vsv-card-icon { font-size: 14px; }
+.vsv-card-title {
+  font-weight: 600; font-size: 13px;
+  color: var(--text, #222); flex: 1;
+}
+.vsv-card-meta {
+  font-size: 11px; color: var(--text-muted, #888);
+  font-family: ui-monospace, monospace;
+}
+.vsv-card-body { padding: 12px 14px; }
+.vsv-empty-body {
+  padding: 24px 14px;
+  font-size: 12.5px;
+  color: var(--text-muted, #888);
+  text-align: center;
+}
+
+/* KV */
+.vsv-kv {
+  display: flex; justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(120,120,120,0.08);
+}
+.vsv-kv:last-child { border-bottom: none; }
+.vsv-k {
+  color: var(--text-muted, #666);
+  font-size: 11.5px;
+}
+.vsv-v {
+  color: var(--text, #222);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-weight: 500;
+  text-align: right;
+}
+.vsv-tp-main { font-size: 16px; font-weight: 700; }
+.vsv-tp-row { font-size: 11.5px; }
+.vsv-tp-na  { color: var(--text-muted, #888); }
+.vsv-tp-auto  { color: #2563eb; }
+.vsv-tp-kuvic { color: #9333ea; }
+.vsv-concl {
+  font-weight: 700; font-size: 13px;
+  padding: 1px 7px; border-radius: 3px;
+  background: rgba(120,120,120,0.10);
+}
+.vsv-priority {
+  color: #f59e0b; margin-left: 4px; font-size: 12px;
+}
+.vsv-score { color: var(--text-muted, #888); font-size: 11px; margin-left: 4px; }
+.vsv-thesis-line {
+  margin-top: 10px; padding: 8px 10px;
+  background: rgba(168,85,247,0.06);
+  border-left: 2px solid rgba(168,85,247,0.40);
+  border-radius: 4px;
+  font-size: 12px; line-height: 1.5;
+  color: var(--text, #222);
+}
+.vsv-reasons {
+  margin-top: 10px;
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.vsv-reason-pill {
+  font-size: 11px; padding: 2px 8px;
+  background: rgba(59,130,246,0.08);
+  color: #2563eb;
+  border-radius: 8px;
+}
+
+/* 갭 분석 패널 */
+.vsv-gap-panel {
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.vsv-gap-empty {
+  padding: 18px;
+  text-align: center;
+  color: var(--text-muted, #888);
+  font-size: 13px;
+}
+.vsv-gap-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: rgba(245,158,11,0.06);
+  border-bottom: 1px solid rgba(245,158,11,0.15);
+}
+.vsv-gap-icon { font-size: 14px; }
+.vsv-gap-title {
+  flex: 1; font-weight: 600; font-size: 13px;
+  color: var(--text, #222);
+}
+.vsv-gap-meta {
+  font-size: 10.5px; color: var(--text-muted, #888);
+  font-family: ui-monospace, monospace;
+}
+.vsv-gap-body { padding: 12px 14px; }
+
+.vsv-gap-row {
+  display: grid;
+  grid-template-columns: 60px 1fr auto auto 1fr;
+  gap: 10px; align-items: center;
+  padding: 6px 0;
+  font-size: 12.5px;
+  border-bottom: 1px solid rgba(120,120,120,0.08);
+}
+.vsv-gap-row:last-of-type { border-bottom: none; }
+.vsv-sev-row-high   { background: rgba(239,68,68,0.04); }
+.vsv-sev-row-medium { background: rgba(245,158,11,0.04); }
+.vsv-gap-metric {
+  font-weight: 700; color: var(--text, #222);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.vsv-gap-vs {
+  font-family: ui-monospace, monospace; font-size: 12px;
+  color: var(--text-muted, #666);
+}
+.vsv-diff {
+  font-family: ui-monospace, monospace;
+  font-weight: 700; font-size: 12.5px;
+}
+.vsv-diff-up   { color: #ef4444; }
+.vsv-diff-down { color: #2563eb; }
+.vsv-sev {
+  font-size: 10.5px; padding: 1px 7px;
+  border-radius: 10px; font-weight: 600;
+}
+.vsv-sev-high   { background: rgba(239,68,68,0.15);  color: #b91c1c; }
+.vsv-sev-medium { background: rgba(245,158,11,0.15); color: #a37700; }
+.vsv-sev-low    { background: rgba(34,197,94,0.15);  color: #15803d; }
+.vsv-sev-na     { background: rgba(120,120,120,0.12); color: var(--text-muted, #888); }
+.vsv-gap-dir {
+  color: var(--text-muted, #666); font-size: 11.5px;
+  text-align: right;
+}
+
+/* 일치성 */
+.vsv-consistency {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12.5px;
+  flex-wrap: wrap;
+}
+.vsv-cons-icon { font-size: 16px; }
+.vsv-cons-label {
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+}
+.vsv-cons-msg { flex: 1; color: var(--text, #222); }
+.vsv-cons-match    { background: rgba(34,197,94,0.07);  border: 1px solid rgba(34,197,94,0.25); }
+.vsv-cons-partial  { background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.25); }
+.vsv-cons-conflict { background: rgba(239,68,68,0.07);  border: 1px solid rgba(239,68,68,0.25); }
+
+/* 액션 */
+.vsv-action {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border-left: 4px solid #3b82f6;
+}
+.vsv-action-head {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
+}
+.vsv-action-stars {
+  font-size: 18px; font-weight: 700;
+  color: #f59e0b;
+}
+.vsv-action-label {
+  font-weight: 700; font-size: 14px;
+  color: var(--text, #222);
+}
+.vsv-action-rationale {
+  font-size: 12px; color: var(--text-muted, #666);
+}
+.vsv-action-list {
+  margin: 8px 0 0; padding-left: 20px;
+  font-size: 12.5px; line-height: 1.7;
+  color: var(--text, #222);
+}
+.vsv-action-high { border-left-color: #ef4444; background: rgba(239,68,68,0.05); }
+.vsv-action-mid  { border-left-color: #f59e0b; background: rgba(245,158,11,0.05); }
+.vsv-action-low  { border-left-color: #3b82f6; background: rgba(59,130,246,0.05); }
+.vsv-action-ok   { border-left-color: #16a34a; background: rgba(34,197,94,0.05); }
+
+/* 다크 모드 */
+@media (prefers-color-scheme: dark) {
+  .vsv-card, .vsv-gap-panel {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.10);
+  }
+  .vsv-card-head, .vsv-gap-head {
+    background: rgba(255,255,255,0.04);
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  .vsv-card-title, .vsv-gap-title, .vsv-section-title,
+  .vsv-v, .vsv-action-label, .vsv-action-list, .vsv-gap-metric,
+  .vsv-thesis-line, .vsv-cons-msg {
+    color: #f1f5f9;
+  }
+  .vsv-kv { border-bottom-color: rgba(255,255,255,0.08); }
+  .vsv-gap-row { border-bottom-color: rgba(255,255,255,0.08); }
+  .vsv-tp-auto  { color: #60a5fa; }
+  .vsv-tp-kuvic { color: #c084fc; }
+  .vsv-diff-up   { color: #f87171; }
+  .vsv-diff-down { color: #60a5fa; }
+}
+
+/* 모바일 */
+@media (max-width: 768px) {
+  .vsv-grid { grid-template-columns: 1fr; }
+  .vsv-gap-row {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: 'metric diff' 'vs sev' 'dir dir';
+    gap: 4px;
+  }
+  .vsv-gap-metric { grid-area: metric; }
+  .vsv-gap-vs     { grid-area: vs; }
+  .vsv-gap-diff   { grid-area: diff; text-align: right; }
+  .vsv-gap-sev    { grid-area: sev; }
+  .vsv-gap-dir    { grid-area: dir; text-align: left; }
+}

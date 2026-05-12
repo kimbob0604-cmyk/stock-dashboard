@@ -7189,11 +7189,229 @@ function _verifRenderStockCard(container, data, prefill) {
       ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
     </div>
 
+    <!-- 4-5-6: 자동 vs KUVIC Split View -->
+    <div id="verif-split-wrap"></div>
+
     <!-- 4-5-5: KUVIC 수동 입력 폼 -->
     <div id="verif-kuvic-form-wrap"></div>`;
 
-  // 폼은 별도 함수에서 렌더 + 로드
+  // 4-5-6 Split View + 4-5-5 폼 비동기 로드
+  _verifSetupSplitView(data.code);
   _verifSetupKuvicForm(data.code);
+}
+
+// ============================================================
+// 4-5-6: 자동 vs KUVIC Split View
+// ============================================================
+
+async function _verifSetupSplitView(code) {
+  const wrap = document.getElementById('verif-split-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="verif-loading verif-split-loading">갭 분석 로딩 중…</div>';
+  try {
+    const r = await fetch(`/api/verification/${encodeURIComponent(code)}/gap-analysis`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    _verifRenderSplitView(wrap, data);
+  } catch (e) {
+    console.error('[verification] gap-analysis failed:', e);
+    wrap.innerHTML = `<div class="verif-split-error">갭 분석 로드 실패: ${_phEsc(e.message)}</div>`;
+  }
+}
+
+function _verifRefreshSplitView() {
+  // 4-5-5 폼이 저장 후 호출 — 최신 KUVIC 반영
+  if (_verifFormState && _verifFormState.code) {
+    _verifSetupSplitView(_verifFormState.code);
+  }
+}
+
+function _verifTpCell(v, kind) {
+  if (v == null) return `<span class="vsv-tp-na">—</span>`;
+  return `<span class="vsv-tp-num vsv-tp-${kind || 'auto'}">${_verifFmtNum(v)}</span>`;
+}
+
+function _verifSeverityBadge(sev) {
+  const meta = ({
+    high:   { cls: 'vsv-sev-high',   label: '🔴 큰 갭' },
+    medium: { cls: 'vsv-sev-medium', label: '🟡 보통' },
+    low:    { cls: 'vsv-sev-low',    label: '🟢 작음' },
+    unknown:{ cls: 'vsv-sev-na',     label: '—' },
+  })[sev] || { cls: 'vsv-sev-na', label: '—' };
+  return `<span class="vsv-sev ${meta.cls}">${meta.label}</span>`;
+}
+
+function _verifGapPctBadge(pct) {
+  if (pct == null) return '—';
+  const sign = pct > 0 ? '+' : '';
+  const cls = pct > 0 ? 'vsv-diff-up' : pct < 0 ? 'vsv-diff-down' : '';
+  return `<span class="vsv-diff ${cls}">${sign}${pct.toFixed(1)}%</span>`;
+}
+
+function _verifRenderSplitView(wrap, data) {
+  const auto = data.auto || {};
+  const ku = data.kuvic;
+  const gaps = data.gaps || [];
+  const consistency = data.consistency;
+  const action = data.action || {};
+
+  // 자동 반영도 아이콘
+  const reflIcon = ({
+    '미반영': '🔥', '부분반영': '🟡', '반영완료': '⚪', '과열': '🔴',
+  })[auto.reflection_auto || auto.reflection_label] || '⚪';
+
+  // KUVIC 칸
+  const kuvicCol = ku ? `
+    <div class="vsv-card vsv-card-kuvic">
+      <div class="vsv-card-head">
+        <span class="vsv-card-icon">📝</span>
+        <span class="vsv-card-title">KUVIC 분석</span>
+        <span class="vsv-card-meta">${_phEsc(ku.analyst || '—')} · ${_phEsc(ku.analysis_date || '')}</span>
+      </div>
+      <div class="vsv-card-body">
+        <div class="vsv-kv">
+          <span class="vsv-k">Base TP</span>
+          <span class="vsv-v vsv-tp-main">${ku.base_tp != null ? _verifFmtNum(ku.base_tp) + '원' : '—'}</span>
+        </div>
+        <div class="vsv-kv">
+          <span class="vsv-k">KUVIC 결론</span>
+          <span class="vsv-v">
+            <span class="vsv-concl">${_phEsc(ku.conclusion || '—')}</span>
+            <span class="vsv-priority">${_phEsc(ku.priority || '')}</span>
+          </span>
+        </div>
+        <div class="vsv-kv">
+          <span class="vsv-k">Bear / Base / Bull</span>
+          <span class="vsv-v vsv-tp-row">
+            ${_verifTpCell(ku.bear_tp, 'kuvic')} /
+            ${_verifTpCell(ku.base_tp, 'kuvic')} /
+            ${_verifTpCell(ku.bull_tp, 'kuvic')}
+          </span>
+        </div>
+        ${ku.thesis ? `
+          <div class="vsv-thesis-line">${_phEsc(ku.thesis)}</div>` : ''}
+      </div>
+    </div>` : `
+    <div class="vsv-card vsv-card-empty">
+      <div class="vsv-card-head">
+        <span class="vsv-card-icon">📝</span>
+        <span class="vsv-card-title">KUVIC 분석</span>
+      </div>
+      <div class="vsv-empty-body">
+        KUVIC 일지 없음 — 아래 입력 폼에서 작성하면 비교가 활성화됩니다.
+      </div>
+    </div>`;
+
+  // 자동 칸
+  const autoCol = `
+    <div class="vsv-card vsv-card-auto">
+      <div class="vsv-card-head">
+        <span class="vsv-card-icon">🤖</span>
+        <span class="vsv-card-title">자동 산출</span>
+        <span class="vsv-card-meta">${_phEsc(auto.method || '—')}</span>
+      </div>
+      <div class="vsv-card-body">
+        <div class="vsv-kv">
+          <span class="vsv-k">Base TP</span>
+          <span class="vsv-v vsv-tp-main">${auto.base_tp != null ? _verifFmtNum(auto.base_tp) + '원' : '—'}</span>
+        </div>
+        <div class="vsv-kv">
+          <span class="vsv-k">자동 반영도</span>
+          <span class="vsv-v">
+            ${reflIcon} ${_phEsc(auto.reflection_auto || auto.reflection_label || '—')}
+            ${auto.reflection_score != null ? `<span class="vsv-score">(${auto.reflection_score})</span>` : ''}
+          </span>
+        </div>
+        <div class="vsv-kv">
+          <span class="vsv-k">Bear / Base / Bull</span>
+          <span class="vsv-v vsv-tp-row">
+            ${_verifTpCell(auto.bear_tp, 'auto')} /
+            ${_verifTpCell(auto.base_tp, 'auto')} /
+            ${_verifTpCell(auto.bull_tp, 'auto')}
+          </span>
+        </div>
+        ${(auto.reflection_reasons || []).length ? `
+          <div class="vsv-reasons">
+            ${(auto.reflection_reasons || []).map(r => `<span class="vsv-reason-pill">${_phEsc(r)}</span>`).join('')}
+          </div>` : ''}
+      </div>
+    </div>`;
+
+  // 갭 분석 패널 (ku 없으면 안내만)
+  let gapPanel = '';
+  if (!ku) {
+    gapPanel = `
+      <div class="vsv-gap-panel vsv-gap-empty">
+        ⏳ KUVIC 일지 없음 — 비교 분석 불가
+      </div>`;
+  } else {
+    // 갭 행
+    const gapRows = gaps.map(g => `
+      <div class="vsv-gap-row vsv-sev-row-${g.severity}">
+        <span class="vsv-gap-metric">${_phEsc(({bear_tp:'Bear', base_tp:'Base', bull_tp:'Bull'})[g.metric] || g.metric)}</span>
+        <span class="vsv-gap-vs">${_verifFmtNum(g.auto)} → ${_verifFmtNum(g.kuvic)}</span>
+        <span class="vsv-gap-diff">${_verifGapPctBadge(g.diff_pct)}</span>
+        <span class="vsv-gap-sev">${_verifSeverityBadge(g.severity)}</span>
+        <span class="vsv-gap-dir">${_phEsc(g.direction)}</span>
+      </div>`).join('');
+
+    // 일치성 배지
+    let consHtml = '';
+    if (consistency) {
+      const consCls = consistency.label === 'match' ? 'vsv-cons-match'
+                    : consistency.label === 'conflict' ? 'vsv-cons-conflict'
+                    : 'vsv-cons-partial';
+      const consIcon = consistency.label === 'match' ? '✅'
+                     : consistency.label === 'conflict' ? '⚠️' : '⚪';
+      consHtml = `
+        <div class="vsv-consistency ${consCls}">
+          <span class="vsv-cons-icon">${consIcon}</span>
+          <span class="vsv-cons-label">${_phEsc(consistency.auto_reflection || '—')} ↔ ${_phEsc(consistency.kuvic_conclusion || '—')}</span>
+          <span class="vsv-cons-msg">${_phEsc(consistency.message || '')}</span>
+        </div>`;
+    }
+
+    // 액션
+    const actStarsCls = action.stars && action.stars.length >= 3 ? 'vsv-action-high'
+                      : action.stars && action.stars.length === 2 ? 'vsv-action-mid'
+                      : action.stars && action.stars.length === 1 ? 'vsv-action-low'
+                      : 'vsv-action-ok';
+    const checklistHtml = (action.checklist || []).length
+      ? `<ul class="vsv-action-list">${action.checklist.map(c => `<li>${_phEsc(c)}</li>`).join('')}</ul>`
+      : '';
+
+    gapPanel = `
+      <div class="vsv-gap-panel">
+        <div class="vsv-gap-head">
+          <span class="vsv-gap-icon">⚖️</span>
+          <span class="vsv-gap-title">갭 분석</span>
+          <span class="vsv-gap-meta">임계: medium ${data.thresholds.medium_pct}% · high ${data.thresholds.high_pct}%</span>
+        </div>
+        <div class="vsv-gap-body">
+          ${gapRows || '<div class="vsv-empty">TP 데이터 부족으로 갭 계산 불가</div>'}
+          ${consHtml}
+          <div class="vsv-action ${actStarsCls}">
+            <div class="vsv-action-head">
+              <span class="vsv-action-stars">${_phEsc(action.stars || '—')}</span>
+              <span class="vsv-action-label">${_phEsc(action.label || '')}</span>
+              <span class="vsv-action-rationale">${_phEsc(action.rationale || '')}</span>
+            </div>
+            ${checklistHtml}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  wrap.innerHTML = `
+    <div class="vsv-section">
+      <h3 class="vsv-section-title">⚖️ 자동 vs KUVIC 비교</h3>
+      <div class="vsv-grid">
+        ${autoCol}
+        ${kuvicCol}
+      </div>
+      ${gapPanel}
+    </div>`;
 }
 
 // ============================================================
@@ -7944,6 +8162,8 @@ async function _verifSaveJournal(opts) {
     _verifUpdateStatus(`편집 모드 · id ${_verifFormState.id || '?'} · 마지막 저장 ${now}`);
     document.getElementById('verif-form-savemark').textContent = `✓ ${now}`;
     if (opts.verbose) _verifShowToast('저장 완료', 'success');
+    // 4-5-6: 저장 후 Split View 새로고침 (갭 분석 재계산)
+    if (typeof _verifRefreshSplitView === 'function') _verifRefreshSplitView();
   } catch (e) {
     console.error('[verification] save failed:', e);
     _verifShowToast(`저장 실패: ${e.message}`, 'error');

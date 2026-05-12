@@ -13828,6 +13828,246 @@ def api_verification_prefill(code):
         conn.close()
 
 
+# ============================================================
+# Step 4-5-6: 자동 vs KUVIC Split View — 갭 분석 API
+# ============================================================
+
+# 임계값 (Q5 = A: ±10% / ±25%)
+_GAP_THRESH_MEDIUM = 10.0
+_GAP_THRESH_HIGH = 25.0
+
+
+def _gap_severity(pct: float) -> str:
+    if pct is None:
+        return 'unknown'
+    a = abs(pct)
+    if a >= _GAP_THRESH_HIGH: return 'high'
+    if a >= _GAP_THRESH_MEDIUM: return 'medium'
+    return 'low'
+
+
+def _gap_direction(diff_pct: float, label: str = 'TP') -> str:
+    """gap_pct (KUVIC - auto) / auto * 100 기준."""
+    if diff_pct is None:
+        return '데이터 부족'
+    if diff_pct < -3:
+        return f'분석가가 보수적 ({label} 낮음)'
+    if diff_pct > 3:
+        return f'분석가가 공격적 ({label} 높음)'
+    return '대체로 일치'
+
+
+# 자동 반영도 × KUVIC 결론 일치성 매트릭스
+_REFL_CONCL_CONFLICTS = {
+    ('과열', 'BUY'):    '시장은 과열로 보지만 분석가는 BUY — 갭 큼',
+    ('과열', 'WATCH'):  '시장은 과열, 분석가는 관망 — 부분 일치',
+    ('미반영', 'SELL'): '시장은 저평가로 보지만 분석가는 SELL — 갭 큼',
+    ('미반영', 'HOLD'): '시장은 저평가, 분석가는 HOLD — 보수적 차이',
+    ('반영완료', 'BUY'): '시장은 반영 완료라 보지만 분석가는 BUY — 신중 검토',
+}
+_REFL_CONCL_AGREEMENTS = {
+    ('미반영', 'BUY'),
+    ('과열', 'SELL'),
+    ('과열', 'HOLD'),
+    ('부분반영', 'HOLD'),
+    ('반영완료', 'HOLD'),
+    ('반영완료', 'SELL'),
+}
+
+
+def _check_reflection_conclusion(reflection: str, conclusion: str):
+    """반영도-결론 일치성. Returns:
+        ('match' / 'partial' / 'conflict', message) or None
+    """
+    if not reflection or not conclusion:
+        return None
+    key = (reflection, conclusion)
+    if key in _REFL_CONCL_CONFLICTS:
+        return ('conflict', _REFL_CONCL_CONFLICTS[key])
+    if key in _REFL_CONCL_AGREEMENTS:
+        return ('match', '반영도와 결론이 합리적으로 일치')
+    return ('partial', f'반영도 "{reflection}" + 결론 "{conclusion}" 명확한 룰 없음')
+
+
+def _build_gap_for_tp(scenario: str, auto_tp, kuvic_tp):
+    """단일 시나리오 TP 갭. auto_tp 가 0 또는 None 이면 None 반환."""
+    if auto_tp is None or kuvic_tp is None:
+        return None
+    if not auto_tp:
+        return None
+    diff_abs = kuvic_tp - auto_tp
+    diff_pct = round(diff_abs / auto_tp * 100, 1)
+    sev = _gap_severity(diff_pct)
+    return {
+        'metric': f'{scenario}_tp',
+        'auto': auto_tp,
+        'kuvic': kuvic_tp,
+        'diff_abs': round(diff_abs, 0),
+        'diff_pct': diff_pct,
+        'severity': sev,
+        'direction': _gap_direction(diff_pct, f'{scenario.title()} TP'),
+    }
+
+
+@app.route('/api/verification/<code>/gap-analysis', methods=['GET'])
+def api_verification_gap_analysis(code):
+    """자동 vs KUVIC 갭 분석.
+    Returns:
+      { code, name, current_price,
+        auto:   {base_tp, bear_tp, bull_tp, reflection_label, reasons},
+        kuvic:  {base_tp, bear_tp, bull_tp, conclusion, priority,
+                 thesis, journal_id, updated_at} | null,
+        gaps:   [ {metric, auto, kuvic, diff_abs, diff_pct, severity, direction}, ... ],
+        consistency: {label, message} | null,
+        action: {stars, label, rationale, checklist[]},
+        errors: [...] }
+    """
+    if not code or not code.isdigit() or len(code) != 6:
+        return jsonify({'error': '6자리 숫자 종목 코드만 허용', 'code': code}), 400
+
+    errors: list = []
+
+    # 1) 자동 산출 — prefill 재호출 대신 내부에서 직접 build (한 번 더 함수 호출)
+    try:
+        from analysis_journal_helper import build_prefill_data
+        pf = build_prefill_data(code) or {}
+        errors.extend(pf.get('errors', []))
+    except Exception as exc:
+        return jsonify({
+            'code': code, 'error': f'prefill 실패: {exc}',
+            'errors': errors,
+        }), 500
+
+    auto = {
+        'name': pf.get('stock_name') or code,
+        'base_tp': pf.get('base_tp'),
+        'bear_tp': pf.get('bear_tp'),
+        'bull_tp': pf.get('bull_tp'),
+        'base_eps': pf.get('base_eps'),
+        'base_per': pf.get('base_per'),
+        'reflection_label': pf.get('reflection_label'),
+        'reflection_score': pf.get('reflection_score'),
+        'current_price': pf.get('current_price'),
+        'method': pf.get('_tam_method'),
+    }
+    # reflection reasons: 4-5-4의 _classify_auto_reflection 호출 (재사용)
+    auto_class = _classify_auto_reflection(
+        pf.get('fwd_per_band_pct'), pf.get('return_52w'))
+    auto['reflection_reasons'] = auto_class.get('reasons', [])
+    auto['reflection_auto'] = auto_class.get('label')  # 검증 시트 전용 분류
+
+    # 2) KUVIC — 최신 일지
+    kuvic = None
+    try:
+        from analysis_journal_api import list_journals_by_stock
+        journals = list_journals_by_stock(code, 1) or []
+        if journals:
+            j = journals[0]
+            kuvic = {
+                'journal_id': j.get('id'),
+                'analyst': j.get('analyst'),
+                'analysis_date': j.get('analysis_date'),
+                'updated_at': j.get('updated_at'),
+                'bear_tp': j.get('bear_tp'),
+                'base_tp': j.get('base_tp'),
+                'bull_tp': j.get('bull_tp'),
+                'conclusion': j.get('conclusion'),
+                'priority': j.get('priority'),
+                'thesis': j.get('thesis'),
+                'memo': j.get('memo'),
+                'tags': j.get('tags') or [],
+            }
+    except Exception as exc:
+        errors.append(f'journal/stock: {exc}')
+
+    # 3) TP 갭 (3 시나리오)
+    gaps: list = []
+    if kuvic:
+        for sc in ('bear', 'base', 'bull'):
+            g = _build_gap_for_tp(sc, auto.get(f'{sc}_tp'), kuvic.get(f'{sc}_tp'))
+            if g:
+                gaps.append(g)
+
+    # 4) 반영도 vs 결론 일치성
+    consistency = None
+    if kuvic:
+        result = _check_reflection_conclusion(
+            auto.get('reflection_auto') or auto.get('reflection_label'),
+            kuvic.get('conclusion'),
+        )
+        if result:
+            consistency = {
+                'label': result[0],   # match / partial / conflict
+                'message': result[1],
+                'auto_reflection': auto.get('reflection_auto') or auto.get('reflection_label'),
+                'kuvic_conclusion': kuvic.get('conclusion'),
+            }
+
+    # 5) 추천 액션 (Q4=A: 별점 + 한 줄)
+    high_count = sum(1 for g in gaps if g['severity'] == 'high')
+    med_count = sum(1 for g in gaps if g['severity'] == 'medium')
+    conflict = consistency and consistency['label'] == 'conflict'
+
+    if not kuvic:
+        action = {
+            'stars': '—',
+            'label': 'KUVIC 일지 없음',
+            'rationale': '자동 산출만 사용 가능',
+            'checklist': ['KUVIC 분석 일지 작성 (Step 3 / TP / 결론)'],
+        }
+    elif high_count >= 2 or (high_count >= 1 and conflict):
+        action = {
+            'stars': '★★★',
+            'label': '재검토 필요',
+            'rationale': '자동과 KUVIC 판단이 크게 다름',
+            'checklist': [
+                '자동 TAM 가정 검토 (PER 백분위 적정성)',
+                'KUVIC thesis 재확인 — 최근 컨센서스 변화 반영했는지',
+                '결론(BUY/HOLD/SELL/WATCH) 재고',
+            ],
+        }
+    elif high_count >= 1 or (med_count >= 2 and conflict):
+        action = {
+            'stars': '★★',
+            'label': '확인 권장',
+            'rationale': '일부 시나리오에서 차이 큼',
+            'checklist': [
+                'Bull/Bear 시나리오 가정 검토',
+                '반영도 자동 분류 vs KUVIC 결론 갭 확인',
+            ],
+        }
+    elif med_count >= 1 or conflict:
+        action = {
+            'stars': '★',
+            'label': '경미한 차이',
+            'rationale': '대체로 일치하나 부분 차이 있음',
+            'checklist': ['갭이 큰 시나리오만 점검'],
+        }
+    else:
+        action = {
+            'stars': '✓',
+            'label': '정상',
+            'rationale': '자동과 KUVIC 판단이 잘 일치',
+            'checklist': [],
+        }
+
+    return jsonify({
+        'code': code,
+        'name': auto.get('name'),
+        'current_price': auto.get('current_price'),
+        'auto': auto,
+        'kuvic': kuvic,
+        'gaps': gaps,
+        'consistency': consistency,
+        'action': action,
+        'thresholds': {
+            'medium_pct': _GAP_THRESH_MEDIUM,
+            'high_pct': _GAP_THRESH_HIGH,
+        },
+        'errors': errors,
+    })
+
+
 @app.route('/api/verification/stock/<code>', methods=['GET'])
 def api_verification_stock(code):
     """검증 시트용 종목 기본 정보.
