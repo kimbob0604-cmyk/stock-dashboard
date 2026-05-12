@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-12 12:06:09",
+  "updated_at": "2026-05-12 18:45:26",
   "actual_date": "20260512",
   "kospi": {
     "value": 7743.09,
@@ -221,7 +221,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 2,
@@ -881,7 +881,7 @@
           ]
         }
       ],
-      "rank_change": -1
+      "rank_change": 0
     },
     {
       "id": 5,
@@ -1171,7 +1171,7 @@
           ]
         }
       ],
-      "rank_change": -4
+      "rank_change": 0
     },
     {
       "id": 6,
@@ -1590,7 +1590,7 @@
           ]
         }
       ],
-      "rank_change": -5
+      "rank_change": 0
     },
     {
       "id": 8,
@@ -1824,7 +1824,7 @@
           ]
         }
       ],
-      "rank_change": -4
+      "rank_change": 0
     },
     {
       "id": 9,
@@ -2264,7 +2264,7 @@
           ]
         }
       ],
-      "rank_change": 5
+      "rank_change": 0
     },
     {
       "id": 11,
@@ -2676,7 +2676,7 @@
           ]
         }
       ],
-      "rank_change": -2
+      "rank_change": 0
     },
     {
       "id": 13,
@@ -2833,7 +2833,7 @@
           ]
         }
       ],
-      "rank_change": -1
+      "rank_change": 0
     },
     {
       "id": 14,
@@ -3147,7 +3147,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 16,
@@ -3531,7 +3531,7 @@
           ]
         }
       ],
-      "rank_change": 4
+      "rank_change": 0
     },
     {
       "id": 18,
@@ -3709,7 +3709,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 19,
@@ -4334,7 +4334,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 22,
@@ -4624,7 +4624,7 @@
           ]
         }
       ],
-      "rank_change": -1
+      "rank_change": 0
     },
     {
       "id": 23,
@@ -4952,7 +4952,7 @@
           ]
         }
       ],
-      "rank_change": 3
+      "rank_change": 0
     },
     {
       "id": 25,
@@ -5280,7 +5280,7 @@
           ]
         }
       ],
-      "rank_change": -2
+      "rank_change": 0
     }
   ],
   "new_high_sectors": [],
