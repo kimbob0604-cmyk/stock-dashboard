@@ -6145,3 +6145,209 @@ tr:hover td {
   .verif-tam-table th, .verif-tam-table td { padding: 6px 8px; }
   .verif-slider-row { gap: 6px; font-size: 11px; }
 }
+
+/* ==============================================================
+ * Phase 4-5-5: KUVIC 수동 입력 폼 + 칩 + 토스트
+ * ============================================================== */
+
+.verif-form-card {
+  margin-top: 20px;
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.20);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.verif-form-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px;
+  background: rgba(168,85,247,0.08);
+  border-bottom: 1px solid rgba(168,85,247,0.20);
+}
+.verif-form-icon { font-size: 16px; }
+.verif-form-title {
+  font-weight: 700; font-size: 15px;
+  color: var(--text, #222); flex: 1;
+}
+.verif-form-status {
+  font-size: 11px; color: var(--text-muted, #888);
+  font-family: ui-monospace, monospace;
+}
+.verif-form-body { padding: 14px 18px; }
+
+.verif-form-section {
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(120,120,120,0.10);
+}
+.verif-form-section:last-child { border-bottom: none; }
+.verif-form-sect-title {
+  font-size: 12px; font-weight: 600;
+  color: var(--text-muted, #666);
+  margin-bottom: 10px;
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+
+.verif-form-row {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 8px;
+}
+.verif-form-row-inline { flex-wrap: wrap; }
+.verif-form-label {
+  flex-shrink: 0; width: 110px;
+  font-size: 12px; color: var(--text-muted, #666);
+  font-weight: 500;
+}
+.verif-form-input {
+  flex: 1; padding: 8px 12px;
+  font-size: 13px;
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.25);
+  border-radius: 6px;
+  color: var(--text, #222);
+  outline: none;
+  font-family: inherit;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.verif-form-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.10);
+}
+.verif-form-textarea {
+  flex: 1; padding: 8px 12px;
+  font-size: 13px; line-height: 1.5;
+  background: rgba(120,120,120,0.04);
+  border: 1px solid rgba(120,120,120,0.25);
+  border-radius: 6px;
+  color: var(--text, #222);
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  width: 100%; box-sizing: border-box;
+  min-height: 60px;
+}
+.verif-form-textarea:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.10);
+}
+.verif-form-memo {
+  min-height: 120px;
+}
+
+/* TP 3-열 그리드 */
+.verif-form-tp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.verif-form-tp-grid .verif-form-label {
+  display: block; width: auto;
+  margin-bottom: 4px;
+}
+.verif-form-tp-grid .verif-form-input {
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+}
+
+/* 칩 그룹 */
+.verif-chip-group {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.verif-chip {
+  padding: 6px 14px;
+  font-size: 12px; font-weight: 500;
+  background: transparent;
+  border: 1px solid rgba(120,120,120,0.30);
+  border-radius: 16px;
+  cursor: pointer;
+  color: var(--text, #222);
+  transition: all 0.15s;
+}
+.verif-chip:hover {
+  background: rgba(120,120,120,0.10);
+}
+.verif-chip.active {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #3b82f6;
+}
+
+/* 액션 버튼 */
+.verif-form-actions {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; flex-wrap: wrap;
+}
+.verif-btn {
+  padding: 8px 16px;
+  font-size: 13px; font-weight: 500;
+  background: transparent;
+  border: 1px solid rgba(120,120,120,0.30);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text, #222);
+  transition: all 0.15s;
+}
+.verif-btn:hover { background: rgba(120,120,120,0.10); }
+.verif-btn-primary {
+  background: #3b82f6; color: #fff; border-color: #3b82f6;
+}
+.verif-btn-primary:hover { background: #2563eb; }
+.verif-btn-ghost {
+  color: var(--text-muted, #888);
+}
+.verif-form-savemark {
+  font-size: 11px; color: #16a34a;
+  margin-left: auto;
+  font-family: ui-monospace, monospace;
+}
+
+/* 토스트 */
+#verif-toast {
+  position: fixed; right: 24px; bottom: 24px;
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.verif-toast {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 13px; font-weight: 500;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.20);
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity 0.4s, transform 0.4s;
+}
+.verif-toast-success { background: #16a34a; }
+.verif-toast-error   { background: #ef4444; }
+.verif-toast-info    { background: #3b82f6; }
+.verif-toast-fade {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .verif-form-card {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.10);
+  }
+  .verif-form-input, .verif-form-textarea {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.12);
+    color: #f1f5f9;
+  }
+  .verif-form-title, .verif-chip, .verif-btn { color: #f1f5f9; }
+  .verif-chip:hover, .verif-btn:hover {
+    background: rgba(255,255,255,0.06);
+  }
+  .verif-form-section { border-bottom-color: rgba(255,255,255,0.08); }
+}
+
+@media (max-width: 768px) {
+  .verif-form-label { width: 84px; font-size: 11px; }
+  .verif-form-tp-grid { grid-template-columns: 1fr; }
+  .verif-form-row { flex-wrap: wrap; }
+  .verif-form-actions { flex-direction: column; align-items: stretch; }
+  .verif-form-savemark { margin-left: 0; margin-top: 4px; }
+  #verif-toast { right: 12px; left: 12px; bottom: 12px; }
+}

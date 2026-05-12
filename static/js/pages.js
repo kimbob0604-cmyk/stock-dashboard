@@ -967,6 +967,16 @@ function navigateTo(page, params, opts) {
     const key = _prevPage.replace('ops-', '');
     if (typeof _opsClearTimer === 'function') _opsClearTimer(key);
   }
+  // 4-5-5: 검증 시트 이탈 시 unsaved 경고 + 폼 cleanup
+  if (_prevPage === 'verification' && page !== 'verification') {
+    if (typeof _verifFormState !== 'undefined' && _verifFormState
+        && _verifFormState.dirty) {
+      if (!confirm('저장되지 않은 변경이 있습니다. 페이지를 이동할까요?')) {
+        return;
+      }
+    }
+    if (typeof _verifCleanupForm === 'function') _verifCleanupForm();
+  }
   APP.page = page;
   APP.pageParams = params;
 
@@ -7177,7 +7187,13 @@ function _verifRenderStockCard(container, data, prefill) {
       ${_verifRenderStep3()}
       ${prefill ? _verifRenderStep4(prefill.step4, prefill.current_price) : _verifStepLoadingRow('STEP 4', 'TAM 모델링')}
       ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
-    </div>`;
+    </div>
+
+    <!-- 4-5-5: KUVIC 수동 입력 폼 -->
+    <div id="verif-kuvic-form-wrap"></div>`;
+
+  // 폼은 별도 함수에서 렌더 + 로드
+  _verifSetupKuvicForm(data.code);
 }
 
 // ============================================================
@@ -7580,7 +7596,431 @@ function _verifRenderStep5(step5) {
     </div>`;
 }
 
-function _verifRenderNotFound(container, code, errorMsg) {
+// ============================================================
+// 4-5-5: KUVIC 수동 입력 폼 (Step 3 + KUVIC TP + 메모 + 결론 + 태그)
+// ============================================================
+
+// 폼 상태 — closure / 모듈 전역으로 단일 활성 폼만 관리
+let _verifFormState = null;  // { code, id, dirty, saving, autoTimer }
+
+function _verifParsePeers(text) {
+  // step3_peers_text — JSON 우선, 실패 시 free text
+  if (!text) return { peer1: { name: '', strength: '' },
+                      peer2: { name: '', strength: '' },
+                      conclusion: '' };
+  try {
+    const obj = JSON.parse(text);
+    if (obj && typeof obj === 'object'
+        && (obj.peer1 || obj.peer2 || obj.conclusion)) {
+      return {
+        peer1: obj.peer1 || { name: '', strength: '' },
+        peer2: obj.peer2 || { name: '', strength: '' },
+        conclusion: obj.conclusion || '',
+      };
+    }
+  } catch (e) { /* not JSON */ }
+  // free text 폴백: 결론란에 통째로
+  return { peer1: { name: '', strength: '' },
+           peer2: { name: '', strength: '' },
+           conclusion: String(text) };
+}
+
+function _verifSerializePeers(peer1Name, peer1Str, peer2Name, peer2Str, concl) {
+  const any = peer1Name || peer1Str || peer2Name || peer2Str || concl;
+  if (!any) return null;
+  return JSON.stringify({
+    peer1: { name: peer1Name || '', strength: peer1Str || '' },
+    peer2: { name: peer2Name || '', strength: peer2Str || '' },
+    conclusion: concl || '',
+  }, null, 0);
+}
+
+function _verifSafeArr(tags) {
+  if (Array.isArray(tags)) return tags;
+  if (typeof tags === 'string') {
+    try {
+      const p = JSON.parse(tags);
+      if (Array.isArray(p)) return p;
+    } catch (e) {}
+    return tags.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+async function _verifSetupKuvicForm(code) {
+  const wrap = document.getElementById('verif-kuvic-form-wrap');
+  if (!wrap) return;
+  // 이전 폼 cleanup
+  _verifCleanupForm();
+
+  // 1) 최신 일지 GET (없으면 빈 폼)
+  let journal = null;
+  try {
+    const r = await fetch(`/api/journal/stock/${encodeURIComponent(code)}?limit=1`);
+    if (r.ok) {
+      const j = await r.json();
+      journal = (j.journals && j.journals[0]) || null;
+    }
+  } catch (e) {
+    console.warn('[verification] journal load failed:', e);
+  }
+
+  // 2) 폼 렌더 (journal 데이터로 prefill)
+  _verifRenderKuvicForm(wrap, code, journal);
+
+  // 3) 상태 초기화
+  _verifFormState = {
+    code,
+    id: journal ? journal.id : null,
+    dirty: false,
+    saving: false,
+    autoTimer: null,
+  };
+
+  // 4) 이벤트 와이어링
+  _verifBindFormEvents();
+
+  // 5) unsaved 경고
+  _verifSetupUnsavedWarning();
+}
+
+function _verifRenderKuvicForm(wrap, code, j) {
+  j = j || {};
+  const peers = _verifParsePeers(j.step3_peers_text);
+  const tags = _verifSafeArr(j.tags);
+
+  const _v = (x) => (x == null) ? '' : String(x);
+  const _vn = (x) => (x == null) ? '' : String(x);
+
+  const concl = j.conclusion || '';
+  const pri = j.priority || '';
+
+  const tagsCsv = tags.join(', ');
+
+  wrap.innerHTML = `
+    <div class="verif-form-card">
+      <div class="verif-form-head">
+        <span class="verif-form-icon">🖌</span>
+        <span class="verif-form-title">KUVIC 분석 입력</span>
+        <span class="verif-form-status" id="verif-form-status">
+          ${j.id ? `편집 모드 · id ${j.id}` : '신규 작성 모드'}
+        </span>
+      </div>
+      <div class="verif-form-body">
+        <!-- Step 3 동종 비교 -->
+        <div class="verif-form-section">
+          <div class="verif-form-sect-title">STEP 3 — 동종 비교 (수동)</div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">동종 기업 1</label>
+            <input type="text" class="verif-form-input" id="vf-peer1-name"
+                   placeholder="예: 티씨케이"
+                   value="${_phEsc(_v(peers.peer1.name))}"/>
+          </div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">강점/비교 포인트</label>
+            <input type="text" class="verif-form-input" id="vf-peer1-str"
+                   placeholder="예: PER 14x, 후공정 1위"
+                   value="${_phEsc(_v(peers.peer1.strength))}"/>
+          </div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">동종 기업 2</label>
+            <input type="text" class="verif-form-input" id="vf-peer2-name"
+                   placeholder="예: 원익QnC"
+                   value="${_phEsc(_v(peers.peer2.name))}"/>
+          </div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">강점/비교 포인트</label>
+            <input type="text" class="verif-form-input" id="vf-peer2-str"
+                   placeholder="예: PER 10x, 가스공급"
+                   value="${_phEsc(_v(peers.peer2.strength))}"/>
+          </div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">비교 결론</label>
+            <textarea class="verif-form-textarea" id="vf-peer-concl" rows="2"
+                      placeholder="예: 코미코는 동종 대비 30% 할인 — 검사 단독 사업화 프리미엄 미반영">${_phEsc(peers.conclusion)}</textarea>
+          </div>
+        </div>
+
+        <!-- KUVIC TP -->
+        <div class="verif-form-section">
+          <div class="verif-form-sect-title">KUVIC 목표가 (Bear / Base / Bull)</div>
+          <div class="verif-form-tp-grid">
+            <div>
+              <label class="verif-form-label">Bear</label>
+              <input type="number" class="verif-form-input" id="vf-bear-tp"
+                     placeholder="원" value="${_vn(j.bear_tp)}"/>
+            </div>
+            <div>
+              <label class="verif-form-label">Base</label>
+              <input type="number" class="verif-form-input" id="vf-base-tp"
+                     placeholder="원" value="${_vn(j.base_tp)}"/>
+            </div>
+            <div>
+              <label class="verif-form-label">Bull</label>
+              <input type="number" class="verif-form-input" id="vf-bull-tp"
+                     placeholder="원" value="${_vn(j.bull_tp)}"/>
+            </div>
+          </div>
+          <div class="verif-form-row">
+            <label class="verif-form-label">근거 / Thesis</label>
+            <textarea class="verif-form-textarea" id="vf-thesis" rows="3"
+                      placeholder="예: 에이전틱=CPU 르네상스=인텔 부활=코미코 더블 히트">${_phEsc(_v(j.thesis))}</textarea>
+          </div>
+        </div>
+
+        <!-- 운영자 메모 -->
+        <div class="verif-form-section">
+          <div class="verif-form-sect-title">운영자 메모</div>
+          <textarea class="verif-form-textarea verif-form-memo" id="vf-memo" rows="5"
+                    placeholder="정량으로 설명 안 되는 배경, KUVIC 회의 메모, 산업 노트 등">${_phEsc(_v(j.memo))}</textarea>
+        </div>
+
+        <!-- 최종 판단 -->
+        <div class="verif-form-section">
+          <div class="verif-form-sect-title">최종 판단</div>
+          <div class="verif-form-row verif-form-row-inline">
+            <label class="verif-form-label">결론</label>
+            <div class="verif-chip-group" data-group="conclusion">
+              ${['BUY', 'HOLD', 'SELL', 'WATCH'].map(c => `
+                <button type="button" class="verif-chip ${concl === c ? 'active' : ''}" data-value="${c}">${c}</button>
+              `).join('')}
+            </div>
+          </div>
+          <div class="verif-form-row verif-form-row-inline">
+            <label class="verif-form-label">우선순위</label>
+            <div class="verif-chip-group" data-group="priority">
+              ${['★★★', '★★', '★', '—'].map(p => `
+                <button type="button" class="verif-chip ${pri === p ? 'active' : ''}" data-value="${p}">${p}</button>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+
+        <!-- 태그 -->
+        <div class="verif-form-section">
+          <div class="verif-form-sect-title">태그 (쉼표로 구분)</div>
+          <input type="text" class="verif-form-input" id="vf-tags"
+                 placeholder="예: 미반영, 병목, ESC"
+                 value="${_phEsc(tagsCsv)}"/>
+        </div>
+
+        <!-- 액션 -->
+        <div class="verif-form-actions">
+          <button type="button" class="verif-btn verif-btn-primary" id="vf-save">💾 저장</button>
+          <button type="button" class="verif-btn" id="vf-import-kuvic">📥 KUVIC 임포트</button>
+          <button type="button" class="verif-btn verif-btn-ghost" id="vf-cancel">❌ 취소</button>
+          <span class="verif-form-savemark" id="verif-form-savemark"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 토스트 자리 -->
+    <div id="verif-toast"></div>
+  `;
+}
+
+function _verifBindFormEvents() {
+  const wrap = document.getElementById('verif-kuvic-form-wrap');
+  if (!wrap) return;
+
+  // 모든 input/textarea — dirty mark + 자동저장 디바운스
+  wrap.querySelectorAll('input, textarea').forEach(el => {
+    el.addEventListener('input', () => _verifMarkDirty());
+  });
+
+  // chip groups (radio-like)
+  wrap.querySelectorAll('.verif-chip-group').forEach(g => {
+    g.addEventListener('click', (e) => {
+      const btn = e.target.closest('.verif-chip');
+      if (!btn) return;
+      g.querySelectorAll('.verif-chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _verifMarkDirty();
+    });
+  });
+
+  // 저장
+  const saveBtn = document.getElementById('vf-save');
+  if (saveBtn) saveBtn.addEventListener('click', () => _verifSaveJournal({ verbose: true }));
+
+  // KUVIC 임포트
+  const importBtn = document.getElementById('vf-import-kuvic');
+  if (importBtn) importBtn.addEventListener('click', _verifImportKuvic);
+
+  // 취소
+  const cancelBtn = document.getElementById('vf-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', _verifCancel);
+}
+
+function _verifMarkDirty() {
+  if (!_verifFormState) return;
+  _verifFormState.dirty = true;
+  _verifUpdateStatus('편집 중…');
+  // 디바운스: 30초 자동저장
+  if (_verifFormState.autoTimer) clearTimeout(_verifFormState.autoTimer);
+  _verifFormState.autoTimer = setTimeout(() => {
+    if (_verifFormState && _verifFormState.dirty && !_verifFormState.saving) {
+      _verifSaveJournal({ verbose: false });
+    }
+  }, 30000);
+}
+
+function _verifUpdateStatus(text) {
+  const el = document.getElementById('verif-form-status');
+  if (el) el.textContent = text;
+}
+
+function _verifReadFormValues() {
+  const $ = id => document.getElementById(id);
+  const chipValue = group => {
+    const wrap = document.querySelector(`.verif-chip-group[data-group="${group}"]`);
+    if (!wrap) return null;
+    const active = wrap.querySelector('.verif-chip.active');
+    return active ? active.dataset.value : null;
+  };
+  const numOrNull = (v) => {
+    if (v == null || v === '') return null;
+    const n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  };
+  const tagsRaw = ($('vf-tags')?.value || '').trim();
+  const tags = tagsRaw
+    ? tagsRaw.split(',').map(s => s.trim()).filter(Boolean)
+    : null;
+
+  return {
+    step3_peers_text: _verifSerializePeers(
+      $('vf-peer1-name')?.value || '',
+      $('vf-peer1-str')?.value  || '',
+      $('vf-peer2-name')?.value || '',
+      $('vf-peer2-str')?.value  || '',
+      $('vf-peer-concl')?.value || '',
+    ),
+    bear_tp: numOrNull($('vf-bear-tp')?.value),
+    base_tp: numOrNull($('vf-base-tp')?.value),
+    bull_tp: numOrNull($('vf-bull-tp')?.value),
+    thesis: ($('vf-thesis')?.value || '').trim() || null,
+    memo:   ($('vf-memo')?.value || '').trim() || null,
+    conclusion: chipValue('conclusion'),
+    priority:   chipValue('priority'),
+    tags,
+  };
+}
+
+async function _verifSaveJournal(opts) {
+  opts = opts || {};
+  if (!_verifFormState) return;
+  if (_verifFormState.saving) return;
+  _verifFormState.saving = true;
+  if (opts.verbose) _verifShowToast('저장 중…', 'info');
+  _verifUpdateStatus('저장 중…');
+
+  const payload = _verifReadFormValues();
+  const isUpdate = !!_verifFormState.id;
+  const url = isUpdate
+    ? `/api/journal/${_verifFormState.id}`
+    : '/api/journal';
+  const method = isUpdate ? 'PATCH' : 'POST';
+  const body = isUpdate ? payload : { stock_code: _verifFormState.code, ...payload };
+
+  try {
+    const r = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok || j.success === false) {
+      throw new Error(j.error || `HTTP ${r.status}`);
+    }
+    // POST 응답엔 새 id가 있어야 함 (create_journal 결과 형식)
+    if (!isUpdate) {
+      const newId = j.id || (j.data && j.data.id) || j.journal_id;
+      if (newId) _verifFormState.id = newId;
+    }
+    _verifFormState.dirty = false;
+    const now = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    _verifFormState.lastSaved = now;
+    _verifUpdateStatus(`편집 모드 · id ${_verifFormState.id || '?'} · 마지막 저장 ${now}`);
+    document.getElementById('verif-form-savemark').textContent = `✓ ${now}`;
+    if (opts.verbose) _verifShowToast('저장 완료', 'success');
+  } catch (e) {
+    console.error('[verification] save failed:', e);
+    _verifShowToast(`저장 실패: ${e.message}`, 'error');
+    _verifUpdateStatus('편집 중 (저장 실패)');
+  } finally {
+    _verifFormState.saving = false;
+  }
+}
+
+async function _verifImportKuvic() {
+  if (!_verifFormState) return;
+  if (!confirm('KUVIC 세션 분석을 DB로 일괄 임포트합니다. 진행할까요?')) return;
+  try {
+    const r = await fetch('/api/journal/import-kuvic', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skip_duplicates: true }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    _verifShowToast(
+      `임포트 완료: 신규 ${j.created || 0} · 스킵 ${j.skipped || 0}`,
+      'success',
+    );
+    // 폼 재로드
+    setTimeout(() => _verifSetupKuvicForm(_verifFormState.code), 500);
+  } catch (e) {
+    _verifShowToast(`임포트 실패: ${e.message}`, 'error');
+  }
+}
+
+function _verifCancel() {
+  if (!_verifFormState) return;
+  if (_verifFormState.dirty &&
+      !confirm('저장되지 않은 변경이 있습니다. 폼을 초기화할까요?')) {
+    return;
+  }
+  // 최신 일지로 재로드 (취소 = 마지막 저장 상태로)
+  _verifSetupKuvicForm(_verifFormState.code);
+}
+
+function _verifShowToast(text, kind) {
+  const c = document.getElementById('verif-toast');
+  if (!c) return;
+  const cls = kind === 'error' ? 'verif-toast-error'
+            : kind === 'success' ? 'verif-toast-success'
+            : 'verif-toast-info';
+  const el = document.createElement('div');
+  el.className = `verif-toast ${cls}`;
+  el.textContent = text;
+  c.appendChild(el);
+  // 자동 사라짐
+  setTimeout(() => {
+    el.classList.add('verif-toast-fade');
+    setTimeout(() => el.remove(), 400);
+  }, 2400);
+}
+
+function _verifCleanupForm() {
+  if (_verifFormState && _verifFormState.autoTimer) {
+    clearTimeout(_verifFormState.autoTimer);
+  }
+  _verifFormState = null;
+}
+
+// unsaved 경고 — beforeunload + navigateTo 가로채기
+function _verifSetupUnsavedWarning() {
+  if (window._verifBeforeUnloadBound) return;
+  window._verifBeforeUnloadBound = true;
+  window.addEventListener('beforeunload', (e) => {
+    if (_verifFormState && _verifFormState.dirty) {
+      e.preventDefault();
+      e.returnValue = '저장되지 않은 변경사항이 있습니다.';
+      return e.returnValue;
+    }
+  });
+}
   container.innerHTML = `
     <div class="page-header">
       <h2>✅ 검증 시트</h2>
