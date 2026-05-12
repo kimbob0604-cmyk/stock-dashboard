@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import subprocess
 import re
 import sys
@@ -13481,6 +13482,134 @@ def api_analysis_journal_stats():
 # ============================================================
 # Step 4-5-1-C: 데이터 신선도 API
 # ============================================================
+
+# ============================================================
+# Step 4-5-3: 검증 시트 기본 정보 API
+# ============================================================
+
+@app.route('/api/verification/stock/<code>', methods=['GET'])
+def api_verification_stock(code):
+    """검증 시트용 종목 기본 정보.
+    Returns: { found, code, name, market, sector, sectors,
+               current_price, change_pct, change_amount, volume_mn,
+               market_cap, week52_low, week52_high, week52_days,
+               price_meta: { source, last_updated, freshness_label, ... } }
+    """
+    if not code or not code.isdigit() or len(code) != 6:
+        return jsonify({
+            'found': False,
+            'error': '6자리 숫자 종목 코드만 허용',
+            'code': code,
+        }), 400
+
+    conn = sqlite3.connect(str(BASE_DIR / 'db' / 'dashboard.db'), timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        # 1. stocks 테이블 — 기본 정보
+        row = conn.execute("""
+            SELECT code, name, market, sector, sectors_json,
+                   close, change_pct, volume_mn, updated_at
+            FROM stocks
+            WHERE code = ?
+        """, (code,)).fetchone()
+
+        if not row:
+            return jsonify({
+                'found': False,
+                'error': f'종목 코드 {code} 미존재',
+                'code': code,
+            }), 404
+
+        # 2. 52주 high/low (ohlcv)
+        week52 = conn.execute("""
+            SELECT MIN(close) AS low, MAX(close) AS high, COUNT(*) AS days
+            FROM ohlcv
+            WHERE code = ? AND date >= date('now', '-365 days')
+        """, (code,)).fetchone()
+
+        # 3. 시가총액 (naver_universe 캐시; 현재 미수록이지만 후속 phase 대비 코드 유지)
+        market_cap = None
+        try:
+            naver_files = sorted((BASE_DIR / 'cache').glob('naver_universe_*.json'),
+                                 reverse=True)
+            if naver_files:
+                with open(naver_files[0], 'r', encoding='utf-8') as f:
+                    naver_data = json.load(f)
+                stocks_dict = naver_data.get('stocks') or {}
+                if isinstance(stocks_dict, dict) and code in stocks_dict:
+                    rec = stocks_dict[code]
+                    market_cap = rec.get('mcap') or rec.get('market_cap')
+        except Exception:
+            pass
+
+        # 4. 신선도 (4-5-1)
+        from data_freshness import get_freshness
+        is_kr = (not row['market'])  # '' / None → KR
+        freshness_source = 'naver_price' if is_kr else 'stocks_us_price'
+        try:
+            fresh = get_freshness(freshness_source, conn)
+            price_meta = {
+                'source': freshness_source,
+                'last_updated': row['updated_at'],
+                'freshness_label': fresh.label,
+                'freshness_color': fresh.color,
+                'age_human': fresh.age_human,
+            }
+        except Exception:
+            price_meta = {
+                'source': freshness_source,
+                'last_updated': row['updated_at'],
+                'freshness_label': 'NO_DATA',
+                'freshness_color': 'red',
+                'age_human': '알 수 없음',
+            }
+
+        # 5. 시장 표기 — KOSPI/KOSDAQ 구분 데이터 없음 → 'KR' 또는 'US'
+        market_label = 'US' if not is_kr else 'KR'
+
+        # 6. 변동액 계산
+        close = row['close'] or 0
+        change_pct = row['change_pct'] or 0
+        change_amount = 0
+        if close and (100 + change_pct) != 0:
+            change_amount = int(close * change_pct / (100 + change_pct))
+
+        # 7. 섹터
+        sector = row['sector'] or ''
+        sectors_list: list = []
+        if row['sectors_json']:
+            try:
+                sectors_list = json.loads(row['sectors_json'])
+            except Exception:
+                sectors_list = [sector] if sector else []
+
+        return jsonify({
+            'found': True,
+            'code': code,
+            'name': row['name'],
+            'market': market_label,
+            'sector': sector,
+            'sectors': sectors_list,
+            'current_price': close,
+            'change_pct': change_pct,
+            'change_amount': change_amount,
+            'volume_mn': row['volume_mn'],
+            'market_cap': market_cap,
+            'week52_low': week52['low'] if week52 else None,
+            'week52_high': week52['high'] if week52 else None,
+            'week52_days': week52['days'] if week52 else 0,
+            'price_meta': price_meta,
+        })
+    except Exception as exc:
+        log.exception('verification/stock')
+        return jsonify({
+            'found': False,
+            'error': f'서버 오류: {exc}',
+            'code': code,
+        }), 500
+    finally:
+        conn.close()
+
 
 @app.route("/api/freshness/source/<source_key>", methods=["GET"])
 def api_freshness_source(source_key):

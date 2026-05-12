@@ -6939,41 +6939,282 @@ function _phEsc(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ============================================================
+// Phase 4-5-3: 검증 시트 (renderVerification)
+// 4-5-2-C 호환: params.code 있으면 종목 화면, 없으면 검색 화면
+// ============================================================
+
+function _verifFmtNum(n) {
+  if (n == null) return '0';
+  return Math.round(n).toLocaleString('ko-KR');
+}
+
+function _verifMcapDisplay(mcap) {
+  if (!mcap) return '—';
+  if (mcap >= 1e12) return (mcap / 1e12).toFixed(2) + '조원';
+  if (mcap >= 1e8)  return Math.round(mcap / 1e8) + '억원';
+  return _verifFmtNum(mcap) + '원';
+}
+
 function renderVerificationPlaceholder(params) {
   params = params || (APP && APP.pageParams) || {};
   const code = params.code || null;
   const c = document.getElementById('page-verification');
   if (!c) return;
-  const codeBanner = code ? `
-    <div style="margin: 12px 0; padding: 10px 14px; background: rgba(59,130,246,0.08);
-                border-left: 3px solid #3b82f6; border-radius: 6px; font-size: 13px;">
-      🎯 선택된 종목: <strong>${_phEsc(code)}</strong>
-      <span style="font-size:11px;color:var(--text-muted,#888);margin-left:8px;">
-        (Phase 4-5-3 구축 시 자동 prefill 대상)
-      </span>
-    </div>` : '';
-  c.innerHTML = `
+  if (code) {
+    renderVerificationStockView(c, code);
+  } else {
+    renderVerificationSearchView(c);
+  }
+}
+
+// 검색 화면 — params.code 없을 때
+function renderVerificationSearchView(container) {
+  container.innerHTML = `
     <div class="page-header">
       <h2>✅ 검증 시트</h2>
-      <p class="page-desc">KUVIC 5단계 분석 프레임 + 자동 산출 데이터 통합</p>
+      <p class="page-desc">KUVIC 5단계 분석 + 자동 데이터 통합</p>
     </div>
-    ${codeBanner}
-    <div class="placeholder-card">
-      <div class="placeholder-icon">🚧</div>
-      <div class="placeholder-title">Phase 4-5-3에서 구축 예정</div>
-      <div class="placeholder-desc">
-        <p><strong>준비 중인 기능:</strong></p>
-        <ul>
-          <li>종목 검색 + 자동 prefill (5단계 자동 채움)</li>
-          <li>KUVIC 수동 입력 + 운영자 메모</li>
-          <li>자동 vs 수동 비교 (Split View)</li>
-          <li>종합 점수 + 신호 합성 패널</li>
-          <li>어닝 시그널 통합 + Markdown export</li>
-        </ul>
-        <p style="margin-top:16px;color:var(--text-secondary,#94a3b8);font-size:13px;">
-          임시 진입: <a href="/verification/039440" style="color:#3b82f6;">/verification/039440 (에스티아이 테스트)</a>
-        </p>
+    <div class="verif-search-container">
+      <div class="verif-search-icon">🔍</div>
+      <div class="verif-search-title">종목명 또는 코드 입력</div>
+      <div class="verif-search-hint">예: 코미코, 183300, 이수페타시스</div>
+      <div class="verif-search-box">
+        <input type="text" id="verif-search-input" class="verif-search-input"
+               placeholder="2글자 이상 입력 시 자동완성" autocomplete="off"/>
+        <div id="verif-search-dropdown" class="verif-search-dropdown"></div>
       </div>
+      <div class="verif-search-info">
+        KR 종목 + 활성 유니버스 검색 가능
+      </div>
+    </div>`;
+
+  const input = document.getElementById('verif-search-input');
+  const dropdown = document.getElementById('verif-search-dropdown');
+  let searchTimer = null;
+
+  input.addEventListener('input', (e) => {
+    const q = e.target.value.trim();
+    if (searchTimer) clearTimeout(searchTimer);
+    if (q.length < 2) {
+      dropdown.innerHTML = '';
+      dropdown.classList.remove('active');
+      return;
+    }
+    searchTimer = setTimeout(() => _verifDoSearch(q), 200);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const first = dropdown.querySelector('.verif-search-item');
+      if (first) first.click();
+    } else if (e.key === 'Escape') {
+      dropdown.innerHTML = '';
+      dropdown.classList.remove('active');
+    }
+  });
+
+  // 외부 클릭 시 닫기 (한 번만 등록)
+  if (!document._verifOutsideBound) {
+    document._verifOutsideBound = true;
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.verif-search-box')) {
+        const dd = document.getElementById('verif-search-dropdown');
+        if (dd) dd.classList.remove('active');
+      }
+    });
+  }
+
+  setTimeout(() => input.focus(), 100);
+}
+
+async function _verifDoSearch(query) {
+  const dropdown = document.getElementById('verif-search-dropdown');
+  if (!dropdown) return;
+  try {
+    const r = await fetch(`/api/stock_search?q=${encodeURIComponent(query)}`);
+    if (!r.ok) {
+      dropdown.innerHTML = '<div class="verif-search-empty">검색 실패</div>';
+      dropdown.classList.add('active');
+      return;
+    }
+    const data = await r.json();
+    // /api/stock_search 응답: bare list [{code, name}, ...]
+    const results = Array.isArray(data) ? data
+                  : (data.results || data.items || data.stocks || []);
+    if (!results.length) {
+      dropdown.innerHTML = '<div class="verif-search-empty">검색 결과 없음</div>';
+      dropdown.classList.add('active');
+      return;
+    }
+    const items = results.slice(0, 15);
+    dropdown.innerHTML = items.map(s => {
+      const code = s.code || s.stock_code || '';
+      const name = s.name || s.stock_name || '';
+      // KR 6자리는 KR, 그 외(US 티커)는 US
+      const marketTag = /^\d{6}$/.test(code) ? 'KR' : 'US';
+      return `
+        <div class="verif-search-item" data-code="${_phEsc(code)}">
+          <span class="verif-item-code">${_phEsc(code)}</span>
+          <span class="verif-item-name">${_phEsc(name)}</span>
+          <span class="verif-item-market">${_phEsc(marketTag)}</span>
+        </div>`;
+    }).join('');
+    dropdown.classList.add('active');
+    dropdown.querySelectorAll('.verif-search-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const c = el.dataset.code;
+        if (c) navigateTo('verification', { code: c });
+      });
+    });
+  } catch (e) {
+    console.error('[verification] search error:', e);
+    dropdown.innerHTML = '<div class="verif-search-empty">검색 오류</div>';
+    dropdown.classList.add('active');
+  }
+}
+
+// 종목 정보 화면 — params.code 있을 때
+async function renderVerificationStockView(container, code) {
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>✅ 검증 시트 — ${_phEsc(code)}</h2>
+      <a href="/verification" class="verif-back-link"
+         onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
+    </div>
+    <div class="verif-loading">종목 정보 로딩 중…</div>`;
+  try {
+    const r = await fetch(`/api/verification/stock/${encodeURIComponent(code)}`);
+    const data = await r.json();
+    if (!data.found) {
+      _verifRenderNotFound(container, code, data.error);
+      return;
+    }
+    _verifRenderStockCard(container, data);
+  } catch (e) {
+    console.error('[verification] stock fetch failed:', e);
+    _verifRenderError(container, code, e.message);
+  }
+}
+
+function _verifRenderStockCard(container, data) {
+  const cp = data.change_pct || 0;
+  const upDown = cp > 0 ? 'up' : cp < 0 ? 'down' : 'flat';
+  const arrow  = cp > 0 ? '↑' : cp < 0 ? '↓' : '·';
+  const sign   = cp > 0 ? '+' : '';
+
+  let badgeHtml = '';
+  if (typeof freshnessBadge === 'function' && data.price_meta) {
+    badgeHtml = freshnessBadge(data.price_meta.freshness_label, {
+      title: data.price_meta.age_human,
+    });
+  }
+  const mcap = _verifMcapDisplay(data.market_cap);
+
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>✅ 검증 시트 — ${_phEsc(data.name)}</h2>
+      <a href="/verification" class="verif-back-link"
+         onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
+    </div>
+
+    <div class="verif-stock-card">
+      <div class="verif-stock-header">
+        <div class="verif-stock-title">
+          <span class="verif-stock-name">${_phEsc(data.name)}</span>
+          <span class="verif-stock-code">(${_phEsc(data.code)})</span>
+        </div>
+        <span class="verif-stock-market">${_phEsc(data.market)}</span>
+      </div>
+      ${data.sector ? `<div class="verif-stock-sector">${_phEsc(data.sector)}</div>` : ''}
+      <div class="verif-stock-grid">
+        <div class="verif-stock-field">
+          <div class="verif-field-label">현재가</div>
+          <div class="verif-field-value verif-price">
+            ${_verifFmtNum(data.current_price)}원 ${badgeHtml}
+          </div>
+        </div>
+        <div class="verif-stock-field verif-${upDown}">
+          <div class="verif-field-label">변동률</div>
+          <div class="verif-field-value verif-change">
+            ${sign}${cp.toFixed(2)}% ${arrow}${_verifFmtNum(Math.abs(data.change_amount || 0))}
+          </div>
+        </div>
+        <div class="verif-stock-field">
+          <div class="verif-field-label">시가총액</div>
+          <div class="verif-field-value">${_phEsc(mcap)}</div>
+        </div>
+        <div class="verif-stock-field">
+          <div class="verif-field-label">52주 범위 (${data.week52_days || 0}일)</div>
+          <div class="verif-field-value verif-range">
+            ${data.week52_low ? _verifFmtNum(data.week52_low) : '—'} ~
+            ${data.week52_high ? _verifFmtNum(data.week52_high) : '—'}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="verif-steps-container">
+      <h3 class="verif-steps-title">📋 KUVIC 5단계 분석</h3>
+      <div class="verif-steps-placeholder">
+        <div class="verif-step-row">
+          <span class="verif-step-num">STEP 1.</span>
+          <span class="verif-step-name">밸류체인 유추</span>
+          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        </div>
+        <div class="verif-step-row">
+          <span class="verif-step-num">STEP 2.</span>
+          <span class="verif-step-name">개별 요인</span>
+          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        </div>
+        <div class="verif-step-row">
+          <span class="verif-step-num">STEP 3.</span>
+          <span class="verif-step-name">동종 비교</span>
+          <span class="verif-step-status">⏳ Phase 4-5-5</span>
+        </div>
+        <div class="verif-step-row">
+          <span class="verif-step-num">STEP 4.</span>
+          <span class="verif-step-name">TAM 모델링</span>
+          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        </div>
+        <div class="verif-step-row">
+          <span class="verif-step-num">STEP 5.</span>
+          <span class="verif-step-name">주가 검증</span>
+          <span class="verif-step-status">⏳ Phase 4-5-4</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+function _verifRenderNotFound(container, code, errorMsg) {
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>✅ 검증 시트</h2>
+      <a href="/verification" class="verif-back-link"
+         onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
+    </div>
+    <div class="verif-error-card">
+      <div class="verif-error-icon">🔍</div>
+      <div class="verif-error-title">종목 ${_phEsc(code)}을(를) 찾을 수 없습니다</div>
+      <div class="verif-error-desc">${_phEsc(errorMsg || '데이터베이스에 등록되지 않은 종목')}</div>
+      <div style="margin-top: 20px;">
+        <a href="/verification" class="verif-back-button"
+           onclick="event.preventDefault(); navigateTo('verification');">🔍 다른 종목 검색</a>
+      </div>
+    </div>`;
+}
+
+function _verifRenderError(container, code, errorMsg) {
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>✅ 검증 시트 — ${_phEsc(code)}</h2>
+      <a href="/verification" class="verif-back-link"
+         onclick="event.preventDefault(); navigateTo('verification');">← 다른 종목 검색</a>
+    </div>
+    <div class="verif-error-card">
+      <div class="verif-error-icon">⚠️</div>
+      <div class="verif-error-title">데이터 로드 실패</div>
+      <div class="verif-error-desc">${_phEsc(errorMsg)}</div>
     </div>`;
 }
 
