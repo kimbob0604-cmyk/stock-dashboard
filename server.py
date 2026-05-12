@@ -5475,19 +5475,25 @@ def alert_closing_summary():
     try:
         lines = ["🔔 <b>장 마감 요약</b>", ""]
 
-        # KOSPI/KOSDAQ
+        # KOSPI/KOSDAQ — 4-5-2-B: 라이브 fetch 우선 (data.json stale 회피)
+        live_kr = {}
+        try:
+            live_kr = _fetch_kr_indices_live() or {}
+        except Exception as exc:
+            log.debug("[closing] live fetch fail: %s", exc)
+        fallback = {}
         if DATA_JSON.exists():
             try:
-                d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
-                for label, key in (("KOSPI", "kospi"), ("KOSDAQ", "kosdaq")):
-                    idx = d.get(key) or {}
-                    val = idx.get("value")
-                    chg = idx.get("change_pct")
-                    if val is not None:
-                        sign = "+" if (chg or 0) >= 0 else ""
-                        lines.append(f"{label} {val:,.2f} ({sign}{chg}%)")
+                fallback = json.loads(DATA_JSON.read_text(encoding="utf-8")) or {}
             except Exception:
-                pass
+                fallback = {}
+        for label, key in (("KOSPI", "kospi"), ("KOSDAQ", "kosdaq")):
+            idx = live_kr.get(key) or fallback.get(key) or {}
+            val = idx.get("value")
+            chg = idx.get("change_pct")
+            if val is not None:
+                sign = "+" if (chg or 0) >= 0 else ""
+                lines.append(f"{label} {val:,.2f} ({sign}{chg}%)")
         lines.append("")
 
         # 종목 발굴 TOP5 (KR stage2)
@@ -8408,36 +8414,10 @@ def poll_dart_disclosures():
                      rcept_dt, total),
                 )
 
-                # 점수 6점 이상만 알림 (high / critical)
+                # 점수 6점 이상은 알림 후보였으나, 사용자 요청으로 텔레 발송 차단.
+                # DB 모니터링 + 4-7-D 어닝 파이프라인 동작은 그대로 유지하기 위해
+                # disclosure_history 에 alerted=1 로만 표시 (재처리 방지) — 메시지 X.
                 if total >= 6:
-                    if total >= 10:
-                        emoji, urgency = "🚨🚨", "긴급"
-                    elif total >= 8:
-                        emoji, urgency = "🚨", "중요"
-                    else:
-                        emoji, urgency = "📢", "참고"
-
-                    star = "⭐ <b>[관심종목]</b>\n" if score_info["watchlist_bonus"] else ""
-
-                    msg = f"{emoji} <b>{urgency} 공시</b> (점수 {total})\n\n{star}"
-                    msg += f"🏢 <b>{corp_name}</b>"
-                    if stock_code:
-                        msg += f" ({stock_code})"
-                    msg += f"\n\n📄 {title}\n"
-                    if keywords:
-                        msg += f"🔑 {', '.join(keywords[:4])}\n"
-
-                    # 점수 상세
-                    breakdown = f"📊 키워드 {score_info['keyword_score']}"
-                    if score_info["watchlist_bonus"]:
-                        breakdown += f" + 관심 +{score_info['watchlist_bonus']}"
-                    if score_info["cap_bonus"]:
-                        breakdown += f" + 대형주 +{score_info['cap_bonus']}"
-                    msg += breakdown + "\n"
-                    msg += f"\n🔗 https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
-                    msg += f"\n⏰ {now_kst().strftime('%H:%M')}"
-
-                    send_telegram(msg)
                     conn.execute(
                         "UPDATE disclosure_history SET alerted=1 WHERE rcept_no=?",
                         (rcept_no,),
@@ -8454,7 +8434,8 @@ def poll_dart_disclosures():
         log.warning("[DART] poll_disclosures DB fail: %s", exc)
 
     if new_alerts:
-        log.info("[DART] 중요 공시 %d건 알림", new_alerts)
+        # 사용자 요청으로 텔레 발송은 차단 — DB 모니터링만 유지.
+        log.info("[DART] 중요 공시 %d건 감지 (텔레 발송 차단 · DB 기록만)", new_alerts)
 
 
 @app.route("/api/disclosures")
@@ -11341,24 +11322,41 @@ def build_market_summary() -> dict:
         "sections": [],
     }
 
-    # ── 1. 지수 ──
+    # ── 1. 지수 ── (4-5-2-B: KR 라이브, US 캐시+신선도)
     idx_section = {"title": "📈 지수", "items": []}
     try:
         dj = json.loads((BASE_DIR / "data.json").read_text(encoding="utf-8")) \
             if (BASE_DIR / "data.json").exists() else {}
     except Exception:
         dj = {}
+    # KR: Naver 라이브 우선 (data.json stale 우회)
+    kospi_obj = dj.get("kospi") or {}
+    kosdaq_obj = dj.get("kosdaq") or {}
+    try:
+        live_kr = _fetch_kr_indices_live()
+        if live_kr.get("kospi"):  kospi_obj = live_kr["kospi"]
+        if live_kr.get("kosdaq"): kosdaq_obj = live_kr["kosdaq"]
+    except Exception as exc:
+        log.debug("[market_summary] KR live fetch fail: %s", exc)
+
+    # US: data.json market_overview + 신선도 라벨 표기
     mo = (dj.get("market_overview") or {})
-    for name, obj in (
-        ("KOSPI", dj.get("kospi")),
-        ("KOSDAQ", dj.get("kosdaq")),
-        ("S&P 500", mo.get("sp500")),
-        ("NASDAQ", mo.get("nasdaq")),
+    data_date = dj.get("actual_date")
+    today_yyyymmdd = now_kst().strftime("%Y%m%d")
+    us_stale_tag = "" if data_date == today_yyyymmdd else " ⚠️"
+
+    for name, obj, stale_tag in (
+        ("KOSPI", kospi_obj, ""),
+        ("KOSDAQ", kosdaq_obj, ""),
+        ("S&P 500", mo.get("sp500"), us_stale_tag),
+        ("NASDAQ", mo.get("nasdaq"), us_stale_tag),
     ):
         if isinstance(obj, dict) and obj.get("value") is not None:
             v = obj["value"]; p = obj.get("change_pct") or 0
             sign = "+" if p >= 0 else ""
-            idx_section["items"].append(f"{name} {v:,.2f} {sign}{p:.2f}%")
+            idx_section["items"].append(f"{name} {v:,.2f} {sign}{p:.2f}%{stale_tag}")
+    if us_stale_tag and idx_section["items"]:
+        idx_section["items"].append(f"<i>⚠️ 표시: 미국 지수 데이터 stale ({data_date or 'unknown'})</i>")
     summary["sections"].append(idx_section)
 
     # ── 2. 매크로 ──
