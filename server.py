@@ -11579,6 +11579,7 @@ def build_market_summary() -> dict:
 
     # ── 8. AI 추천 ──
     ai_section = {"title": "🤖 AI 추천 요약", "items": []}
+    cache_picks_loaded = False
     for cand in ("agent_result_kr_latest.json", "agent_result_latest.json"):
         p = BASE_DIR / "cache" / cand
         if p.exists():
@@ -11594,9 +11595,54 @@ def build_market_summary() -> dict:
                         ai_section["items"].append(
                             f"    {pk.get('name')} ({pk.get('code')}) {pk.get('total_score', 0)}점"
                         )
+                    cache_picks_loaded = True
                 break
             except Exception:
                 pass
+
+    # 폴백: 캐시에 picks 없으면 recommendation_history DB 활용
+    # (캐시 7일 클린업/cron 누락 케이스 대응)
+    if not cache_picks_loaded and _SQLITE_OK and USE_SQLITE:
+        try:
+            with _get_db() as conn:
+                # 가장 최근 KR agent_kr 추천 + 다른 source 폴백
+                row = conn.execute("""
+                    SELECT MAX(date) as last_date
+                    FROM recommendation_history
+                    WHERE market = 'kr'
+                """).fetchone()
+                last_date = row["last_date"] if row else None
+                if last_date:
+                    # 1차: agent_kr 추천 우선
+                    picks_db = conn.execute("""
+                        SELECT code, name, score, source
+                        FROM recommendation_history
+                        WHERE market='kr' AND date=? AND source='agent_kr'
+                        ORDER BY rank ASC, score DESC LIMIT 5
+                    """, (last_date,)).fetchall()
+                    # 2차: agent_kr 없으면 discover_kr 폴백
+                    if not picks_db:
+                        picks_db = conn.execute("""
+                            SELECT code, name, score, source
+                            FROM recommendation_history
+                            WHERE market='kr' AND date=?
+                            ORDER BY rank ASC, score DESC LIMIT 5
+                        """, (last_date,)).fetchall()
+                    if picks_db:
+                        # 날짜가 오늘이 아니면 stale 마크
+                        today_str = now_kst().strftime("%Y-%m-%d")
+                        stale_tag = "" if last_date == today_str else f" ⚠️ ({last_date})"
+                        ai_section["items"].append(
+                            f"  추천 {len(picks_db)}종목 (DB 폴백{stale_tag}):"
+                        )
+                        for pk in picks_db:
+                            score_int = int(pk["score"]) if pk["score"] else 0
+                            ai_section["items"].append(
+                                f"    {pk['name']} ({pk['code']}) {score_int}점"
+                            )
+        except Exception as exc:
+            log.debug("[summary] ai db fallback: %s", exc)
+
     if not ai_section["items"]:
         ai_section["items"].append("  AI 추천 데이터 없음")
     summary["sections"].append(ai_section)
