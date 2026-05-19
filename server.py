@@ -5939,6 +5939,20 @@ def _startup():
                        daemon=True, name="boot-data-refresh").start()
         except Exception as exc:
             log.debug("[부팅 자동갱신] %s", exc)
+        # KR stocks 가격 부팅 시 1회 갱신 — 장중 cron(9-15:5,35) 외 시간에
+        # 부팅하면 다음 평일 09:05 까지 stale. 텔레 시황 섹터/특징주 빈 값 방지.
+        try:
+            import threading as _th
+            def _boot_refresh_kr():
+                try:
+                    n = _refresh_prices_from_naver()
+                    log.info("[부팅] KR 가격 stale 해소 — %d종목 갱신", n)
+                except Exception as exc:
+                    log.warning("[부팅] KR 가격 갱신 실패: %s", exc)
+            _th.Thread(target=_boot_refresh_kr,
+                       daemon=True, name="boot-kr-price").start()
+        except Exception as exc:
+            log.debug("[부팅] KR 가격 thread 시작 실패: %s", exc)
         # 추천 이력 테이블 + 과거 discover 스냅샷 소급 (최초 1회)
         try:
             _init_recommendation_history()
