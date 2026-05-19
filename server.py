@@ -6540,6 +6540,14 @@ def _refresh_prices_from_naver():
                 stocks_map[code]["change_pct"] = chg
                 stocks_map[code]["volume"] = vol
                 stocks_map[code]["volume_mn"] = int(vol * price / 1_000_000)
+                # 시가총액 (marketValueFullRaw — 원 단위). 가격 sync 때 같이 갱신.
+                mv_raw = s.get("marketValueFullRaw")
+                try:
+                    mv = int(str(mv_raw).replace(",", "")) if mv_raw else 0
+                    if mv > 0:
+                        stocks_map[code]["market_cap"] = mv
+                except (ValueError, TypeError):
+                    pass
 
                 # 시간외 단일가 (overMarketPriceInfo)
                 # tradingSessionType=REGULAR_MARKET 은 정규장 데이터 → 시간외로 쓰지 않음
@@ -6585,24 +6593,43 @@ def _refresh_prices_from_naver():
         except Exception as exc:
             log.debug("[가격 갱신] universe 저장 실패: %s", exc)
 
-        # SQLite stocks 테이블도 갱신 (시간외 포함)
+        # SQLite stocks 테이블도 갱신 (시간외 + 시가총액 포함)
+        # market_cap 은 Naver 폴링 응답의 marketValueFullRaw 사용
         if _SQLITE_OK and USE_SQLITE:
             try:
+                today_str = now_kst().strftime("%Y%m%d")
                 with _get_db() as conn:
                     for code, info in stocks_map.items():
-                        conn.execute(
-                            "UPDATE stocks SET close=?, change_pct=?, volume_mn=?, "
-                            "after_hours_price=?, after_hours_change_pct=?, "
-                            "after_hours_status=?, after_hours_time=?, "
-                            "updated_at=datetime('now') WHERE code=?",
-                            (info.get("close"), info.get("change_pct"),
-                             info.get("volume_mn"),
-                             info.get("after_hours_price"),
-                             info.get("after_hours_change_pct"),
-                             info.get("after_hours_status"),
-                             info.get("after_hours_time"),
-                             code),
-                        )
+                        mcap = info.get("market_cap")
+                        if mcap is not None and mcap > 0:
+                            conn.execute(
+                                "UPDATE stocks SET close=?, change_pct=?, volume_mn=?, "
+                                "market_cap=?, market_cap_updated=?, "
+                                "after_hours_price=?, after_hours_change_pct=?, "
+                                "after_hours_status=?, after_hours_time=?, "
+                                "updated_at=datetime('now') WHERE code=?",
+                                (info.get("close"), info.get("change_pct"),
+                                 info.get("volume_mn"), mcap, today_str,
+                                 info.get("after_hours_price"),
+                                 info.get("after_hours_change_pct"),
+                                 info.get("after_hours_status"),
+                                 info.get("after_hours_time"),
+                                 code),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE stocks SET close=?, change_pct=?, volume_mn=?, "
+                                "after_hours_price=?, after_hours_change_pct=?, "
+                                "after_hours_status=?, after_hours_time=?, "
+                                "updated_at=datetime('now') WHERE code=?",
+                                (info.get("close"), info.get("change_pct"),
+                                 info.get("volume_mn"),
+                                 info.get("after_hours_price"),
+                                 info.get("after_hours_change_pct"),
+                                 info.get("after_hours_status"),
+                                 info.get("after_hours_time"),
+                                 code),
+                            )
                     conn.commit()
             except Exception as exc:
                 log.debug("[가격 갱신] stocks DB 갱신 실패: %s", exc)
@@ -11349,6 +11376,71 @@ def _fmt_cap(cap):
     return ""
 
 
+# ── 시총 대비 강도 표기 헬퍼 (4-5: 수급 동향 / 거래대금 의미 부여) ────────────
+def _get_market_cap(code: str) -> int:
+    """종목코드 → 시가총액(원). 없거나 0 이면 0 반환."""
+    if not (_SQLITE_OK and USE_SQLITE):
+        return 0
+    try:
+        with _get_db() as conn:
+            row = conn.execute(
+                "SELECT market_cap FROM stocks "
+                "WHERE code=? AND market_cap IS NOT NULL AND market_cap > 0",
+                (code,)).fetchone()
+        return int(row["market_cap"]) if row else 0
+    except Exception:
+        return 0
+
+
+def _intensity_emoji(ratio_pct: float) -> str:
+    """시총 대비 비율(%) → 강도. 절댓값 기준 (매수/매도 동일)."""
+    a = abs(ratio_pct)
+    if a >= 1.0:  return "🔥🔥🔥"
+    if a >= 0.3:  return "🔥🔥"
+    if a >= 0.1:  return "🔥"
+    return "·"
+
+
+def _turnover_emoji(turnover_pct: float) -> str:
+    """거래대금 시총 회전율(%) → 강도. (거래는 더 큰 비율이 정상)"""
+    if turnover_pct >= 5.0:  return "🔥🔥🔥"
+    if turnover_pct >= 2.0:  return "🔥🔥"
+    if turnover_pct >= 0.5:  return "🔥"
+    return "·"
+
+
+def _format_flow_line(code: str, name: str, flow_eok: float) -> str:
+    """외국인/기관 순매수 종목 라인 — 시총 대비 비율 + 강도 추가.
+    flow_eok: 순매수액 (억원)."""
+    base = f"  {name} {flow_eok:+,.0f}억"
+    mcap = _get_market_cap(code)
+    # 시총 100억 미만 페니/소형주는 비율 왜곡 — 표기 생략
+    if mcap < 10_000_000_000:
+        return base
+    flow_won = flow_eok * 100_000_000
+    ratio_pct = (flow_won / mcap) * 100
+    return f"{base} (시총 {ratio_pct:+.2f}%) {_intensity_emoji(ratio_pct)}"
+
+
+def _format_volume_line(code: str, name: str, change_pct: float,
+                       volume_mn: float, sector: str = "") -> str:
+    """거래대금 상위 종목 라인 — 회전율(%) 추가.
+    volume_mn: 거래대금 (백만원, stocks.volume_mn 단위)."""
+    # 거래대금 표시는 억 단위로 변환
+    vol_eok = volume_mn / 100  # 백만 → 억 (백만/100 = 억은 아니지만, 백만*1=백만이고 1억=100백만 이므로 /100)
+    base = f"  {name} {change_pct:+.1f}% (거래대금 {vol_eok:,.0f}억)"
+    if sector:
+        sector_tail = f" — {sector}"
+    else:
+        sector_tail = ""
+    mcap = _get_market_cap(code)
+    if mcap < 10_000_000_000:
+        return base + sector_tail
+    volume_won = volume_mn * 1_000_000  # 백만원 → 원
+    turnover_pct = (volume_won / mcap) * 100
+    return f"{base} 회전율 {turnover_pct:.2f}% {_turnover_emoji(turnover_pct)}{sector_tail}"
+
+
 def _parse_json_list(s):
     if not s:
         return []
@@ -11542,7 +11634,7 @@ def build_market_summary() -> dict:
                         {"subtitle": "🔻 급락 (-5%↓) TOP 5", "items": items}
                     )
                 vols = conn.execute(f"""
-                    SELECT name, change_pct, volume_mn, sector
+                    SELECT code, name, change_pct, volume_mn, sector
                     FROM stocks
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0
@@ -11553,7 +11645,10 @@ def build_market_summary() -> dict:
                 """).fetchall()
                 if vols:
                     items = [
-                        f"  {v['name']} {v['change_pct']:+.1f}% (거래대금 {v['volume_mn']:,.0f}M) — {v['sector'] or '?'}"
+                        _format_volume_line(v['code'], v['name'],
+                                            v['change_pct'] or 0,
+                                            v['volume_mn'] or 0,
+                                            v['sector'] or '?')
                         for v in vols
                     ]
                     feat_section["subsections"].append(
@@ -11594,12 +11689,14 @@ def build_market_summary() -> dict:
                 if foreign_top:
                     flow_section["subsections"].append({
                         "subtitle": "🌐 외국인 순매수 TOP 5 (오늘)",
-                        "items": [f"  {r['name']} +{r['net']/1e8:,.0f}억" for r in foreign_top]
+                        "items": [_format_flow_line(r['code'], r['name'],
+                                                   r['net']/1e8) for r in foreign_top]
                     })
                 if inst_top:
                     flow_section["subsections"].append({
                         "subtitle": "🏛 기관 순매수 TOP 5 (오늘)",
-                        "items": [f"  {r['name']} +{r['net']/1e8:,.0f}억" for r in inst_top]
+                        "items": [_format_flow_line(r['code'], r['name'],
+                                                   r['net']/1e8) for r in inst_top]
                     })
                 # 20일 누적 — 동일하게 stocks 한글명 우선
                 agg = conn.execute("""
@@ -11614,7 +11711,8 @@ def build_market_summary() -> dict:
                 if agg:
                     flow_section["subsections"].append({
                         "subtitle": "🌐 외국인 20일 누적 TOP 5",
-                        "items": [f"  {a['name']} +{a['foreign_sum_20']/1e8:,.0f}억" for a in agg]
+                        "items": [_format_flow_line(a['code'], a['name'],
+                                                   a['foreign_sum_20']/1e8) for a in agg]
                     })
         except Exception as exc:
             log.debug("[summary] flow: %s", exc)
