@@ -11549,23 +11549,29 @@ def build_market_summary() -> dict:
     # ── 6. 수급 (flow_cache에서 오늘 순매수 집계) ──
     flow_section = {"title": "💰 수급 동향", "subsections": []}
     if _SQLITE_OK and USE_SQLITE:
+        # flow_cache.name 이 다수 종목코드로 채워져 있어 stocks 테이블로 한글명 보강.
+        # name 이 코드와 같거나 비어있으면 stocks.name 사용 → 그래도 없으면 코드.
         try:
             with _get_db() as conn:
-                # 오늘 순매수 = foreign_value_json / inst_value_json 의 마지막 값
                 rows = conn.execute("""
-                    SELECT code, name, foreign_value_json, inst_value_json
-                    FROM flow_cache
-                    WHERE foreign_value_json IS NOT NULL
+                    SELECT f.code AS code,
+                           COALESCE(NULLIF(s.name, ''), NULLIF(f.name, ''), f.code) AS name,
+                           f.foreign_value_json, f.inst_value_json
+                    FROM flow_cache f
+                    LEFT JOIN stocks s ON s.code = f.code
+                    WHERE f.foreign_value_json IS NOT NULL
                 """).fetchall()
+                # name 이 여전히 code 와 같으면 (== 매칭 실패) 그대로 둠 (희소 케이스)
                 foreign_today: list = []
                 inst_today: list = []
                 for r in rows:
+                    name = r["name"] if r["name"] != r["code"] else r["code"]
                     fv = _parse_json_list(r["foreign_value_json"])
                     iv = _parse_json_list(r["inst_value_json"])
                     if fv:
-                        foreign_today.append({"code": r["code"], "name": r["name"], "net": fv[-1]})
+                        foreign_today.append({"code": r["code"], "name": name, "net": fv[-1]})
                     if iv:
-                        inst_today.append({"code": r["code"], "name": r["name"], "net": iv[-1]})
+                        inst_today.append({"code": r["code"], "name": name, "net": iv[-1]})
                 foreign_top = sorted(foreign_today, key=lambda x: x["net"], reverse=True)[:5]
                 inst_top = sorted(inst_today, key=lambda x: x["net"], reverse=True)[:5]
                 if foreign_top:
@@ -11578,11 +11584,15 @@ def build_market_summary() -> dict:
                         "subtitle": "🏛 기관 순매수 TOP 5 (오늘)",
                         "items": [f"  {r['name']} +{r['net']/1e8:,.0f}억" for r in inst_top]
                     })
-                # 20일 누적 매수 — 장기 수급 트렌드
+                # 20일 누적 — 동일하게 stocks 한글명 우선
                 agg = conn.execute("""
-                    SELECT name, foreign_sum_20 FROM flow_cache
-                    WHERE foreign_sum_20 IS NOT NULL
-                    ORDER BY foreign_sum_20 DESC LIMIT 5
+                    SELECT f.code AS code,
+                           COALESCE(NULLIF(s.name, ''), NULLIF(f.name, ''), f.code) AS name,
+                           f.foreign_sum_20
+                    FROM flow_cache f
+                    LEFT JOIN stocks s ON s.code = f.code
+                    WHERE f.foreign_sum_20 IS NOT NULL
+                    ORDER BY f.foreign_sum_20 DESC LIMIT 5
                 """).fetchall()
                 if agg:
                     flow_section["subsections"].append({
