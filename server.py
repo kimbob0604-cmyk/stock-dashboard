@@ -1028,11 +1028,28 @@ def _krx_get_float(row: dict, *keys) -> float | None:
 
 def _get_stock_name(code: str) -> str | None:
     """
-    종목 코드로부터 이름 조회. data.json 테마 → cache/stock_master_*.json 순서로 탐색.
+    종목 코드로부터 이름 조회. 우선순위:
+      1) SQLite stocks 테이블 (4,000+ KR 종목 전체 커버)
+      2) data.json 테마 (활성 유니버스)
+      3) cache/stock_master_*.json (테마 구성 + 유니버스)
+    이전엔 1번이 없어서 활성 유니버스 밖 종목이 코드만 반환되는 케이스
+    있었음 (flow_cache.name 95% 가 코드로 들어간 원인).
     """
     code = (code or "").strip()
     if not code:
         return None
+    # 1) SQLite stocks (가장 큰 풀, 정확)
+    if USE_SQLITE and _SQLITE_OK:
+        try:
+            with _get_db() as conn:
+                row = conn.execute(
+                    "SELECT name FROM stocks WHERE code=?", (code,)
+                ).fetchone()
+                if row and row["name"]:
+                    return row["name"]
+        except Exception:
+            pass
+    # 2) data.json
     if DATA_JSON.exists():
         try:
             data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
@@ -1042,7 +1059,7 @@ def _get_stock_name(code: str) -> str | None:
                         return s.get("name") or code
         except Exception:
             pass
-    # stock_master cache fallback
+    # 3) stock_master cache
     import glob as _glob
     masters = sorted(
         _glob.glob(str(BASE_DIR / "cache" / "stock_master_*.json")), reverse=True
