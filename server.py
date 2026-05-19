@@ -6008,9 +6008,11 @@ def _startup():
             _scheduler.add_job(alert_closing_summary, "cron",
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="tg_closing")
-            # 장마감 자동 시황 요약 (15:42 — closing summary 직후)
+            # 장마감 자동 시황 요약 (15:50 — 가격 sync 15:35 + agent 15:45 후)
+            # 이전 15:42 는 7분 buffer 라 stocks.change_pct / flow_cache 미반영
+            # 케이스 있었음. 15분 buffer 로 모든 데이터 안정화 후 발송.
             _scheduler.add_job(send_market_summary_telegram, "cron",
-                               day_of_week="mon-fri", hour=15, minute=42,
+                               day_of_week="mon-fri", hour=15, minute=50,
                                id="tg_market_summary", max_instances=1)
             # 미국 장마감 시황 (KST 06:10 — 미국 월~금 마감 = KST 화~토)
             _scheduler.add_job(send_us_market_summary_telegram, "cron",
@@ -6100,12 +6102,22 @@ def _startup():
 
         # ── AI 에이전트 파이프라인 (장 시작 전 08:45 + 장 마감 후 15:45) ──
         def _auto_agent_run():
+            t0 = time.time()
             try:
                 from agents.pipeline import run_pipeline, send_agent_telegram
                 result = run_pipeline()
                 send_agent_telegram(result)
+                # 결과 요약 — picks 개수, 캐시 생성 확인
+                picks_n = len((result or {}).get("final_picks") or [])
+                cache_p = BASE_DIR / "cache" / "agent_result_latest.json"
+                cache_exists = cache_p.exists()
+                log.info("[Agent] 자동 실행 성공 (%.1fs) — picks=%d, cache=%s",
+                         time.time() - t0, picks_n,
+                         'OK' if cache_exists else 'MISSING')
             except Exception as exc:
-                log.debug("[Agent] 자동 실행 실패: %s", exc)
+                # 4-5: debug → warning 격상 (실패 흔적 보존)
+                log.warning("[Agent] 자동 실행 실패 (%.1fs): %s",
+                            time.time() - t0, exc)
         _scheduler.add_job(_auto_agent_run, "cron",
                            day_of_week="mon-fri", hour="8,15", minute=45,
                            id="agent_pipeline", max_instances=1)
@@ -11580,25 +11592,25 @@ def build_market_summary() -> dict:
     # ── 8. AI 추천 ──
     ai_section = {"title": "🤖 AI 추천 요약", "items": []}
     cache_picks_loaded = False
-    for cand in ("agent_result_kr_latest.json", "agent_result_latest.json"):
-        p = BASE_DIR / "cache" / cand
-        if p.exists():
-            try:
-                agent = json.loads(p.read_text(encoding="utf-8"))
-                hot = (agent.get("agents", {}).get("news", {}).get("hot_themes") or [])
-                if hot:
-                    ai_section["items"].append(f"  핫 테마: {', '.join(hot[:5])}")
-                picks = (agent.get("final_picks") or [])[:5]
-                if picks:
-                    ai_section["items"].append(f"  추천 {len(picks)}종목:")
-                    for pk in picks:
-                        ai_section["items"].append(
-                            f"    {pk.get('name')} ({pk.get('code')}) {pk.get('total_score', 0)}점"
-                        )
-                    cache_picks_loaded = True
-                break
-            except Exception:
-                pass
+    # agents/pipeline.py 가 실제로 만드는 파일은 agent_result_latest.json (KR 디폴트).
+    # 이전 코드의 agent_result_kr_latest.json 은 생성 위치 없어 무의미했음.
+    p = BASE_DIR / "cache" / "agent_result_latest.json"
+    if p.exists():
+        try:
+            agent = json.loads(p.read_text(encoding="utf-8"))
+            hot = (agent.get("agents", {}).get("news", {}).get("hot_themes") or [])
+            if hot:
+                ai_section["items"].append(f"  핫 테마: {', '.join(hot[:5])}")
+            picks = (agent.get("final_picks") or [])[:5]
+            if picks:
+                ai_section["items"].append(f"  추천 {len(picks)}종목:")
+                for pk in picks:
+                    ai_section["items"].append(
+                        f"    {pk.get('name')} ({pk.get('code')}) {pk.get('total_score', 0)}점"
+                    )
+                cache_picks_loaded = True
+        except Exception as exc:
+            log.debug("[summary] ai cache parse: %s", exc)
 
     # 폴백: 캐시에 picks 없으면 recommendation_history DB 활용
     # (캐시 7일 클린업/cron 누락 케이스 대응)
