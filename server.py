@@ -12045,14 +12045,22 @@ def send_us_market_summary_telegram():
 
 
 def send_market_summary_telegram():
-    """장마감 시황 텔레그램 발송 (15:40 cron)."""
+    """장마감 시황 텔레그램 발송 (15:50 cron).
+    사용자 요청으로 텔레 메시지에서 제외하는 섹션:
+      - 🤖 AI 추천 요약 (대시보드에는 유지)
+      - 📋 주요 공시 (별도 알림 차단됨)
+    API 응답(/api/market_summary) 에는 그대로 유지 — UI 영향 X.
+    """
     try:
         data = build_market_summary()
     except Exception as exc:
         log.exception("send_market_summary build")
         return
+    SKIP_TITLES = {"🤖 AI 추천 요약", "📋 주요 공시"}
     lines = [f"📊 <b>{now_kst().strftime('%m/%d')} 장마감 시황</b>", ""]
     for sec in data.get("sections", []):
+        if sec.get("title") in SKIP_TITLES:
+            continue
         lines.append(f"<b>{sec['title']}</b>")
         for it in sec.get("items", []):
             lines.append(it)
