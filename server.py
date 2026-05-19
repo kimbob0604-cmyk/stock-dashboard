@@ -2657,6 +2657,157 @@ def _parse_naver_flow_number(s: str) -> int:
             return 0
 
 
+def _fetch_and_save_flow(code: str) -> bool:
+    """Naver 외인/기관 수급 페이지 fetch → cache + flow_cache DB 갱신.
+    api_flow 의 내부 fetch 로직을 재사용 가능한 헬퍼로 분리. cron batch 용.
+    Returns: True 성공 / False 실패."""
+    import re as _re
+    if not _re.fullmatch(r"\d{6}", code):
+        return False
+    try:
+        import requests as _rq
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return False
+
+    stock_name = _get_stock_name(code) or code
+    cache_file = BASE_DIR / "cache" / f"flow_{code}.json"
+
+    try:
+        res = _rq.get(
+            "https://finance.naver.com/item/frgn.naver",
+            params={"code": code},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        res.encoding = "euc-kr"
+        soup = BeautifulSoup(res.text, "html.parser")
+    except Exception:
+        return False
+
+    table = soup.select_one('table.type2[summary*="외국인"]') or \
+            soup.select_one("table.type2")
+    if table is None:
+        return False
+
+    dates, closes, foreign_net, inst_net = [], [], [], []
+    for tr in table.select("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 7:
+            continue
+        date_txt = tds[0].get_text(strip=True)
+        if not _re.match(r"\d{4}\.\d{2}\.\d{2}", date_txt):
+            continue
+        try:
+            close = int(tds[1].get_text(strip=True).replace(",", ""))
+        except ValueError:
+            continue
+        inst_sh = _parse_naver_flow_number(tds[5].get_text(strip=True))
+        for_sh = _parse_naver_flow_number(tds[6].get_text(strip=True))
+        dates.append(date_txt.replace(".", "-"))
+        closes.append(close)
+        inst_net.append(inst_sh)
+        foreign_net.append(for_sh)
+
+    if not dates:
+        return False
+    dates.reverse(); closes.reverse()
+    foreign_net.reverse(); inst_net.reverse()
+    foreign_value = [f * c for f, c in zip(foreign_net, closes)]
+    inst_value = [i * c for i, c in zip(inst_net, closes)]
+
+    fetched_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    result = {
+        "code": code, "name": stock_name,
+        "dates": dates, "close": closes,
+        "foreign_shares": foreign_net, "inst_shares": inst_net,
+        "foreign_value": foreign_value, "inst_value": inst_value,
+        "foreign_sum_20": sum(foreign_value),
+        "inst_sum_20": sum(inst_value),
+        "source": "naver_finance", "fetched_at": fetched_at,
+    }
+    try:
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    except Exception:
+        pass
+
+    if USE_SQLITE and _SQLITE_OK:
+        try:
+            with _get_db() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO flow_cache "
+                    "(code, name, dates_json, close_json, foreign_shares_json, "
+                    "inst_shares_json, foreign_value_json, inst_value_json, "
+                    "foreign_sum_20, inst_sum_20, source, fetched_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (code, stock_name,
+                     json.dumps(dates, ensure_ascii=False),
+                     json.dumps(closes, ensure_ascii=False),
+                     json.dumps(foreign_net, ensure_ascii=False),
+                     json.dumps(inst_net, ensure_ascii=False),
+                     json.dumps(foreign_value, ensure_ascii=False),
+                     json.dumps(inst_value, ensure_ascii=False),
+                     sum(foreign_value), sum(inst_value),
+                     "naver_finance", fetched_at),
+                )
+                conn.commit()
+        except Exception as exc:
+            log.debug("[flow batch] %s DB fail: %s", code, exc)
+    return True
+
+
+def _refresh_flow_batch(top_n: int = 200) -> dict:
+    """KR 시총 상위 top_n 종목의 외인/기관 수급 일괄 갱신.
+    cron: 평일 15:40 (가격 sync 15:35 후, 시황 발송 15:50 전).
+    소요: ~1.5분 (200개 × 0.4s rate limit).
+    """
+    if not (_SQLITE_OK and USE_SQLITE):
+        return {"ok": False, "error": "SQLite 비활성"}
+    t0 = time.time()
+    try:
+        with _get_db() as conn:
+            rows = conn.execute("""
+                SELECT code FROM stocks
+                WHERE (market='' OR market LIKE 'KOS%')
+                  AND COALESCE(is_etf, 0) = 0
+                  AND market_cap IS NOT NULL AND market_cap > 0
+                  AND close >= 1000
+                ORDER BY market_cap DESC LIMIT ?
+            """, (top_n,)).fetchall()
+        codes = [r["code"] for r in rows]
+    except Exception as exc:
+        return {"ok": False, "error": f"종목 조회 실패: {exc}"}
+
+    ok = 0; fail = 0
+    for i, code in enumerate(codes, 1):
+        if _fetch_and_save_flow(code):
+            ok += 1
+        else:
+            fail += 1
+        time.sleep(0.4)  # rate limit (Naver 차단 회피)
+    elapsed = time.time() - t0
+    log.info("[flow batch] %d종목 갱신 (%d 성공, %d 실패, %.1fs)",
+             len(codes), ok, fail, elapsed)
+    return {
+        "ok": True, "total": len(codes),
+        "success": ok, "failed": fail,
+        "elapsed_sec": round(elapsed, 1),
+    }
+
+
+@app.route("/api/flow/refresh-batch", methods=["POST"])
+def api_flow_refresh_batch():
+    """수동 트리거 — 시총 상위 N개 수급 일괄 갱신.
+    Query: ?top_n=200 (기본). 백그라운드 실행."""
+    top_n = min(int(request.args.get("top_n", 200)), 500)
+    def _bg():
+        _refresh_flow_batch(top_n)
+    threading.Thread(target=_bg, daemon=True, name="flow-batch").start()
+    return jsonify({"ok": True, "message": f"백그라운드 갱신 시작 (top_n={top_n})"})
+
+
 @app.route("/api/flow/<code>")
 def api_flow(code: str):
     """
@@ -5964,6 +6115,16 @@ def _startup():
                 try:
                     n = _refresh_prices_from_naver()
                     log.info("[부팅] KR 가격 stale 해소 — %d종목 갱신", n)
+                    # flow_cache 도 부팅 시 1회 갱신 (시총 큰 종목만)
+                    # 가격 갱신이 끝난 후 stocks.market_cap 으로 정렬 가능
+                    try:
+                        r = _refresh_flow_batch(top_n=200)
+                        if r.get("ok"):
+                            log.info("[부팅] flow_cache stale 해소 — %d/%d 성공 (%.1fs)",
+                                     r.get("success", 0), r.get("total", 0),
+                                     r.get("elapsed_sec", 0))
+                    except Exception as exc:
+                        log.warning("[부팅] flow batch 실패: %s", exc)
                 except Exception as exc:
                     log.warning("[부팅] KR 가격 갱신 실패: %s", exc)
             _th.Thread(target=_boot_refresh_kr,
@@ -6039,7 +6200,13 @@ def _startup():
             _scheduler.add_job(alert_closing_summary, "cron",
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="tg_closing")
-            # 장마감 자동 시황 요약 (15:50 — 가격 sync 15:35 + agent 15:45 후)
+            # flow_cache 일괄 갱신 (15:40 — 가격 sync 15:35 후, 시황 15:50 전)
+            # 시총 상위 200종목 외인/기관 수급 fetch → 시황 메시지 신선도 확보.
+            _scheduler.add_job(lambda: _refresh_flow_batch(top_n=200), "cron",
+                               day_of_week="mon-fri", hour=15, minute=40,
+                               id="flow_batch", max_instances=1,
+                               misfire_grace_time=600)
+            # 장마감 자동 시황 요약 (15:50 — 가격 sync 15:35 + flow 15:40 + agent 15:45 후)
             # 이전 15:42 는 7분 buffer 라 stocks.change_pct / flow_cache 미반영
             # 케이스 있었음. 15분 buffer 로 모든 데이터 안정화 후 발송.
             _scheduler.add_job(send_market_summary_telegram, "cron",
