@@ -11440,9 +11440,13 @@ def build_market_summary() -> dict:
     # ── 4. 섹터 ──
     sector_section = {"title": "🏭 섹터 등락", "subsections": []}
     if _SQLITE_OK and USE_SQLITE:
+        # 노이즈 필터: 페니 스톡 (close < 1000원), KR 가격 한도 외 변동 (|chg|>30)
+        # — 관리종목/거래정지해제/액면병합 후 첫거래 등에서 ±60% 같은 비정상값 발생
+        _NOISE_WHERE = ("close >= 1000 AND change_pct IS NOT NULL "
+                        "AND ABS(change_pct) <= 30")
         try:
             with _get_db() as conn:
-                sectors = conn.execute("""
+                sectors = conn.execute(f"""
                     SELECT sector,
                            ROUND(AVG(change_pct), 2) as avg_chg,
                            COUNT(*) as cnt
@@ -11450,7 +11454,7 @@ def build_market_summary() -> dict:
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0
                       AND sector IS NOT NULL AND sector != ''
-                      AND change_pct IS NOT NULL
+                      AND {_NOISE_WHERE}
                     GROUP BY sector HAVING cnt >= 5
                     ORDER BY avg_chg DESC
                 """).fetchall()
@@ -11458,10 +11462,12 @@ def build_market_summary() -> dict:
                     top = [dict(s) for s in sectors[:5]]
                     top_items = []
                     for i, s in enumerate(top):
-                        ldr = conn.execute("""
+                        # 대장주도 페니 + 한도외 제외
+                        ldr = conn.execute(f"""
                             SELECT name, change_pct FROM stocks
                             WHERE sector = ? AND (market = '' OR market LIKE 'KOS%')
                               AND COALESCE(is_etf, 0) = 0
+                              AND {_NOISE_WHERE}
                             ORDER BY change_pct DESC LIMIT 1
                         """, (s["sector"],)).fetchone()
                         lead_str = (f" (대장: {ldr['name']} {ldr['change_pct']:+.1f}%)"
@@ -11483,13 +11489,17 @@ def build_market_summary() -> dict:
     # ── 5. 특징주 ──
     feat_section = {"title": "⚡ 특징주", "subsections": []}
     if _SQLITE_OK and USE_SQLITE:
+        # 위와 동일 노이즈 필터 (페니 + 한도외)
+        _NOISE_WHERE = ("close >= 1000 AND change_pct IS NOT NULL "
+                        "AND ABS(change_pct) <= 30")
         try:
             with _get_db() as conn:
-                risers = conn.execute("""
+                risers = conn.execute(f"""
                     SELECT code, name, change_pct, volume_mn, sector, market_cap
                     FROM stocks
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0 AND change_pct > 5
+                      AND {_NOISE_WHERE}
                     ORDER BY change_pct DESC LIMIT 10
                 """).fetchall()
                 if risers:
@@ -11500,11 +11510,12 @@ def build_market_summary() -> dict:
                     feat_section["subsections"].append(
                         {"subtitle": "🔺 급등 (+5%↑) TOP 10", "items": items}
                     )
-                fallers = conn.execute("""
+                fallers = conn.execute(f"""
                     SELECT name, change_pct, sector
                     FROM stocks
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0 AND change_pct < -5
+                      AND {_NOISE_WHERE}
                     ORDER BY change_pct ASC LIMIT 5
                 """).fetchall()
                 if fallers:
@@ -11513,13 +11524,14 @@ def build_market_summary() -> dict:
                     feat_section["subsections"].append(
                         {"subtitle": "🔻 급락 (-5%↓) TOP 5", "items": items}
                     )
-                vols = conn.execute("""
+                vols = conn.execute(f"""
                     SELECT name, change_pct, volume_mn, sector
                     FROM stocks
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0
                       AND ABS(COALESCE(change_pct, 0)) <= 5
                       AND COALESCE(volume_mn, 0) > 0
+                      AND close >= 1000
                     ORDER BY volume_mn DESC LIMIT 5
                 """).fetchall()
                 if vols:
