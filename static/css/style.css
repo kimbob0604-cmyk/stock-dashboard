@@ -5913,27 +5913,27 @@ tr:hover td {
   font-style: italic; padding: 6px 0;
 }
 
-/* STEP 1 — KUVIC */
-.verif-kuvic-block {
+/* STEP 1 — 검토 */
+.verif-review-block {
   background: rgba(168,85,247,0.05);
   border-left: 3px solid #9333ea;
   border-radius: 4px;
   padding: 10px 14px;
 }
-.verif-kuvic-thesis {
+.verif-review-thesis {
   font-size: 14px; color: var(--text, #222);
   font-weight: 500; line-height: 1.5;
   margin-bottom: 6px;
 }
-.verif-kuvic-meta {
+.verif-review-meta {
   display: flex; gap: 8px; flex-wrap: wrap;
   margin-bottom: 6px;
 }
-.verif-kuvic-tag {
+.verif-review-tag {
   font-size: 11px; padding: 1px 8px; border-radius: 10px;
   background: rgba(168,85,247,0.15); color: #7c3aed;
 }
-.verif-kuvic-date {
+.verif-review-date {
   font-size: 11px; color: var(--text-muted, #888);
   font-family: ui-monospace, monospace;
 }
@@ -5943,7 +5943,7 @@ tr:hover td {
   background: rgba(59,130,246,0.10); color: #2563eb;
   border-radius: 8px;
 }
-.verif-kuvic-empty {
+.verif-review-empty {
   padding: 14px; text-align: center;
   font-size: 12px; color: var(--text-muted, #888);
   background: rgba(120,120,120,0.04);
@@ -6096,8 +6096,8 @@ tr:hover td {
   line-height: 1.6;
 }
 
-/* STEP 5 — KUVIC 비교 */
-.verif-kuvic-match {
+/* STEP 5 — 검토 비교 */
+.verif-review-match {
   padding: 10px 14px;
   border-radius: 6px;
 }
@@ -6105,7 +6105,7 @@ tr:hover td {
                    border: 1px solid rgba(34,197,94,0.20); }
 .verif-match-gap { background: rgba(245,158,11,0.06);
                    border: 1px solid rgba(245,158,11,0.25); }
-.verif-kuvic-match-row {
+.verif-review-match-row {
   display: flex; justify-content: space-between;
   padding: 3px 0; font-size: 13px;
 }
@@ -6121,11 +6121,11 @@ tr:hover td {
     border-bottom-color: rgba(255,255,255,0.08);
   }
   .verif-step-divider { background: rgba(255,255,255,0.08); }
-  .verif-step-placeholder, .verif-empty, .verif-kuvic-empty,
+  .verif-step-placeholder, .verif-empty, .verif-review-empty,
   .verif-reflection, .verif-vc-empty {
     color: #94a3b8;
   }
-  .verif-kuvic-thesis, .verif-vc-seg, .verif-vc-layer,
+  .verif-review-thesis, .verif-vc-seg, .verif-vc-layer,
   .verif-refl-label, .verif-refl-reasons, .verif-v,
   .verif-slider-pin-label { color: #f1f5f9; }
   .verif-tam-table th { background: rgba(255,255,255,0.04); }
@@ -6147,7 +6147,7 @@ tr:hover td {
 }
 
 /* ==============================================================
- * Phase 4-5-5: KUVIC 수동 입력 폼 + 칩 + 토스트
+ * Phase 4-5-5: 검토 수동 입력 폼 + 칩 + 토스트
  * ============================================================== */
 
 .verif-form-card {
@@ -6353,7 +6353,7 @@ tr:hover td {
 }
 
 /* ==============================================================
- * Phase 4-5-6: 자동 vs KUVIC Split View
+ * Phase 4-5-6: 자동 vs 검토 Split View
  * ============================================================== */
 .vsv-section { margin-top: 20px; }
 .vsv-section-title {
@@ -6385,7 +6385,7 @@ tr:hover td {
   overflow: hidden;
 }
 .vsv-card-auto  { border-top: 3px solid #3b82f6; }
-.vsv-card-kuvic { border-top: 3px solid #9333ea; }
+.vsv-card-review { border-top: 3px solid #9333ea; }
 .vsv-card-empty { border-top: 3px solid rgba(120,120,120,0.40); opacity: 0.85; }
 
 .vsv-card-head {
@@ -6434,7 +6434,7 @@ tr:hover td {
 .vsv-tp-row { font-size: 11.5px; }
 .vsv-tp-na  { color: var(--text-muted, #888); }
 .vsv-tp-auto  { color: #2563eb; }
-.vsv-tp-kuvic { color: #9333ea; }
+.vsv-tp-review { color: #9333ea; }
 .vsv-concl {
   font-weight: 700; font-size: 13px;
   padding: 1px 7px; border-radius: 3px;
@@ -6601,7 +6601,7 @@ tr:hover td {
   .vsv-kv { border-bottom-color: rgba(255,255,255,0.08); }
   .vsv-gap-row { border-bottom-color: rgba(255,255,255,0.08); }
   .vsv-tp-auto  { color: #60a5fa; }
-  .vsv-tp-kuvic { color: #c084fc; }
+  .vsv-tp-review { color: #c084fc; }
   .vsv-diff-up   { color: #f87171; }
   .vsv-diff-down { color: #60a5fa; }
 }
@@ -6760,7 +6760,7 @@ tr:hover td {
   background: linear-gradient(to right, #3b82f6, #2563eb);
   border-radius: 3px;
 }
-.vc-bar-kuvic {
+.vc-bar-review {
   background: linear-gradient(to right, #9333ea, #7c3aed);
 }
 .vc-bar-val {

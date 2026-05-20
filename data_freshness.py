@@ -241,7 +241,7 @@ DATA_SOURCE_CONFIG: Dict[str, dict] = {
     # ─── MANUAL (사용자 입력) ───
     "analysis_journal": {
         "category": "manual",
-        "name_kr": "KUVIC 분석 일지",
+        "name_kr": "검토 분석 일지",
         "expected_seconds": None,
         "source_module": "analysis_journal_api.py",
         "cron": "user",

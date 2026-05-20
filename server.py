@@ -13530,7 +13530,7 @@ def api_vc2_segment_manage(theme_id, layer_id, segment_id):
 
 
 # ============================================================
-# 밸류체인 v2 — Step 4-3-D: TAM + 풀 정보 + KUVIC 비교
+# 밸류체인 v2 — Step 4-3-D: TAM + 풀 정보 + 검토 비교
 # ============================================================
 
 @app.route("/api/valuechain2/stock/<stock_code>/tam")
@@ -13554,7 +13554,7 @@ def api_vc2_stock_tam(stock_code):
 
 @app.route("/api/valuechain2/stock/<stock_code>/full")
 def api_vc2_stock_full(stock_code):
-    """종목 풀 정보: 반영도 + TAM + 매칭 세그먼트 + KUVIC 세션. Step 4-3-D."""
+    """종목 풀 정보: 반영도 + TAM + 매칭 세그먼트 + 검토 세션. Step 4-3-D."""
     cache_key = f"full_{stock_code}"
     cached = _vc2_cache_get(cache_key)
     if cached:
@@ -13605,11 +13605,11 @@ def api_vc2_stock_full(stock_code):
     except Exception as e:
         result["tam_error"] = str(e)
 
-    # KUVIC 세션 (있으면)
+    # 검토 세션 (있으면)
     try:
-        from kuvic_validator import KUVIC_SESSION_ANALYSIS, compare_kuvic_vs_auto
-        if stock_code in KUVIC_SESSION_ANALYSIS:
-            result["kuvic_session"] = compare_kuvic_vs_auto(stock_code)
+        from review_validator import REVIEW_SESSION_ANALYSIS, compare_review_vs_auto
+        if stock_code in REVIEW_SESSION_ANALYSIS:
+            result["review_session"] = compare_review_vs_auto(stock_code)
     except Exception:
         pass
 
@@ -13693,19 +13693,19 @@ def api_earnings_consensus_collect():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/valuechain2/kuvic/compare")
-def api_vc2_kuvic_compare():
-    """KUVIC 세션 6종목 일괄 비교. Step 4-3-D."""
-    cached = _vc2_cache_get("kuvic_compare_all")
+@app.route("/api/valuechain2/review/compare")
+def api_vc2_review_compare():
+    """검토 세션 6종목 일괄 비교. Step 4-3-D."""
+    cached = _vc2_cache_get("review_compare_all")
     if cached:
         return jsonify(cached)
     try:
-        from kuvic_validator import compare_all_kuvic_stocks
-        result = {"comparisons": compare_all_kuvic_stocks()}
+        from review_validator import compare_all_review_stocks
+        result = {"comparisons": compare_all_review_stocks()}
     except Exception as e:
-        log.exception("vc2/kuvic/compare")
+        log.exception("vc2/review/compare")
         return jsonify({"error": str(e)}), 500
-    _vc2_cache_set("kuvic_compare_all", result)
+    _vc2_cache_set("review_compare_all", result)
     return jsonify(result)
 
 
@@ -13822,17 +13822,17 @@ def api_analysis_journal_export_markdown(journal_id):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/journal/import-kuvic', methods=['POST'])
-def api_analysis_journal_import_kuvic():
-    """KUVIC 6종목 일괄 임포트 (관리자용). body: {force: true}"""
+@app.route('/api/journal/import-review', methods=['POST'])
+def api_analysis_journal_import_review():
+    """검토 6종목 일괄 임포트 (관리자용). body: {force: true}"""
     try:
-        from analysis_journal_api import import_kuvic_session_analysis
+        from analysis_journal_api import import_review_session_analysis
         data = request.get_json(silent=True) or {}
         force = data.get('force', False)
-        result = import_kuvic_session_analysis(skip_duplicates=not force)
+        result = import_review_session_analysis(skip_duplicates=not force)
         return jsonify(result)
     except Exception as e:
-        log.exception("journal/import-kuvic")
+        log.exception("journal/import-review")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -14075,14 +14075,14 @@ def api_verification_prefill(code):
             pf.get('return_52w'),
         )
 
-        # 6) KUVIC match
-        kuvic_session = pf.get('kuvic_session')
-        kuvic_match = None
-        if kuvic_session and pf.get('reflection_label'):
-            kuvic_match = {
-                'kuvic_conclusion': kuvic_session.get('conclusion'),
+        # 6) 검토 match
+        review_session = pf.get('review_session')
+        review_match = None
+        if review_session and pf.get('reflection_label'):
+            review_match = {
+                'review_conclusion': review_session.get('conclusion'),
                 'auto_label': pf.get('reflection_label'),
-                'thesis': kuvic_session.get('thesis'),
+                'thesis': review_session.get('thesis'),
                 'journal_id': None,  # analysis_journal id (없으면 None)
             }
 
@@ -14105,17 +14105,17 @@ def api_verification_prefill(code):
                               'label': 'ARCHIVE', 'color': 'gray',
                               'age_human': '정적 데이터', 'last_updated': None},
             },
-            'kuvic_analysis': {
-                'thesis': kuvic_session.get('thesis') if kuvic_session else None,
-                'conclusion': kuvic_session.get('conclusion') if kuvic_session else None,
-                'priority': kuvic_session.get('priority') if kuvic_session else None,
-                'tags': kuvic_session.get('tags') if kuvic_session else [],
-                'session_date': kuvic_session.get('session_date') if kuvic_session else None,
-                'has_manual_tp': bool(kuvic_session.get('has_manual_tp')) if kuvic_session else False,
-                'freshness': {'source': 'kuvic_session',
+            'review_analysis': {
+                'thesis': review_session.get('thesis') if review_session else None,
+                'conclusion': review_session.get('conclusion') if review_session else None,
+                'priority': review_session.get('priority') if review_session else None,
+                'tags': review_session.get('tags') if review_session else [],
+                'session_date': review_session.get('session_date') if review_session else None,
+                'has_manual_tp': bool(review_session.get('has_manual_tp')) if review_session else False,
+                'freshness': {'source': 'review_session',
                               'label': 'MANUAL', 'color': 'blue',
                               'age_human': '수동 입력', 'last_updated': None},
-            } if kuvic_session else None,
+            } if review_session else None,
         }
 
         step2 = {
@@ -14179,7 +14179,7 @@ def api_verification_prefill(code):
                 'vc_score': pf.get('reflection_score'),
                 'vc_label': pf.get('reflection_label'),
             },
-            'kuvic_match': kuvic_match,
+            'review_match': review_match,
         }
 
         # TP 별 upside%
@@ -14232,8 +14232,8 @@ _EARN_SIGNAL_SCORE = {
     'SHOCK_FULL': 5,
 }
 
-# KUVIC 결론 × 우선순위 → 점수
-_KUVIC_SCORE = {
+# 검토 결론 × 우선순위 → 점수
+_REVIEW_SCORE = {
     'BUY':   {'★★★': 90, '★★': 75, '★': 60, '—': 50, None: 60},
     'HOLD':  {'★★★': 50, '★★': 45, '★': 40, '—': 40, None: 45},
     'WATCH': {'★★★': 40, '★★': 35, '★': 30, '—': 30, None: 35},
@@ -14266,10 +14266,10 @@ def _score_technical(position_pct):
     return 30
 
 
-def _score_kuvic(conclusion, priority):
+def _score_review(conclusion, priority):
     if not conclusion:
         return None
-    row = _KUVIC_SCORE.get(conclusion)
+    row = _REVIEW_SCORE.get(conclusion)
     if not row:
         return 50
     return row.get(priority, row.get(None, 50))
@@ -14362,7 +14362,7 @@ def _next_quarter_label(latest_year, latest_quarter):
 @app.route('/api/verification/<code>/composite', methods=['GET'])
 def api_verification_composite(code):
     """종합 신호 패널.
-    점수(0~100) = 자동 50% + KUVIC 30% + 갭 페널티 20%
+    점수(0~100) = 자동 50% + 검토 30% + 갭 페널티 20%
     신뢰도(0~1) = 1.0 - 데이터 신선도/완전성 감점
     Returns: { code, name, current_price,
                score: { composite, stars, recommendation, breakdown },
@@ -14389,13 +14389,13 @@ def api_verification_composite(code):
                 'errors': errors,
             }), 500
 
-        # 2) 최신 KUVIC 일지
-        kuvic_journal = None
+        # 2) 최신 검토 일지
+        review_journal = None
         try:
             from analysis_journal_api import list_journals_by_stock
             journals = list_journals_by_stock(code, 1) or []
             if journals:
-                kuvic_journal = journals[0]
+                review_journal = journals[0]
         except Exception as exc:
             errors.append(f'journal: {exc}')
 
@@ -14444,21 +14444,21 @@ def api_verification_composite(code):
         auto_used = [v for v in auto_components.values() if v is not None]
         auto_score = round(sum(auto_used) / len(auto_used), 1) if auto_used else None
 
-        # KUVIC
-        kuvic_score = None
-        if kuvic_journal:
-            kuvic_score = _score_kuvic(
-                kuvic_journal.get('conclusion'),
-                kuvic_journal.get('priority'),
+        # 검토
+        review_score = None
+        if review_journal:
+            review_score = _score_review(
+                review_journal.get('conclusion'),
+                review_journal.get('priority'),
             )
 
         # 갭 페널티: gap-analysis 재호출 대신 인라인 계산 (간단)
         gap_penalty = 0
         gap_high_count = 0
-        if kuvic_journal:
+        if review_journal:
             for sc in ('bear', 'base', 'bull'):
                 a = pf.get(f'{sc}_tp')
-                k = kuvic_journal.get(f'{sc}_tp')
+                k = review_journal.get(f'{sc}_tp')
                 if a and k:
                     diff_pct = abs((k - a) / a * 100)
                     if diff_pct >= 25:
@@ -14468,8 +14468,8 @@ def api_verification_composite(code):
         # 합성
         if auto_score is None:
             composite = None
-        elif kuvic_score is not None:
-            composite = round(auto_score * 0.5 + kuvic_score * 0.3 - gap_penalty, 1)
+        elif review_score is not None:
+            composite = round(auto_score * 0.5 + review_score * 0.3 - gap_penalty, 1)
         else:
             composite = round(auto_score - gap_penalty, 1)
         if composite is not None:
@@ -14481,11 +14481,11 @@ def api_verification_composite(code):
         pen, ff = _composite_freshness_factors(conn)
         confidence_value -= pen
         confidence_factors.extend(ff)
-        if not kuvic_journal:
+        if not review_journal:
             confidence_value -= 0.10
             confidence_factors.append({
-                'source': 'kuvic_journal',
-                'name_kr': 'KUVIC 분석 일지',
+                'source': 'review_journal',
+                'name_kr': '검토 분석 일지',
                 'label': 'MISSING', 'age_human': '미작성',
                 'impact': -0.10,
             })
@@ -14501,16 +14501,16 @@ def api_verification_composite(code):
 
         # 7) 다음 액션
         actions: list = []
-        if not kuvic_journal:
+        if not review_journal:
             actions.append({
                 'priority': 1,
-                'text': 'KUVIC 분석 일지 작성 — 결론/TP/Step3 입력',
+                'text': '검토 분석 일지 작성 — 결론/TP/Step3 입력',
                 'reason': '자동 산출만으로 판단 불가',
             })
         if gap_high_count >= 1:
             actions.append({
                 'priority': 1,
-                'text': f'자동 TAM vs KUVIC TP 갭 검토 (high {gap_high_count}건)',
+                'text': f'자동 TAM vs 검토 TP 갭 검토 (high {gap_high_count}건)',
                 'reason': '시나리오별 가정 차이 큼',
             })
         if earnings_signal and 'BIG' in earnings_signal:
@@ -14527,19 +14527,19 @@ def api_verification_composite(code):
                 'reason': 'naver_price/valuation_band/consensus 갱신 필요',
             })
         # 반영도 vs 결론 conflict (gap_analysis 일치성과 동일 룰)
-        if kuvic_journal:
+        if review_journal:
             auto_refl = pf.get('reflection_label')
-            kuvic_concl = kuvic_journal.get('conclusion')
-            check = _check_reflection_conclusion(auto_refl, kuvic_concl)
+            review_concl = review_journal.get('conclusion')
+            check = _check_reflection_conclusion(auto_refl, review_concl)
             if check and check[0] == 'conflict':
                 actions.append({
                     'priority': 1,
-                    'text': f'반영도({auto_refl}) ↔ 결론({kuvic_concl}) 불일치 검토',
+                    'text': f'반영도({auto_refl}) ↔ 결론({review_concl}) 불일치 검토',
                     'reason': check[1],
                 })
         actions.sort(key=lambda a: a['priority'])
 
-        # 8) 모니터링 일정 (어닝 추정 + KUVIC analysis_date 기반)
+        # 8) 모니터링 일정 (어닝 추정 + 검토 analysis_date 기반)
         monitoring: list = []
         if earnings_year is not None:
             nq_label, nq_date = _next_quarter_label(earnings_year, earnings_quarter)
@@ -14549,16 +14549,16 @@ def api_verification_composite(code):
                     'event': f'{nq_label} 어닝 (추정)',
                     'kind': 'earnings_estimate',
                 })
-        if kuvic_journal and kuvic_journal.get('analysis_date'):
+        if review_journal and review_journal.get('analysis_date'):
             # 분석일 + 30일 → 재검토 알림
             from datetime import datetime, timedelta
             try:
-                d = datetime.strptime(kuvic_journal['analysis_date'], '%Y-%m-%d').date()
+                d = datetime.strptime(review_journal['analysis_date'], '%Y-%m-%d').date()
                 review_date = (d + timedelta(days=30)).isoformat()
                 monitoring.append({
                     'when': review_date,
-                    'event': 'KUVIC 분석 30일 재검토',
-                    'kind': 'kuvic_review',
+                    'event': '검토 분석 30일 재검토',
+                    'kind': 'review_review',
                 })
             except Exception:
                 pass
@@ -14574,10 +14574,10 @@ def api_verification_composite(code):
                 'breakdown': {
                     'auto': auto_score,
                     'auto_components': auto_components,
-                    'kuvic': kuvic_score,
+                    'review': review_score,
                     'gap_penalty': gap_penalty,
                     'gap_high_count': gap_high_count,
-                    'has_kuvic': bool(kuvic_journal),
+                    'has_review': bool(review_journal),
                 },
             },
             'confidence': {
@@ -14593,8 +14593,8 @@ def api_verification_composite(code):
                 'earnings_signal': earnings_signal,
                 'earnings_year': earnings_year,
                 'earnings_quarter': earnings_quarter,
-                'kuvic_conclusion': kuvic_journal.get('conclusion') if kuvic_journal else None,
-                'kuvic_priority': kuvic_journal.get('priority') if kuvic_journal else None,
+                'review_conclusion': review_journal.get('conclusion') if review_journal else None,
+                'review_priority': review_journal.get('priority') if review_journal else None,
                 'reflection_label': pf.get('reflection_label'),
             },
             'errors': errors,
@@ -14610,7 +14610,7 @@ def api_verification_composite(code):
 
 
 # ============================================================
-# Step 4-5-6: 자동 vs KUVIC Split View — 갭 분석 API
+# Step 4-5-6: 자동 vs 검토 Split View — 갭 분석 API
 # ============================================================
 
 # 임계값 (Q5 = A: ±10% / ±25%)
@@ -14628,7 +14628,7 @@ def _gap_severity(pct: float) -> str:
 
 
 def _gap_direction(diff_pct: float, label: str = 'TP') -> str:
-    """gap_pct (KUVIC - auto) / auto * 100 기준."""
+    """gap_pct (검토 - auto) / auto * 100 기준."""
     if diff_pct is None:
         return '데이터 부족'
     if diff_pct < -3:
@@ -14638,7 +14638,7 @@ def _gap_direction(diff_pct: float, label: str = 'TP') -> str:
     return '대체로 일치'
 
 
-# 자동 반영도 × KUVIC 결론 일치성 매트릭스
+# 자동 반영도 × 검토 결론 일치성 매트릭스
 _REFL_CONCL_CONFLICTS = {
     ('과열', 'BUY'):    '시장은 과열로 보지만 분석가는 BUY — 갭 큼',
     ('과열', 'WATCH'):  '시장은 과열, 분석가는 관망 — 부분 일치',
@@ -14670,19 +14670,19 @@ def _check_reflection_conclusion(reflection: str, conclusion: str):
     return ('partial', f'반영도 "{reflection}" + 결론 "{conclusion}" 명확한 룰 없음')
 
 
-def _build_gap_for_tp(scenario: str, auto_tp, kuvic_tp):
+def _build_gap_for_tp(scenario: str, auto_tp, review_tp):
     """단일 시나리오 TP 갭. auto_tp 가 0 또는 None 이면 None 반환."""
-    if auto_tp is None or kuvic_tp is None:
+    if auto_tp is None or review_tp is None:
         return None
     if not auto_tp:
         return None
-    diff_abs = kuvic_tp - auto_tp
+    diff_abs = review_tp - auto_tp
     diff_pct = round(diff_abs / auto_tp * 100, 1)
     sev = _gap_severity(diff_pct)
     return {
         'metric': f'{scenario}_tp',
         'auto': auto_tp,
-        'kuvic': kuvic_tp,
+        'review': review_tp,
         'diff_abs': round(diff_abs, 0),
         'diff_pct': diff_pct,
         'severity': sev,
@@ -14692,13 +14692,13 @@ def _build_gap_for_tp(scenario: str, auto_tp, kuvic_tp):
 
 @app.route('/api/verification/<code>/gap-analysis', methods=['GET'])
 def api_verification_gap_analysis(code):
-    """자동 vs KUVIC 갭 분석.
+    """자동 vs 검토 갭 분석.
     Returns:
       { code, name, current_price,
         auto:   {base_tp, bear_tp, bull_tp, reflection_label, reasons},
-        kuvic:  {base_tp, bear_tp, bull_tp, conclusion, priority,
+        review:  {base_tp, bear_tp, bull_tp, conclusion, priority,
                  thesis, journal_id, updated_at} | null,
-        gaps:   [ {metric, auto, kuvic, diff_abs, diff_pct, severity, direction}, ... ],
+        gaps:   [ {metric, auto, review, diff_abs, diff_pct, severity, direction}, ... ],
         consistency: {label, message} | null,
         action: {stars, label, rationale, checklist[]},
         errors: [...] }
@@ -14737,14 +14737,14 @@ def api_verification_gap_analysis(code):
     auto['reflection_reasons'] = auto_class.get('reasons', [])
     auto['reflection_auto'] = auto_class.get('label')  # 검증 시트 전용 분류
 
-    # 2) KUVIC — 최신 일지
-    kuvic = None
+    # 2) 검토 — 최신 일지
+    review = None
     try:
         from analysis_journal_api import list_journals_by_stock
         journals = list_journals_by_stock(code, 1) or []
         if journals:
             j = journals[0]
-            kuvic = {
+            review = {
                 'journal_id': j.get('id'),
                 'analyst': j.get('analyst'),
                 'analysis_date': j.get('analysis_date'),
@@ -14763,25 +14763,25 @@ def api_verification_gap_analysis(code):
 
     # 3) TP 갭 (3 시나리오)
     gaps: list = []
-    if kuvic:
+    if review:
         for sc in ('bear', 'base', 'bull'):
-            g = _build_gap_for_tp(sc, auto.get(f'{sc}_tp'), kuvic.get(f'{sc}_tp'))
+            g = _build_gap_for_tp(sc, auto.get(f'{sc}_tp'), review.get(f'{sc}_tp'))
             if g:
                 gaps.append(g)
 
     # 4) 반영도 vs 결론 일치성
     consistency = None
-    if kuvic:
+    if review:
         result = _check_reflection_conclusion(
             auto.get('reflection_auto') or auto.get('reflection_label'),
-            kuvic.get('conclusion'),
+            review.get('conclusion'),
         )
         if result:
             consistency = {
                 'label': result[0],   # match / partial / conflict
                 'message': result[1],
                 'auto_reflection': auto.get('reflection_auto') or auto.get('reflection_label'),
-                'kuvic_conclusion': kuvic.get('conclusion'),
+                'review_conclusion': review.get('conclusion'),
             }
 
     # 5) 추천 액션 (Q4=A: 별점 + 한 줄)
@@ -14789,21 +14789,21 @@ def api_verification_gap_analysis(code):
     med_count = sum(1 for g in gaps if g['severity'] == 'medium')
     conflict = consistency and consistency['label'] == 'conflict'
 
-    if not kuvic:
+    if not review:
         action = {
             'stars': '—',
-            'label': 'KUVIC 일지 없음',
+            'label': '검토 일지 없음',
             'rationale': '자동 산출만 사용 가능',
-            'checklist': ['KUVIC 분석 일지 작성 (Step 3 / TP / 결론)'],
+            'checklist': ['검토 분석 일지 작성 (Step 3 / TP / 결론)'],
         }
     elif high_count >= 2 or (high_count >= 1 and conflict):
         action = {
             'stars': '★★★',
             'label': '재검토 필요',
-            'rationale': '자동과 KUVIC 판단이 크게 다름',
+            'rationale': '자동과 검토 판단이 크게 다름',
             'checklist': [
                 '자동 TAM 가정 검토 (PER 백분위 적정성)',
-                'KUVIC thesis 재확인 — 최근 컨센서스 변화 반영했는지',
+                '검토 thesis 재확인 — 최근 컨센서스 변화 반영했는지',
                 '결론(BUY/HOLD/SELL/WATCH) 재고',
             ],
         }
@@ -14814,7 +14814,7 @@ def api_verification_gap_analysis(code):
             'rationale': '일부 시나리오에서 차이 큼',
             'checklist': [
                 'Bull/Bear 시나리오 가정 검토',
-                '반영도 자동 분류 vs KUVIC 결론 갭 확인',
+                '반영도 자동 분류 vs 검토 결론 갭 확인',
             ],
         }
     elif med_count >= 1 or conflict:
@@ -14828,7 +14828,7 @@ def api_verification_gap_analysis(code):
         action = {
             'stars': '✓',
             'label': '정상',
-            'rationale': '자동과 KUVIC 판단이 잘 일치',
+            'rationale': '자동과 검토 판단이 잘 일치',
             'checklist': [],
         }
 
@@ -14837,7 +14837,7 @@ def api_verification_gap_analysis(code):
         'name': auto.get('name'),
         'current_price': auto.get('current_price'),
         'auto': auto,
-        'kuvic': kuvic,
+        'review': review,
         'gaps': gaps,
         'consistency': consistency,
         'action': action,

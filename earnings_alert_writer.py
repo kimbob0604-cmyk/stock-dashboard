@@ -4,7 +4,7 @@ Step 4-7-D-5: LLM 알림 메시지 작성기
 기능:
 - earnings_surprise (priority 1~3) → 텔레그램 본문 자동 생성
 - qwen3:14b 사용 (한국어 학습 강도 높음)
-- KUVIC 세션 thesis 통합 (kuvic_validator.KUVIC_SESSION_ANALYSIS)
+- 검토 세션 thesis 통합 (review_validator.REVIEW_SESSION_ANALYSIS)
 - llm_cache.db로 캐시 (영구, hit_count 추적)
 - LLM 실패 시 템플릿 기반 FALLBACK
 
@@ -173,13 +173,13 @@ def fetch_context(stock_code: str, year: int, quarter: int) -> Dict:
 
     conn.close()
 
-    # KUVIC thesis (있으면)
-    kuvic_thesis = None
+    # 검토 thesis (있으면)
+    review_thesis = None
     try:
-        from kuvic_validator import KUVIC_SESSION_ANALYSIS
-        if stock_code in KUVIC_SESSION_ANALYSIS:
-            k = KUVIC_SESSION_ANALYSIS[stock_code]
-            kuvic_thesis = {
+        from review_validator import REVIEW_SESSION_ANALYSIS
+        if stock_code in REVIEW_SESSION_ANALYSIS:
+            k = REVIEW_SESSION_ANALYSIS[stock_code]
+            review_thesis = {
                 'thesis': k.get('thesis'),
                 'tags': k.get('tags', []),
                 'segment': k.get('segment'),
@@ -218,7 +218,7 @@ def fetch_context(stock_code: str, year: int, quarter: int) -> Dict:
         'current_price': current_price,
         'prev_yoy_revenue': prev_yoy['revenue'] if prev_yoy else None,
         'prev_yoy_op': prev_yoy['operating_profit'] if prev_yoy else None,
-        'kuvic_thesis': kuvic_thesis,
+        'review_thesis': review_thesis,
         'segments': segments,
     }
 
@@ -242,12 +242,12 @@ def build_prompt(ctx: Dict) -> str:
     rev_c_str = f"{rev_c_eok:,.0f}억" if rev_c_eok is not None else '컨센 없음'
     op_c_str = f"{op_c_eok:,.0f}억" if op_c_eok is not None else '컨센 없음'
 
-    kuvic_section = ''
-    if ctx.get('kuvic_thesis'):
-        kt = ctx['kuvic_thesis']
+    review_section = ''
+    if ctx.get('review_thesis'):
+        kt = ctx['review_thesis']
         tags = ' '.join(f"#{t}" for t in (kt.get('tags') or [])[:4])
-        kuvic_section = f"""
-[KUVIC 분석가 thesis]
+        review_section = f"""
+[검토 분석가 thesis]
 - 세그먼트: {kt.get('segment','')}
 - 태그: {tags}
 - 논리: {kt.get('thesis','')}
@@ -272,13 +272,13 @@ def build_prompt(ctx: Dict) -> str:
 
 [밸류체인]
 {segments_str}
-{kuvic_section}
+{review_section}
 [작성 규칙]
 1. 한국어 5~8줄 (HTML 태그 X, 마크다운 X, 일반 텍스트만).
 2. 제목 1줄 (이모지 1개 + 종목명 + 시그널)
 3. 핵심 숫자 1줄 (매출/영업익 갭 %)
 4. 의미 해석 2~3줄 (왜 BEAT/MISS? 단순 숫자가 아닌 사업 맥락)
-5. KUVIC thesis 있으면 한 줄로 연계
+5. 검토 thesis 있으면 한 줄로 연계
 6. 마지막에 액션 힌트 (관찰/매수 검토/주의)
 
 [톤]
@@ -319,9 +319,9 @@ def build_fallback(ctx: Dict) -> str:
         f"매출 {rev_a_eok:,.0f}억 ({rev_pct_s}) / 영업익 {op_a_eok:,.0f}억 ({op_pct_s})",
         ctx['note'],
     ]
-    if ctx.get('kuvic_thesis'):
-        kt = ctx['kuvic_thesis']
-        lines.append(f"KUVIC thesis: {kt.get('thesis', '')[:80]}")
+    if ctx.get('review_thesis'):
+        kt = ctx['review_thesis']
+        lines.append(f"검토 thesis: {kt.get('thesis', '')[:80]}")
     return '\n'.join(lines)
 
 

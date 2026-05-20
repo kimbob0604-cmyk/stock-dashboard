@@ -6983,7 +6983,7 @@ function renderVerificationSearchView(container) {
   container.innerHTML = `
     <div class="page-header">
       <h2>✅ 검증 시트</h2>
-      <p class="page-desc">KUVIC 5단계 분석 + 자동 데이터 통합</p>
+      <p class="page-desc">검토 5단계 분석 + 자동 데이터 통합</p>
     </div>
     <div class="verif-search-container">
       <div class="verif-search-icon">🔍</div>
@@ -7192,11 +7192,11 @@ function _verifRenderStockCard(container, data, prefill) {
           ${prefill ? _verifRenderStep5(prefill.step5) : _verifStepLoadingRow('STEP 5', '주가 검증')}
         </div>
 
-        <!-- 4-5-6: 자동 vs KUVIC Split View -->
+        <!-- 4-5-6: 자동 vs 검토 Split View -->
         <div id="verif-split-wrap"></div>
 
-        <!-- 4-5-5: KUVIC 수동 입력 폼 -->
-        <div id="verif-kuvic-form-wrap"></div>
+        <!-- 4-5-5: 검토 수동 입력 폼 -->
+        <div id="verif-review-form-wrap"></div>
       </div>
 
       <!-- 4-5-7: 우측 sticky 종합 패널 -->
@@ -7209,7 +7209,7 @@ function _verifRenderStockCard(container, data, prefill) {
 
   // 4-5-6 Split View + 4-5-5 폼 + 4-5-7 종합 패널 비동기 로드
   _verifSetupSplitView(data.code);
-  _verifSetupKuvicForm(data.code);
+  _verifSetupReviewForm(data.code);
   _verifSetupComposite(data.code);
 }
 
@@ -7288,22 +7288,22 @@ function _verifRenderComposite(wrap, data) {
   const techHint = ctx.position_pct != null
     ? `52주 ${ctx.position_pct.toFixed(0)}% 위치` : '데이터 없음';
 
-  // KUVIC 줄
-  let kuvicRow;
-  if (bd.has_kuvic) {
-    kuvicRow = `
+  // 검토 줄
+  let reviewRow;
+  if (bd.has_review) {
+    reviewRow = `
       <div class="vc-bar-row">
-        <span class="vc-bar-label">KUVIC</span>
+        <span class="vc-bar-label">검토</span>
         <div class="vc-bar-track">
-          <div class="vc-bar-fill vc-bar-kuvic" style="width:${Math.max(0, Math.min(100, bd.kuvic || 0))}%"></div>
+          <div class="vc-bar-fill vc-bar-review" style="width:${Math.max(0, Math.min(100, bd.review || 0))}%"></div>
         </div>
-        <span class="vc-bar-val">${bd.kuvic}/100</span>
-        <span class="vc-bar-hint">${_phEsc(ctx.kuvic_conclusion || '—')} ${_phEsc(ctx.kuvic_priority || '')}</span>
+        <span class="vc-bar-val">${bd.review}/100</span>
+        <span class="vc-bar-hint">${_phEsc(ctx.review_conclusion || '—')} ${_phEsc(ctx.review_priority || '')}</span>
       </div>`;
   } else {
-    kuvicRow = `
+    reviewRow = `
       <div class="vc-bar-row vc-bar-row-warn">
-        <span class="vc-bar-label">KUVIC</span>
+        <span class="vc-bar-label">검토</span>
         <span class="vc-bar-warn">⚠️ 일지 없음 — auto만 사용</span>
       </div>`;
   }
@@ -7368,7 +7368,7 @@ function _verifRenderComposite(wrap, data) {
             ${compRow('  Earnings', acomp.earnings, earnHint)}
             ${compRow('  Technical', acomp.technical, techHint)}
           </div>
-          ${kuvicRow}
+          ${reviewRow}
           ${gapRow}
         </div>
 
@@ -7411,7 +7411,7 @@ function _verifRenderComposite(wrap, data) {
 }
 
 // ============================================================
-// 4-5-6: 자동 vs KUVIC Split View
+// 4-5-6: 자동 vs 검토 Split View
 // ============================================================
 
 async function _verifSetupSplitView(code) {
@@ -7431,7 +7431,7 @@ async function _verifSetupSplitView(code) {
 }
 
 function _verifRefreshSplitView() {
-  // 4-5-5 폼이 저장 후 호출 — 최신 KUVIC 반영
+  // 4-5-5 폼이 저장 후 호출 — 최신 검토 반영
   if (_verifFormState && _verifFormState.code) {
     _verifSetupSplitView(_verifFormState.code);
   }
@@ -7461,7 +7461,7 @@ function _verifGapPctBadge(pct) {
 
 function _verifRenderSplitView(wrap, data) {
   const auto = data.auto || {};
-  const ku = data.kuvic;
+  const ku = data.review;
   const gaps = data.gaps || [];
   const consistency = data.consistency;
   const action = data.action || {};
@@ -7471,12 +7471,12 @@ function _verifRenderSplitView(wrap, data) {
     '미반영': '🔥', '부분반영': '🟡', '반영완료': '⚪', '과열': '🔴',
   })[auto.reflection_auto || auto.reflection_label] || '⚪';
 
-  // KUVIC 칸
-  const kuvicCol = ku ? `
-    <div class="vsv-card vsv-card-kuvic">
+  // 검토 칸
+  const reviewCol = ku ? `
+    <div class="vsv-card vsv-card-review">
       <div class="vsv-card-head">
         <span class="vsv-card-icon">📝</span>
-        <span class="vsv-card-title">KUVIC 분석</span>
+        <span class="vsv-card-title">검토 분석</span>
         <span class="vsv-card-meta">${_phEsc(ku.analyst || '—')} · ${_phEsc(ku.analysis_date || '')}</span>
       </div>
       <div class="vsv-card-body">
@@ -7485,7 +7485,7 @@ function _verifRenderSplitView(wrap, data) {
           <span class="vsv-v vsv-tp-main">${ku.base_tp != null ? _verifFmtNum(ku.base_tp) + '원' : '—'}</span>
         </div>
         <div class="vsv-kv">
-          <span class="vsv-k">KUVIC 결론</span>
+          <span class="vsv-k">검토 결론</span>
           <span class="vsv-v">
             <span class="vsv-concl">${_phEsc(ku.conclusion || '—')}</span>
             <span class="vsv-priority">${_phEsc(ku.priority || '')}</span>
@@ -7494,9 +7494,9 @@ function _verifRenderSplitView(wrap, data) {
         <div class="vsv-kv">
           <span class="vsv-k">Bear / Base / Bull</span>
           <span class="vsv-v vsv-tp-row">
-            ${_verifTpCell(ku.bear_tp, 'kuvic')} /
-            ${_verifTpCell(ku.base_tp, 'kuvic')} /
-            ${_verifTpCell(ku.bull_tp, 'kuvic')}
+            ${_verifTpCell(ku.bear_tp, 'review')} /
+            ${_verifTpCell(ku.base_tp, 'review')} /
+            ${_verifTpCell(ku.bull_tp, 'review')}
           </span>
         </div>
         ${ku.thesis ? `
@@ -7506,10 +7506,10 @@ function _verifRenderSplitView(wrap, data) {
     <div class="vsv-card vsv-card-empty">
       <div class="vsv-card-head">
         <span class="vsv-card-icon">📝</span>
-        <span class="vsv-card-title">KUVIC 분석</span>
+        <span class="vsv-card-title">검토 분석</span>
       </div>
       <div class="vsv-empty-body">
-        KUVIC 일지 없음 — 아래 입력 폼에서 작성하면 비교가 활성화됩니다.
+        검토 일지 없음 — 아래 입력 폼에서 작성하면 비교가 활성화됩니다.
       </div>
     </div>`;
 
@@ -7553,14 +7553,14 @@ function _verifRenderSplitView(wrap, data) {
   if (!ku) {
     gapPanel = `
       <div class="vsv-gap-panel vsv-gap-empty">
-        ⏳ KUVIC 일지 없음 — 비교 분석 불가
+        ⏳ 검토 일지 없음 — 비교 분석 불가
       </div>`;
   } else {
     // 갭 행
     const gapRows = gaps.map(g => `
       <div class="vsv-gap-row vsv-sev-row-${g.severity}">
         <span class="vsv-gap-metric">${_phEsc(({bear_tp:'Bear', base_tp:'Base', bull_tp:'Bull'})[g.metric] || g.metric)}</span>
-        <span class="vsv-gap-vs">${_verifFmtNum(g.auto)} → ${_verifFmtNum(g.kuvic)}</span>
+        <span class="vsv-gap-vs">${_verifFmtNum(g.auto)} → ${_verifFmtNum(g.review)}</span>
         <span class="vsv-gap-diff">${_verifGapPctBadge(g.diff_pct)}</span>
         <span class="vsv-gap-sev">${_verifSeverityBadge(g.severity)}</span>
         <span class="vsv-gap-dir">${_phEsc(g.direction)}</span>
@@ -7577,7 +7577,7 @@ function _verifRenderSplitView(wrap, data) {
       consHtml = `
         <div class="vsv-consistency ${consCls}">
           <span class="vsv-cons-icon">${consIcon}</span>
-          <span class="vsv-cons-label">${_phEsc(consistency.auto_reflection || '—')} ↔ ${_phEsc(consistency.kuvic_conclusion || '—')}</span>
+          <span class="vsv-cons-label">${_phEsc(consistency.auto_reflection || '—')} ↔ ${_phEsc(consistency.review_conclusion || '—')}</span>
           <span class="vsv-cons-msg">${_phEsc(consistency.message || '')}</span>
         </div>`;
     }
@@ -7615,10 +7615,10 @@ function _verifRenderSplitView(wrap, data) {
 
   wrap.innerHTML = `
     <div class="vsv-section">
-      <h3 class="vsv-section-title">⚖️ 자동 vs KUVIC 비교</h3>
+      <h3 class="vsv-section-title">⚖️ 자동 vs 검토 비교</h3>
       <div class="vsv-grid">
         ${autoCol}
-        ${kuvicCol}
+        ${reviewCol}
       </div>
       ${gapPanel}
     </div>`;
@@ -7701,13 +7701,13 @@ function _verifEarnPill(e) {
     </div>`;
 }
 
-// STEP 1: 밸류체인 유추 (자동 + KUVIC)
+// STEP 1: 밸류체인 유추 (자동 + 검토)
 function _verifRenderStep1(step1) {
   if (!step1) return '';
   const vc = step1.valuechain || {};
-  const ku = step1.kuvic_analysis;
-  const hasKuvic = !!ku;
-  const mode = hasKuvic ? 'mixed' : 'auto';
+  const ku = step1.review_analysis;
+  const hasReview = !!ku;
+  const mode = hasReview ? 'mixed' : 'auto';
 
   const segments = (vc.segments || []);
   let vcHtml = '';
@@ -7725,26 +7725,26 @@ function _verifRenderStep1(step1) {
     vcHtml = '<div class="verif-vc-empty">매핑된 segment 없음</div>';
   }
 
-  let kuvicHtml = '';
-  if (hasKuvic) {
+  let reviewHtml = '';
+  if (hasReview) {
     const tags = (ku.tags || []).map(t => `<span class="verif-tag">${_phEsc(t)}</span>`).join('');
-    kuvicHtml = `
-      <div class="verif-kuvic-block">
-        <div class="verif-kuvic-thesis">${_phEsc(ku.thesis || '')}</div>
-        <div class="verif-kuvic-meta">
-          ${ku.conclusion ? `<span class="verif-kuvic-tag">결론 ${_phEsc(ku.conclusion)}</span>` : ''}
-          ${ku.priority ? `<span class="verif-kuvic-tag">${_phEsc(ku.priority)}</span>` : ''}
-          ${ku.session_date ? `<span class="verif-kuvic-date">${_phEsc(ku.session_date)}</span>` : ''}
+    reviewHtml = `
+      <div class="verif-review-block">
+        <div class="verif-review-thesis">${_phEsc(ku.thesis || '')}</div>
+        <div class="verif-review-meta">
+          ${ku.conclusion ? `<span class="verif-review-tag">결론 ${_phEsc(ku.conclusion)}</span>` : ''}
+          ${ku.priority ? `<span class="verif-review-tag">${_phEsc(ku.priority)}</span>` : ''}
+          ${ku.session_date ? `<span class="verif-review-date">${_phEsc(ku.session_date)}</span>` : ''}
         </div>
         ${tags ? `<div class="verif-tags">${tags}</div>` : ''}
         <div class="verif-step-srcline">
-          ${_verifSrcLine('KUVIC 일지', ku.freshness)}
+          ${_verifSrcLine('검토 일지', ku.freshness)}
         </div>
       </div>`;
   } else {
-    kuvicHtml = `
-      <div class="verif-kuvic-empty">
-        📝 KUVIC 분석 일지 없음 — Phase 4-5-9 에서 추가 입력 가능
+    reviewHtml = `
+      <div class="verif-review-empty">
+        📝 검토 분석 일지 없음 — Phase 4-5-9 에서 추가 입력 가능
       </div>`;
   }
 
@@ -7762,8 +7762,8 @@ function _verifRenderStep1(step1) {
           ${_verifSrcLine('valuechain_map', vc.freshness)}
         </div>
         <div class="verif-step-divider"></div>
-        <div class="verif-step-subtitle">📝 KUVIC 분석</div>
-        ${kuvicHtml}
+        <div class="verif-step-subtitle">📝 검토 분석</div>
+        ${reviewHtml}
       </div>
     </div>`;
 }
@@ -7884,7 +7884,7 @@ function _verifRenderStep3() {
       </div>
       <div class="verif-step-body">
         <div class="verif-step-placeholder">
-          ⏳ Phase 4-5-5 에서 KUVIC 수동 입력 폼 추가
+          ⏳ Phase 4-5-5 에서 검토 수동 입력 폼 추가
           <div class="verif-step-placeholder-hint">동종 기업, 비교 포인트, 차별화 요소</div>
         </div>
       </div>
@@ -7968,7 +7968,7 @@ function _verifRenderStep5(step5) {
   const pos = step5.price_position;
   const ret = step5.returns || {};
   const refl = step5.reflection || {};
-  const km = step5.kuvic_match;
+  const km = step5.review_match;
 
   // 52주 슬라이더 (text 기반)
   let sliderHtml = '<div class="verif-empty">52주 데이터 없음</div>';
@@ -8019,25 +8019,25 @@ function _verifRenderStep5(step5) {
   })[refl.auto_label] || '⚪';
   const reasonsHtml = (refl.reasons || []).map(r => `<li>${_phEsc(r)}</li>`).join('');
 
-  // KUVIC 비교
+  // 검토 비교
   let kmHtml = '';
   if (km && km.auto_label) {
-    const matches = (km.kuvic_conclusion === 'BUY' && (km.auto_label === '미반영' || km.auto_label === '부분반영'))
-                 || (km.kuvic_conclusion === 'SELL' && (km.auto_label === '반영완료' || km.auto_label === '과열'))
-                 || (km.kuvic_conclusion === 'HOLD' && km.auto_label === '부분반영');
+    const matches = (km.review_conclusion === 'BUY' && (km.auto_label === '미반영' || km.auto_label === '부분반영'))
+                 || (km.review_conclusion === 'SELL' && (km.auto_label === '반영완료' || km.auto_label === '과열'))
+                 || (km.review_conclusion === 'HOLD' && km.auto_label === '부분반영');
     kmHtml = `
       <div class="verif-step-divider"></div>
-      <div class="verif-step-subtitle">🤝 KUVIC 비교</div>
-      <div class="verif-kuvic-match ${matches ? 'verif-match-ok' : 'verif-match-gap'}">
-        <div class="verif-kuvic-match-row">
+      <div class="verif-step-subtitle">🤝 검토 비교</div>
+      <div class="verif-review-match ${matches ? 'verif-match-ok' : 'verif-match-gap'}">
+        <div class="verif-review-match-row">
           <span class="verif-k">자동 라벨</span>
           <span class="verif-v">${reflIcon} ${_phEsc(km.auto_label)}</span>
         </div>
-        <div class="verif-kuvic-match-row">
-          <span class="verif-k">KUVIC 결론</span>
-          <span class="verif-v">${_phEsc(km.kuvic_conclusion || '—')}</span>
+        <div class="verif-review-match-row">
+          <span class="verif-k">검토 결론</span>
+          <span class="verif-v">${_phEsc(km.review_conclusion || '—')}</span>
         </div>
-        <div class="verif-kuvic-match-row">
+        <div class="verif-review-match-row">
           <span class="verif-k">일치 여부</span>
           <span class="verif-v">${matches ? '✅ 일치' : '⚠️ 불일치 — 재검토'}</span>
         </div>
@@ -8070,7 +8070,7 @@ function _verifRenderStep5(step5) {
 }
 
 // ============================================================
-// 4-5-5: KUVIC 수동 입력 폼 (Step 3 + KUVIC TP + 메모 + 결론 + 태그)
+// 4-5-5: 검토 수동 입력 폼 (Step 3 + 검토 TP + 메모 + 결론 + 태그)
 // ============================================================
 
 // 폼 상태 — closure / 모듈 전역으로 단일 활성 폼만 관리
@@ -8120,8 +8120,8 @@ function _verifSafeArr(tags) {
   return [];
 }
 
-async function _verifSetupKuvicForm(code) {
-  const wrap = document.getElementById('verif-kuvic-form-wrap');
+async function _verifSetupReviewForm(code) {
+  const wrap = document.getElementById('verif-review-form-wrap');
   if (!wrap) return;
   // 이전 폼 cleanup
   _verifCleanupForm();
@@ -8139,7 +8139,7 @@ async function _verifSetupKuvicForm(code) {
   }
 
   // 2) 폼 렌더 (journal 데이터로 prefill)
-  _verifRenderKuvicForm(wrap, code, journal);
+  _verifRenderReviewForm(wrap, code, journal);
 
   // 3) 상태 초기화
   _verifFormState = {
@@ -8157,7 +8157,7 @@ async function _verifSetupKuvicForm(code) {
   _verifSetupUnsavedWarning();
 }
 
-function _verifRenderKuvicForm(wrap, code, j) {
+function _verifRenderReviewForm(wrap, code, j) {
   j = j || {};
   const peers = _verifParsePeers(j.step3_peers_text);
   const tags = _verifSafeArr(j.tags);
@@ -8174,7 +8174,7 @@ function _verifRenderKuvicForm(wrap, code, j) {
     <div class="verif-form-card">
       <div class="verif-form-head">
         <span class="verif-form-icon">🖌</span>
-        <span class="verif-form-title">KUVIC 분석 입력</span>
+        <span class="verif-form-title">검토 분석 입력</span>
         <span class="verif-form-status" id="verif-form-status">
           ${j.id ? `편집 모드 · id ${j.id}` : '신규 작성 모드'}
         </span>
@@ -8214,9 +8214,9 @@ function _verifRenderKuvicForm(wrap, code, j) {
           </div>
         </div>
 
-        <!-- KUVIC TP -->
+        <!-- 검토 TP -->
         <div class="verif-form-section">
-          <div class="verif-form-sect-title">KUVIC 목표가 (Bear / Base / Bull)</div>
+          <div class="verif-form-sect-title">검토 목표가 (Bear / Base / Bull)</div>
           <div class="verif-form-tp-grid">
             <div>
               <label class="verif-form-label">Bear</label>
@@ -8245,7 +8245,7 @@ function _verifRenderKuvicForm(wrap, code, j) {
         <div class="verif-form-section">
           <div class="verif-form-sect-title">운영자 메모</div>
           <textarea class="verif-form-textarea verif-form-memo" id="vf-memo" rows="5"
-                    placeholder="정량으로 설명 안 되는 배경, KUVIC 회의 메모, 산업 노트 등">${_phEsc(_v(j.memo))}</textarea>
+                    placeholder="정량으로 설명 안 되는 배경, 검토 회의 메모, 산업 노트 등">${_phEsc(_v(j.memo))}</textarea>
         </div>
 
         <!-- 최종 판단 -->
@@ -8280,7 +8280,7 @@ function _verifRenderKuvicForm(wrap, code, j) {
         <!-- 액션 -->
         <div class="verif-form-actions">
           <button type="button" class="verif-btn verif-btn-primary" id="vf-save">💾 저장</button>
-          <button type="button" class="verif-btn" id="vf-import-kuvic">📥 KUVIC 임포트</button>
+          <button type="button" class="verif-btn" id="vf-import-review">📥 검토 임포트</button>
           <button type="button" class="verif-btn verif-btn-ghost" id="vf-cancel">❌ 취소</button>
           <span class="verif-form-savemark" id="verif-form-savemark"></span>
         </div>
@@ -8293,7 +8293,7 @@ function _verifRenderKuvicForm(wrap, code, j) {
 }
 
 function _verifBindFormEvents() {
-  const wrap = document.getElementById('verif-kuvic-form-wrap');
+  const wrap = document.getElementById('verif-review-form-wrap');
   if (!wrap) return;
 
   // 모든 input/textarea — dirty mark + 자동저장 디바운스
@@ -8316,9 +8316,9 @@ function _verifBindFormEvents() {
   const saveBtn = document.getElementById('vf-save');
   if (saveBtn) saveBtn.addEventListener('click', () => _verifSaveJournal({ verbose: true }));
 
-  // KUVIC 임포트
-  const importBtn = document.getElementById('vf-import-kuvic');
-  if (importBtn) importBtn.addEventListener('click', _verifImportKuvic);
+  // 검토 임포트
+  const importBtn = document.getElementById('vf-import-review');
+  if (importBtn) importBtn.addEventListener('click', _verifImportReview);
 
   // 취소
   const cancelBtn = document.getElementById('vf-cancel');
@@ -8430,11 +8430,11 @@ async function _verifSaveJournal(opts) {
   }
 }
 
-async function _verifImportKuvic() {
+async function _verifImportReview() {
   if (!_verifFormState) return;
-  if (!confirm('KUVIC 세션 분석을 DB로 일괄 임포트합니다. 진행할까요?')) return;
+  if (!confirm('검토 세션 분석을 DB로 일괄 임포트합니다. 진행할까요?')) return;
   try {
-    const r = await fetch('/api/journal/import-kuvic', {
+    const r = await fetch('/api/journal/import-review', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skip_duplicates: true }),
@@ -8446,7 +8446,7 @@ async function _verifImportKuvic() {
       'success',
     );
     // 폼 재로드
-    setTimeout(() => _verifSetupKuvicForm(_verifFormState.code), 500);
+    setTimeout(() => _verifSetupReviewForm(_verifFormState.code), 500);
   } catch (e) {
     _verifShowToast(`임포트 실패: ${e.message}`, 'error');
   }
@@ -8459,7 +8459,7 @@ function _verifCancel() {
     return;
   }
   // 최신 일지로 재로드 (취소 = 마지막 저장 상태로)
-  _verifSetupKuvicForm(_verifFormState.code);
+  _verifSetupReviewForm(_verifFormState.code);
 }
 
 function _verifShowToast(text, kind) {
@@ -8545,7 +8545,7 @@ function renderJournalPlaceholder(params) {
   c.innerHTML = `
     <div class="page-header">
       <h2>📓 분석 일지</h2>
-      <p class="page-desc">analysis_journal CRUD — KUVIC 분석 보관/검색</p>
+      <p class="page-desc">analysis_journal CRUD — 검토 분석 보관/검색</p>
     </div>
     ${idBanner}
     <div class="placeholder-card">

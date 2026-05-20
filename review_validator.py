@@ -1,10 +1,10 @@
 """
-KUVIC 세션 수동 분석 vs Step 4-3-C 자동 산출 비교
+검토 세션 수동 분석 vs Step 4-3-C 자동 산출 비교
 Step 4-3-D — 검증 도구
 
 용도:
 1. 자동 산출 시스템 정확도 검증
-2. 컨센서스 보수성 vs KUVIC 적극성 갭 자동 표시
+2. 컨센서스 보수성 vs 검토 적극성 갭 자동 표시
 3. Step 2.5 제약사항 4개 해결 검증
 """
 
@@ -17,10 +17,10 @@ DB_PATH = Path(__file__).parent / 'db' / 'dashboard.db'
 
 
 # ============================================================
-# KUVIC 세션 수동 분석
+# 검토 세션 수동 분석
 # ============================================================
 
-KUVIC_SESSION_ANALYSIS = {
+REVIEW_SESSION_ANALYSIS = {
     '007660': {
         'name': '이수페타시스',
         'session_date': '2026-04-26',
@@ -52,7 +52,7 @@ KUVIC_SESSION_ANALYSIS = {
         'thesis': '765kV 초고압 변압기 글로벌 병목 — cycle 정점 우려',
         'tags': ['병목', 'AI데이터센터', '리드타임', '정점우려'],
         'conclusion': 'HOLD',
-        'note': 'KUVIC 세션 TP 미정 (cycle 정점 확인 필요)',
+        'note': '검토 세션 TP 미정 (cycle 정점 확인 필요)',
         'priority': '★★',
     },
     '403870': {
@@ -62,7 +62,7 @@ KUVIC_SESSION_ANALYSIS = {
         'thesis': 'HPA 장비 단독 양산, OPM 57% — 진입장벽 5~7년',
         'tags': ['미반영', '독점', '진입장벽', '신규진입불가'],
         'conclusion': 'BUY',
-        'note': 'KUVIC 세션 TP 미정 (Upside 24.5%, 대신증권)',
+        'note': '검토 세션 TP 미정 (Upside 24.5%, 대신증권)',
         'priority': '★★★',
     },
     '017960': {
@@ -97,14 +97,14 @@ def _get_db():
 
 
 # ============================================================
-# 1. KUVIC vs 자동 산출 비교
+# 1. 검토 vs 자동 산출 비교
 # ============================================================
 
-def compare_kuvic_vs_auto(stock_code: str) -> Dict:
-    if stock_code not in KUVIC_SESSION_ANALYSIS:
-        return {'error': f'KUVIC 세션 분석 없음: {stock_code}'}
+def compare_review_vs_auto(stock_code: str) -> Dict:
+    if stock_code not in REVIEW_SESSION_ANALYSIS:
+        return {'error': f'검토 세션 분석 없음: {stock_code}'}
 
-    kuvic = KUVIC_SESSION_ANALYSIS[stock_code]
+    review = REVIEW_SESSION_ANALYSIS[stock_code]
 
     try:
         from tam_modeler import build_auto_tam_with_label
@@ -115,9 +115,9 @@ def compare_kuvic_vs_auto(stock_code: str) -> Dict:
     if auto.get('method') == 'INSUFFICIENT_DATA':
         return {
             'stock_code': stock_code,
-            'name': kuvic['name'],
-            'priority': kuvic.get('priority', ''),
-            'kuvic': kuvic,
+            'name': review['name'],
+            'priority': review.get('priority', ''),
+            'review': review,
             'auto_method': 'INSUFFICIENT_DATA',
             'auto_note': auto.get('note'),
         }
@@ -128,20 +128,20 @@ def compare_kuvic_vs_auto(stock_code: str) -> Dict:
     }
 
     for scenario in ('bear', 'base', 'bull'):
-        kuvic_tp = kuvic.get(f'{scenario}_tp')
+        review_tp = review.get(f'{scenario}_tp')
         auto_tp = auto.get(scenario, {}).get('tp')
 
-        if kuvic_tp and auto_tp:
-            gap_abs = auto_tp - kuvic_tp
-            gap_pct = (gap_abs / kuvic_tp) * 100
+        if review_tp and auto_tp:
+            gap_abs = auto_tp - review_tp
+            gap_pct = (gap_abs / review_tp) * 100
             comparison[scenario] = {
-                'kuvic_tp': kuvic_tp,
+                'review_tp': review_tp,
                 'auto_tp': round(auto_tp),
                 'gap_abs': round(gap_abs),
                 'gap_pct': round(gap_pct, 1),
-                'kuvic_eps': kuvic.get(f'{scenario}_eps'),
+                'review_eps': review.get(f'{scenario}_eps'),
                 'auto_eps': auto[scenario].get('eps'),
-                'kuvic_per': kuvic.get(f'{scenario}_per'),
+                'review_per': review.get(f'{scenario}_per'),
                 'auto_per': auto[scenario].get('per'),
                 'auto_eps_source': auto[scenario].get('eps_source'),
                 'auto_per_source': auto[scenario].get('per_source'),
@@ -149,52 +149,52 @@ def compare_kuvic_vs_auto(stock_code: str) -> Dict:
         elif auto_tp:
             comparison[scenario] = {
                 'auto_tp': round(auto_tp),
-                'kuvic_tp': None,
-                'note': 'KUVIC 세션 TP 미정',
+                'review_tp': None,
+                'note': '검토 세션 TP 미정',
             }
 
     return {
         'stock_code': stock_code,
-        'name': kuvic['name'],
-        'priority': kuvic.get('priority', ''),
-        'session_date': kuvic['session_date'],
-        'segment': kuvic['segment'],
-        'thesis': kuvic['thesis'],
-        'tags': kuvic.get('tags', []),
-        'kuvic_conclusion': kuvic.get('conclusion'),
-        'kuvic_note': kuvic.get('note'),
+        'name': review['name'],
+        'priority': review.get('priority', ''),
+        'session_date': review['session_date'],
+        'segment': review['segment'],
+        'thesis': review['thesis'],
+        'tags': review.get('tags', []),
+        'review_conclusion': review.get('conclusion'),
+        'review_note': review.get('note'),
         'comparison': comparison,
         'consensus_tp': auto.get('consensus_tp'),
-        'note': _generate_note(kuvic, auto, comparison),
+        'note': _generate_note(review, auto, comparison),
     }
 
 
-def _generate_note(kuvic: Dict, auto: Dict, comparison: Dict) -> str:
+def _generate_note(review: Dict, auto: Dict, comparison: Dict) -> str:
     notes = []
 
     if 'base' in comparison and 'gap_pct' in comparison['base']:
         gap_pct = comparison['base']['gap_pct']
         if abs(gap_pct) <= 10:
-            notes.append(f"✅ Base TP 자동 산출이 KUVIC과 일치 ({gap_pct:+.1f}%)")
+            notes.append(f"✅ Base TP 자동 산출이 검토과 일치 ({gap_pct:+.1f}%)")
         elif gap_pct < -10:
-            notes.append(f"⚠️ 자동 산출 Base가 KUVIC 대비 보수적 ({gap_pct:+.1f}%) — 컨센서스 미반영")
+            notes.append(f"⚠️ 자동 산출 Base가 검토 대비 보수적 ({gap_pct:+.1f}%) — 컨센서스 미반영")
         elif gap_pct > 10:
-            notes.append(f"⚠️ 자동 산출 Base가 KUVIC 대비 적극적 ({gap_pct:+.1f}%)")
+            notes.append(f"⚠️ 자동 산출 Base가 검토 대비 적극적 ({gap_pct:+.1f}%)")
 
     cons_tp = auto.get('consensus_tp')
-    kuvic_base = kuvic.get('base_tp')
-    if cons_tp and kuvic_base:
-        cons_gap = (kuvic_base - cons_tp) / cons_tp * 100
+    review_base = review.get('base_tp')
+    if cons_tp and review_base:
+        cons_gap = (review_base - cons_tp) / cons_tp * 100
         if cons_gap > 20:
-            notes.append(f"💎 KUVIC 분석이 컨센서스보다 {cons_gap:+.1f}% 적극적")
+            notes.append(f"💎 검토 분석이 컨센서스보다 {cons_gap:+.1f}% 적극적")
         elif cons_gap < -20:
-            notes.append(f"⚠️ KUVIC 분석이 컨센서스보다 {cons_gap:+.1f}% 보수적")
+            notes.append(f"⚠️ 검토 분석이 컨센서스보다 {cons_gap:+.1f}% 보수적")
 
     return ' / '.join(notes) if notes else ''
 
 
-def compare_all_kuvic_stocks():
-    return [compare_kuvic_vs_auto(c) for c in KUVIC_SESSION_ANALYSIS.keys()]
+def compare_all_review_stocks():
+    return [compare_review_vs_auto(c) for c in REVIEW_SESSION_ANALYSIS.keys()]
 
 
 # ============================================================
@@ -202,12 +202,12 @@ def compare_all_kuvic_stocks():
 # ============================================================
 
 def print_comparison_table():
-    results = compare_all_kuvic_stocks()
+    results = compare_all_review_stocks()
 
     print("\n" + "=" * 100)
-    print("KUVIC 세션 분석 vs Step 4-3-C 자동 산출 비교")
+    print("검토 세션 분석 vs Step 4-3-C 자동 산출 비교")
     print("=" * 100)
-    print(f"{'★':<3} {'종목':<14} {'KUVIC Base':>13} {'자동 Base':>13} {'갭':>9} {'컨센서스':>12} {'KUVIC결론':<8}")
+    print(f"{'★':<3} {'종목':<14} {'검토 Base':>13} {'자동 Base':>13} {'갭':>9} {'컨센서스':>12} {'검토결론':<8}")
     print("-" * 100)
 
     for r in results:
@@ -218,7 +218,7 @@ def print_comparison_table():
         priority = r.get('priority', '')[:3]
         comp = r.get('comparison', {})
         cons_tp = r.get('consensus_tp')
-        conclusion = r.get('kuvic_conclusion', '')
+        conclusion = r.get('review_conclusion', '')
 
         if 'base' not in comp:
             method = r.get('auto_method', '?')
@@ -226,12 +226,12 @@ def print_comparison_table():
             continue
 
         base = comp['base']
-        kuvic_str = f"{base['kuvic_tp']:,}" if base.get('kuvic_tp') else 'N/A'
+        review_str = f"{base['review_tp']:,}" if base.get('review_tp') else 'N/A'
         auto_str = f"{base['auto_tp']:,}" if base.get('auto_tp') else 'N/A'
         gap_str = f"{base.get('gap_pct', 0):+.1f}%" if base.get('gap_pct') is not None else '-'
         cons_str = f"{cons_tp:,.0f}" if cons_tp else 'N/A'
 
-        print(f"{priority:<3} {r['name']:<14} {kuvic_str:>13} {auto_str:>13} {gap_str:>9} {cons_str:>12} {conclusion:<8}")
+        print(f"{priority:<3} {r['name']:<14} {review_str:>13} {auto_str:>13} {gap_str:>9} {cons_str:>12} {conclusion:<8}")
 
     print("=" * 100)
 
@@ -301,7 +301,7 @@ def verify_step25_constraints():
 
     print(f"\n[6] 자동 TAM 모델링 (Step 4-3-C 신규)")
     print(f"    Bear/Base/Bull EPS×PER → TP 자동 산출")
-    print(f"    KUVIC 세션 종목 검증: print_comparison_table() 참조")
+    print(f"    검토 세션 종목 검증: print_comparison_table() 참조")
 
     conn.close()
 
@@ -319,10 +319,10 @@ if __name__ == '__main__':
         verify_step25_constraints()
     elif len(sys.argv) > 1:
         code = sys.argv[1]
-        result = compare_kuvic_vs_auto(code)
+        result = compare_review_vs_auto(code)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     else:
         print("Usage:")
-        print("  python3 kuvic_validator.py 007660           # 단일 비교")
-        print("  python3 kuvic_validator.py all              # 전체 비교 + 제약 검증")
-        print("  python3 kuvic_validator.py constraints      # 제약 검증만")
+        print("  python3 review_validator.py 007660           # 단일 비교")
+        print("  python3 review_validator.py all              # 전체 비교 + 제약 검증")
+        print("  python3 review_validator.py constraints      # 제약 검증만")

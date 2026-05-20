@@ -56,6 +56,9 @@ CORE_TABLES = [
     "earnings_actual",          # 실제 발표 (Naver + DART 보정)
     "earnings_surprise",        # 서프라이즈 + 사후 알림
     "earnings_alert_queue",     # 발표 임박 사전 알림 큐
+    # ↓↓ Step 5-1 — 컨센서스 리비전 트래커 ↓↓
+    "consensus_snapshot",       # 컨센서스 시계열 스냅샷
+    "revision_alerts",          # 리비전 시그널 알림 이력
 ]
 
 # 사용자 설정/입력이 들어있는 JSON 캐시 파일도 함께 백업

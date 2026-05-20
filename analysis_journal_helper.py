@@ -199,28 +199,28 @@ def build_prefill_data(stock_code: str) -> Dict:
     except Exception as e:
         result['errors'].append(f'reflection_score: {e}')
 
-    # 8. KUVIC 세션
+    # 8. 검토 세션
     try:
-        from kuvic_validator import KUVIC_SESSION_ANALYSIS
-        if stock_code in KUVIC_SESSION_ANALYSIS:
-            kuvic = KUVIC_SESSION_ANALYSIS[stock_code]
-            result['kuvic_session'] = {
-                'thesis': kuvic.get('thesis'),
-                'tags': kuvic.get('tags', []),
-                'conclusion': kuvic.get('conclusion'),
-                'priority': kuvic.get('priority'),
-                'session_date': kuvic.get('session_date'),
-                'has_manual_tp': bool(kuvic.get('base_tp')),
+        from review_validator import REVIEW_SESSION_ANALYSIS
+        if stock_code in REVIEW_SESSION_ANALYSIS:
+            review = REVIEW_SESSION_ANALYSIS[stock_code]
+            result['review_session'] = {
+                'thesis': review.get('thesis'),
+                'tags': review.get('tags', []),
+                'conclusion': review.get('conclusion'),
+                'priority': review.get('priority'),
+                'session_date': review.get('session_date'),
+                'has_manual_tp': bool(review.get('base_tp')),
             }
-            result['suggested_thesis'] = kuvic.get('thesis')
-            result['suggested_tags'] = kuvic.get('tags', [])
-            result['suggested_conclusion'] = kuvic.get('conclusion')
-            result['suggested_priority'] = kuvic.get('priority')
-            result['data_sources'].append('kuvic_session')
+            result['suggested_thesis'] = review.get('thesis')
+            result['suggested_tags'] = review.get('tags', [])
+            result['suggested_conclusion'] = review.get('conclusion')
+            result['suggested_priority'] = review.get('priority')
+            result['data_sources'].append('review_session')
     except ImportError:
         pass
     except Exception as e:
-        result['errors'].append(f'kuvic: {e}')
+        result['errors'].append(f'review: {e}')
 
     # 9. 최근 어닝 시그널
     try:

@@ -6,7 +6,7 @@ Step 4-4: analysis_journal CRUD API
 - 4-4-C: READ (단일 + 종목별 + 최근)
 - 4-4-D: UPDATE
 - 4-4-E: DELETE
-- 4-4-F: KUVIC 임포트
+- 4-4-F: 검토 임포트
 - 4-4-G: Markdown export
 - 4-4-H: Prefill (helper 모듈 분리)
 - 4-4-I: 통계 (helper 모듈)
@@ -300,11 +300,11 @@ def delete_journal(journal_id: int) -> dict:
 
 
 # ============================================================
-# 4-4-F. KUVIC 세션 임포트
+# 4-4-F. 검토 세션 임포트
 # ============================================================
 
-def _parse_kuvic_segment(segment_str: str) -> dict:
-    """KUVIC segment 문자열 → theme_id 추정."""
+def _parse_review_segment(segment_str: str) -> dict:
+    """검토 segment 문자열 → theme_id 추정."""
     if not segment_str:
         return {}
     s = segment_str.upper()
@@ -323,57 +323,57 @@ def _parse_kuvic_segment(segment_str: str) -> dict:
     return {'theme_id': theme_id}
 
 
-def import_kuvic_session_analysis(skip_duplicates: bool = True) -> dict:
-    """KUVIC_SESSION_ANALYSIS 6종목 일괄 INSERT.
-    skip_duplicates=True: (stock_code, analysis_date, analyst='KUVIC') 동일 시 SKIP."""
+def import_review_session_analysis(skip_duplicates: bool = True) -> dict:
+    """REVIEW_SESSION_ANALYSIS 6종목 일괄 INSERT.
+    skip_duplicates=True: (stock_code, analysis_date, analyst='검토') 동일 시 SKIP."""
     try:
-        from kuvic_validator import KUVIC_SESSION_ANALYSIS
+        from review_validator import REVIEW_SESSION_ANALYSIS
     except ImportError:
-        return {'success': False, 'error': 'kuvic_validator 임포트 실패'}
+        return {'success': False, 'error': 'review_validator 임포트 실패'}
 
     imported, skipped, failed = [], [], []
 
     conn = _get_db()
     cur = conn.cursor()
 
-    for code, kuvic in KUVIC_SESSION_ANALYSIS.items():
-        analysis_date = kuvic.get('session_date', '2026-04-26')
+    for code, review in REVIEW_SESSION_ANALYSIS.items():
+        analysis_date = review.get('session_date', '2026-04-26')
 
         if skip_duplicates:
             cur.execute("""
                 SELECT id FROM analysis_journal
-                WHERE stock_code = ? AND analysis_date = ? AND analyst = 'KUVIC'
+                WHERE stock_code = ? AND analysis_date = ? AND analyst = '검토'
             """, (code, analysis_date))
             if cur.fetchone():
                 skipped.append(code)
                 continue
 
-        seg_info = _parse_kuvic_segment(kuvic.get('segment', ''))
-        step3_text = kuvic.get('note', '') or ''
-        if kuvic.get('segment'):
-            step3_text = f"세그먼트: {kuvic['segment']}\n{step3_text}".strip()
+        seg_info = _parse_review_segment(review.get('segment', ''))
+        step3_text = review.get('note', '') or ''
+        if review.get('segment'):
+            step3_text = f"세그먼트: {review['segment']}\n{step3_text}".strip()
 
         try:
             data = {
                 'stock_code': code,
-                'analyst': 'KUVIC',
+                'analyst': '검토',
                 'analysis_date': analysis_date,
                 'theme_id': seg_info.get('theme_id'),
                 'step3_peers_text': step3_text if step3_text else None,
-                'bear_eps': kuvic.get('bear_eps'),
-                'bear_per': kuvic.get('bear_per'),
-                'bear_tp': kuvic.get('bear_tp'),
-                'base_eps': kuvic.get('base_eps'),
-                'base_per': kuvic.get('base_per'),
-                'base_tp': kuvic.get('base_tp'),
-                'bull_eps': kuvic.get('bull_eps'),
-                'bull_per': kuvic.get('bull_per'),
-                'bull_tp': kuvic.get('bull_tp'),
-                'thesis': kuvic.get('thesis'),
-                'tags': kuvic.get('tags', []),
-                'conclusion': kuvic.get('conclusion'),
-                'priority': kuvic.get('priority'),
-                'memo': kuvic.get('note'),
+                'bear_eps': review.get('bear_eps'),
+                'bear_per': review.get('bear_per'),
+                'bear_tp': review.get('bear_tp'),
+                'base_eps': review.get('base_eps'),
+                'base_per': review.get('base_per'),
+                'base_tp': review.get('base_tp'),
+                'bull_eps': review.get('bull_eps'),
+                'bull_per': review.get('bull_per'),
+                'bull_tp': review.get('bull_tp'),
+                'thesis': review.get('thesis'),
+                'tags': review.get('tags', []),
+                'conclusion': review.get('conclusion'),
+                'priority': review.get('priority'),
+                'memo': review.get('note'),
             }
             r = create_journal(data)
             if r.get('success'):
@@ -724,9 +724,9 @@ if __name__ == '__main__':
         if not result.get('success'):
             sys.exit(1)
 
-    elif cmd == 'import_kuvic':
+    elif cmd == 'import_review':
         force = '--force' in sys.argv
-        result = import_kuvic_session_analysis(skip_duplicates=not force)
+        result = import_review_session_analysis(skip_duplicates=not force)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         if result.get('total_failed', 0) > 0:
             sys.exit(1)
