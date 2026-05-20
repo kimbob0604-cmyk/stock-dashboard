@@ -19,6 +19,8 @@ cache/
 db/dashboard.db
 db/dashboard.db-*
 db/dashboard.db.backup_*
+db/dashboard_before_*.db
+db/dashboard.db.bak_*
 db/llm_cache.db
 db/llm_cache.db-*
 

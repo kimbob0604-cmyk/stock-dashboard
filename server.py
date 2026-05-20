@@ -6525,6 +6525,24 @@ def _startup():
                            id="earnings_backfill_daily", max_instances=1)
         log.info("[어닝 백필] 매일 06:30 cron 등록")
 
+        # ── Step 5-1-B: 컨센서스 스냅샷 (평일 18:00, 장마감 후) ──
+        def _scheduled_consensus_snapshot():
+            try:
+                from consensus_snapshot_collector import run_daily_snapshot
+                stats = run_daily_snapshot(target_size=350, sleep_per_stock=0.5,
+                                           verbose=False)
+                log.info("[컨센서스 스냅샷] 성공 %d/%d, 신규 Q=%d NTM=%d, %ss",
+                         stats['success'], stats['total_stocks'],
+                         stats['total_quarterly_new'], stats['total_ntm_new'],
+                         stats['elapsed_sec'])
+            except Exception as exc:
+                log.warning("[컨센서스 스냅샷 에러] %s", exc)
+        _scheduler.add_job(_scheduled_consensus_snapshot, "cron",
+                           day_of_week="mon-fri", hour=18, minute=0,
+                           id="consensus_snapshot_daily", max_instances=1,
+                           misfire_grace_time=1800)
+        log.info("[컨센서스 스냅샷] 평일 18:00 cron 등록")
+
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
     else:
