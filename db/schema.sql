@@ -174,3 +174,55 @@ CREATE TABLE IF NOT EXISTS misc_cache (
     data_json TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Step 5-1: 컨센서스 리비전 트래커 (migrations/008 과 동일 — Render 부팅 시 자동 생성)
+CREATE TABLE IF NOT EXISTS consensus_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    period_type TEXT NOT NULL,
+    period_year INTEGER NOT NULL,
+    period_quarter INTEGER,
+    snapshot_date TEXT NOT NULL,
+    revenue_consensus REAL,
+    op_income_consensus REAL,
+    net_income_consensus REAL,
+    eps_consensus REAL,
+    analyst_count INTEGER,
+    source TEXT DEFAULT 'naver',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(stock_code, period_type, period_year, period_quarter, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csnap_lookup
+    ON consensus_snapshot(stock_code, period_type, period_year, period_quarter, snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_csnap_recent
+    ON consensus_snapshot(snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_csnap_stock_date
+    ON consensus_snapshot(stock_code, snapshot_date DESC);
+
+CREATE TABLE IF NOT EXISTS revision_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    period_type TEXT NOT NULL,
+    period_year INTEGER NOT NULL,
+    period_quarter INTEGER,
+    metric TEXT NOT NULL,
+    revision_pct REAL NOT NULL,
+    window_days INTEGER NOT NULL,
+    baseline_value REAL,
+    current_value REAL,
+    baseline_date TEXT,
+    current_date TEXT,
+    signal TEXT NOT NULL,
+    priority INTEGER DEFAULT 3,
+    alert_sent INTEGER DEFAULT 0,
+    sent_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ralert_recent
+    ON revision_alerts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ralert_stock
+    ON revision_alerts(stock_code, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ralert_signal
+    ON revision_alerts(signal, alert_sent, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ralert_dedupe
+    ON revision_alerts(stock_code, period_type, period_year, period_quarter, metric, window_days, created_at DESC);
