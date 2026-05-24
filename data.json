@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-24 06:02:25",
+  "updated_at": "2026-05-24 18:13:54",
   "actual_date": "20260522",
   "kospi": {
     "value": 7847.71,
@@ -221,7 +221,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 2,
@@ -839,7 +839,7 @@
           ]
         }
       ],
-      "rank_change": -6
+      "rank_change": 0
     },
     {
       "id": 5,
@@ -2749,7 +2749,7 @@
           ]
         }
       ],
-      "rank_change": 2
+      "rank_change": 0
     },
     {
       "id": 14,
@@ -2885,7 +2885,7 @@
           ]
         }
       ],
-      "rank_change": 1
+      "rank_change": 0
     },
     {
       "id": 15,
@@ -3220,7 +3220,7 @@
           ]
         }
       ],
-      "rank_change": 1
+      "rank_change": 0
     },
     {
       "id": 17,
@@ -3604,7 +3604,7 @@
           ]
         }
       ],
-      "rank_change": 1
+      "rank_change": 0
     },
     {
       "id": 19,
@@ -3782,7 +3782,7 @@
           ]
         }
       ],
-      "rank_change": -1
+      "rank_change": 0
     },
     {
       "id": 20,
@@ -4166,7 +4166,7 @@
           "sparkline": []
         }
       ],
-      "rank_change": -1
+      "rank_change": 0
     },
     {
       "id": 22,
@@ -4592,7 +4592,7 @@
           ]
         }
       ],
-      "rank_change": 1
+      "rank_change": 0
     },
     {
       "id": 24,
