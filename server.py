@@ -4643,8 +4643,22 @@ def _compute_options_signal(symbol: str) -> dict:
         if not strikes:
             strikes = strikes_set[:30]
 
-        call_oi_map = {c["strike"]: c["openInterest"] for c in near_calls}
-        put_oi_map  = {p["strike"]: p["openInterest"] for p in near_puts}
+        # ── OI stale fallback (S-2-B 후속) ──
+        # Yahoo Finance는 openInterest 응답이 종종 0/지연 (장후 D+1 업데이트 패턴).
+        # 5/20 이후 SPY/QQQ MaxPain 이 비현실적 strike (-19%) 로 폴백되는 원인.
+        # OI 합이 임계치 미만이면 volume 을 proxy 로 사용 (MaxPain/GEX 만, PCR 은
+        # volume 기반이라 영향 X).
+        _near_oi_sum = (sum(c["openInterest"] for c in near_calls)
+                        + sum(p["openInterest"] for p in near_puts))
+        _use_volume_proxy = _near_oi_sum < 1000
+        if _use_volume_proxy:
+            log.warning("[옵션] %s OI stale (near sum=%d) → volume proxy (MaxPain/GEX)",
+                        symbol, _near_oi_sum)
+            call_oi_map = {c["strike"]: max(c["volume"] or 0, 0) for c in near_calls}
+            put_oi_map  = {p["strike"]: max(p["volume"] or 0, 0) for p in near_puts}
+        else:
+            call_oi_map = {c["strike"]: c["openInterest"] for c in near_calls}
+            put_oi_map  = {p["strike"]: p["openInterest"] for p in near_puts}
 
         pain_by_strike: list[dict] = []
         for test in strikes:
@@ -4695,8 +4709,11 @@ def _compute_options_signal(symbol: str) -> dict:
             gex_signal = "음수 GEX → 마켓메이커 숏감마 · 변동성 확대, 추세 지속 예상"
             gex_regime = "negative"
 
-        call_wall = max(near_calls, key=lambda x: x["openInterest"]) if near_calls else None
-        put_wall  = max(near_puts,  key=lambda x: x["openInterest"]) if near_puts  else None
+        # call_wall / put_wall 도 OI stale 시 volume proxy 적용
+        _wall_key = (lambda x: x["volume"] or 0) if _use_volume_proxy \
+                    else (lambda x: x["openInterest"])
+        call_wall = max(near_calls, key=_wall_key) if near_calls else None
+        put_wall  = max(near_puts,  key=_wall_key) if near_puts  else None
 
         # ── 종합 판단 ──
         bullish = 0
