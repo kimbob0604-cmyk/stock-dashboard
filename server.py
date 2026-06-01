@@ -5281,6 +5281,131 @@ def _load_server_watchlist() -> list:
 
 
 # ── 알림 1: 장 시작 전 브리핑 (평일 08:30) ──
+def _fmt_revision_period(period_type, year, quarter) -> str:
+    """리비전 기간 라벨: NTM2026 / 2026Q2 / 2026."""
+    if period_type == 'NTM':
+        return f"NTM{year}"
+    if period_type == 'QUARTERLY' and quarter:
+        return f"{year}Q{quarter}"
+    return f"{year}"
+
+
+def alert_revision_signals():
+    """Step 5-1-F: 컨센서스 리비전 STRONG 시그널 텔레 발송 (평일 18:30).
+
+    1. revision_calculator.compute_all() 실행 — consensus_snapshot 기반 신규 알림
+    2. alert_sent=0 인 STRONG_UP / STRONG_DOWN 만 조회 (NEUTRAL/UP/DOWN 제외)
+    3. 종목별 최대 10건씩 발송 (각 방향)
+    4. 발송 후 alert_sent=1 UPDATE — 중복 발송 방지
+    """
+    try:
+        # 사전 계산 (모듈 import 실패해도 DB 기존 알림은 발송)
+        try:
+            from revision_calculator import compute_all
+            r = compute_all(verbose=False)
+            log.info("[리비전 알림] 계산 완료: %s", r)
+        except ImportError:
+            log.warning("[리비전 알림] revision_calculator 모듈 부재 — DB 기존 알림만 발송")
+        except Exception as exc:
+            log.warning("[리비전 알림] compute_all 실패 (DB 알림만 발송): %s", exc)
+
+        # 신규 STRONG 시그널 조회
+        with _get_db() as conn:
+            rows = [dict(r) for r in conn.execute("""
+                SELECT id, stock_code, metric, signal, revision_pct, window_days,
+                       period_type, period_year, period_quarter,
+                       "current_date" AS current_date
+                FROM revision_alerts
+                WHERE signal IN ('STRONG_UP', 'STRONG_DOWN')
+                  AND alert_sent = 0
+                ORDER BY priority ASC, ABS(revision_pct) DESC
+                LIMIT 40
+            """).fetchall()]
+
+        if not rows:
+            log.info("[리비전 알림] 신규 STRONG 시그널 없음 — 발송 스킵")
+            return
+
+        # 종목명 매핑
+        codes = list({r["stock_code"] for r in rows})
+        names: dict = {}
+        with _get_db() as conn:
+            placeholders = ",".join(["?"] * len(codes))
+            for nr in conn.execute(
+                f"SELECT code, name FROM stocks WHERE code IN ({placeholders})",
+                codes,
+            ):
+                names[nr["code"]] = nr["name"]
+
+        up_rows = [r for r in rows if r["signal"] == "STRONG_UP"]
+        down_rows = [r for r in rows if r["signal"] == "STRONG_DOWN"]
+
+        metric_label = {'eps': 'EPS', 'revenue': '매출', 'operating_profit': '영업익'}
+
+        today_kst = now_kst().strftime("%Y-%m-%d")
+        lines = [f"📈 <b>컨센서스 리비전 알림</b> ({today_kst})", ""]
+
+        sent_ids: list = []
+
+        if up_rows:
+            top_up = up_rows[:10]
+            lines.append(f"🟢 <b>강한 상향 (STRONG_UP) — {len(up_rows)}건</b>")
+            for r in top_up:
+                name = names.get(r["stock_code"], r["stock_code"])
+                ml = metric_label.get(r["metric"], r["metric"])
+                period = _fmt_revision_period(
+                    r["period_type"], r["period_year"], r["period_quarter"])
+                lines.append(
+                    f"  • {name} ({r['stock_code']}) {ml} {period} "
+                    f"{r['revision_pct']:+.1f}% ({r['window_days']}d)"
+                )
+                sent_ids.append(r["id"])
+            lines.append("")
+
+        if down_rows:
+            top_down = down_rows[:10]
+            lines.append(f"🔴 <b>강한 하향 (STRONG_DOWN) — {len(down_rows)}건</b>")
+            for r in top_down:
+                name = names.get(r["stock_code"], r["stock_code"])
+                ml = metric_label.get(r["metric"], r["metric"])
+                period = _fmt_revision_period(
+                    r["period_type"], r["period_year"], r["period_quarter"])
+                lines.append(
+                    f"  • {name} ({r['stock_code']}) {ml} {period} "
+                    f"{r['revision_pct']:+.1f}% ({r['window_days']}d)"
+                )
+                sent_ids.append(r["id"])
+            lines.append("")
+
+        total_extra = (len(up_rows) - 10 if len(up_rows) > 10 else 0) + \
+                      (len(down_rows) - 10 if len(down_rows) > 10 else 0)
+        if total_extra > 0:
+            lines.append(
+                f"<i>... 외 {total_extra}건 — 상세 /api/revision/screener</i>"
+            )
+            lines.append("")
+
+        msg = "\n".join(lines).rstrip()
+        if len(msg) > 4000:
+            msg = msg[:3990] + "\n…(생략)"
+        send_telegram(msg)
+
+        # alert_sent 마킹 (발송된 row 만)
+        if sent_ids:
+            sent_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            placeholders = ",".join(["?"] * len(sent_ids))
+            with _get_db() as conn:
+                conn.execute(
+                    f"UPDATE revision_alerts SET alert_sent=1, sent_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    [sent_at] + sent_ids,
+                )
+                conn.commit()
+            log.info("[리비전 알림] %d건 발송 + alert_sent 마킹", len(sent_ids))
+    except Exception as exc:
+        log.warning("alert_revision_signals: %s", exc, exc_info=True)
+
+
 def alert_morning_briefing():
     try:
         today_kst = now_kst().strftime("%Y-%m-%d")
@@ -6261,6 +6386,11 @@ def _startup():
             _scheduler.add_job(alert_morning_briefing, "cron",
                                day_of_week="mon-fri", hour=8, minute=30,
                                id="tg_morning")
+            # Step 5-1-F: 리비전 STRONG 시그널 알림 (평일 18:30)
+            # consensus_snapshot cron 18:00 직후 — 신규 스냅샷 기반 계산
+            _scheduler.add_job(alert_revision_signals, "cron",
+                               day_of_week="mon-fri", hour=18, minute=30,
+                               id="tg_revision_signals", max_instances=1)
             _scheduler.add_job(alert_watchlist_price, "cron",
                                day_of_week="mon-fri", hour="9-14", minute="0,30",
                                id="tg_watchlist")
