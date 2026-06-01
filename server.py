@@ -14089,6 +14089,63 @@ def _classify_auto_reflection(per_pct, return_52w_pct):
             'per_signal': per_signal, 'return_signal': ret_signal}
 
 
+def _get_verification_revisions(code: str, conn) -> dict:
+    """검증 시트용 리비전 요약 (Step 5-1-E).
+
+    종목의 revision_alerts 에서:
+      - metric 별 최신 시그널 1건
+      - 시그널별 카운트 (STRONG_UP / UP / NEUTRAL / DOWN / STRONG_DOWN)
+      - 총 알림 수 + 최신 current_date
+
+    검증 시트 step2 (펀더멘털) 옆에 컨센서스 리비전 컨텍스트로 표시.
+    """
+    rows = conn.execute("""
+        SELECT metric, signal, revision_pct, window_days,
+               period_type, period_year, period_quarter,
+               baseline_value, current_value,
+               "current_date" AS current_date, created_at
+        FROM revision_alerts
+        WHERE stock_code = ?
+        ORDER BY created_at DESC
+    """, (code,)).fetchall()
+
+    if not rows:
+        return {
+            'total_alerts': 0,
+            'latest_by_metric': {},
+            'signal_counts': {},
+            'latest_date': None,
+        }
+
+    latest_by_metric: dict = {}
+    signal_counts = {'STRONG_UP': 0, 'UP': 0, 'NEUTRAL': 0,
+                     'DOWN': 0, 'STRONG_DOWN': 0}
+    for r in rows:
+        if r['metric'] not in latest_by_metric:
+            pq = r['period_quarter']
+            latest_by_metric[r['metric']] = {
+                'signal': r['signal'],
+                'revision_pct': r['revision_pct'],
+                'window_days': r['window_days'],
+                'period_type': r['period_type'],
+                'period_year': r['period_year'],
+                'period_quarter': pq if pq else None,  # 0 sentinel → None
+                'baseline_value': r['baseline_value'],
+                'current_value': r['current_value'],
+                'current_date': r['current_date'],
+            }
+        sig = r['signal']
+        if sig in signal_counts:
+            signal_counts[sig] += 1
+
+    return {
+        'total_alerts': len(rows),
+        'latest_by_metric': latest_by_metric,
+        'signal_counts': signal_counts,
+        'latest_date': rows[0]['current_date'],
+    }
+
+
 @app.route('/api/verification/<code>/prefill', methods=['GET'])
 def api_verification_prefill(code):
     """검증 시트 5단계 자동 prefill.
@@ -14269,6 +14326,15 @@ def api_verification_prefill(code):
             } if review_session else None,
         }
 
+        # Step 5-1-E: 컨센서스 리비전 요약 (펀더멘털 컨텍스트)
+        try:
+            revisions = _get_verification_revisions(code, conn)
+        except Exception as exc:
+            log.warning("[verification] revisions fetch fail %s: %s", code, exc)
+            revisions = {'total_alerts': 0, 'latest_by_metric': {},
+                         'signal_counts': {}, 'latest_date': None,
+                         'error': str(exc)[:100]}
+
         step2 = {
             'financial': {**(financial or {}),
                           'freshness': fr_finq} if financial else None,
@@ -14283,6 +14349,7 @@ def api_verification_prefill(code):
             },
             'earnings': {**earnings, 'freshness': fr_earn} if earnings else None,
             'earnings_history': earnings_history,  # 4-5-8: 최근 4분기 시그널 배열
+            'revisions': revisions,  # 5-1-E: 컨센서스 리비전 요약
         }
 
         step3 = None  # 4-5-5 에서 채움
