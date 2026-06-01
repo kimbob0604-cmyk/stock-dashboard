@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS revision_alerts (
     baseline_value REAL,
     current_value REAL,
     baseline_date TEXT,
-    current_date TEXT,
+    current_date TEXT,   -- ⚠️ SQLite 예약어 CURRENT_DATE 와 충돌 — 쿼리에서 "current_date" 로 인용 필수
     signal TEXT NOT NULL,
     priority INTEGER DEFAULT 3,
     alert_sent INTEGER DEFAULT 0,

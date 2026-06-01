@@ -15706,6 +15706,240 @@ def api_ops_health():
         return jsonify({"error": str(exc)}), 500
 
 
+# ============================================================
+# Step 5-1-D: 리비전 API 4개
+#   signal 코드: STRONG_UP / UP / NEUTRAL / DOWN / STRONG_DOWN (revision_calculator 와 동일)
+#   ⚠️ revision_alerts.current_date 는 SQLite 예약어 충돌 → "current_date" 인용 필수
+# ============================================================
+
+@app.route('/api/revision/<code>')
+def api_revision_for_stock(code):
+    """종목 리비전 알림 조회. Query: window, metric, signal, limit(20)."""
+    try:
+        code = code.strip()
+        if not (code.isdigit() and len(code) == 6):
+            return jsonify({'error': 'invalid code'}), 400
+        window = request.args.get('window', type=int)
+        metric = request.args.get('metric')
+        signal = request.args.get('signal')
+        limit = request.args.get('limit', 20, type=int)
+
+        where, params = ["stock_code = ?"], [code]
+        if window:
+            where.append("window_days = ?"); params.append(window)
+        if metric:
+            where.append("metric = ?"); params.append(metric)
+        if signal:
+            where.append("signal = ?"); params.append(signal)
+        where_clause = " AND ".join(where)
+
+        with _get_db() as conn:
+            nrow = conn.execute("SELECT name FROM stocks WHERE code=?", (code,)).fetchone()
+            name = nrow["name"] if nrow else None
+            rows = conn.execute(f"""
+                SELECT period_type, period_year, period_quarter, metric, window_days,
+                       revision_pct, baseline_value, current_value,
+                       baseline_date, "current_date" AS current_date, signal, priority, created_at
+                FROM revision_alerts
+                WHERE {where_clause}
+                ORDER BY created_at DESC, priority ASC
+                LIMIT ?
+            """, params + [limit]).fetchall()
+
+        alerts = [{
+            'period_type': r["period_type"], 'period_year': r["period_year"],
+            'period_quarter': r["period_quarter"] if r["period_quarter"] != 0 else None,
+            'metric': r["metric"], 'window_days': r["window_days"],
+            'revision_pct': r["revision_pct"], 'baseline_value': r["baseline_value"],
+            'current_value': r["current_value"], 'baseline_date': r["baseline_date"],
+            'current_date': r["current_date"], 'signal': r["signal"],
+            'priority': r["priority"], 'created_at': r["created_at"],
+        } for r in rows]
+        return jsonify({'code': code, 'name': name, 'total': len(alerts), 'alerts': alerts})
+    except Exception as e:
+        log.error("[api_revision] %s: %s", code, e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revision/screener')
+def api_revision_screener():
+    """상위 리비전 발굴. Query: signal(STRONG_UP), window(30), metric(eps),
+    period_type, days(7), limit(30). |revision_pct| 내림차순."""
+    try:
+        signal = request.args.get('signal', 'STRONG_UP')
+        window = request.args.get('window', 30, type=int)
+        metric = request.args.get('metric', 'eps')
+        period_type = request.args.get('period_type')
+        days = request.args.get('days', 7, type=int)
+        limit = request.args.get('limit', 30, type=int)
+
+        where = ["ra.signal = ?", "ra.window_days = ?", "ra.metric = ?",
+                 "ra.created_at >= datetime('now', ?)"]
+        params = [signal, window, metric, f'-{days} days']
+        if period_type:
+            where.append("ra.period_type = ?"); params.append(period_type)
+        where_clause = " AND ".join(where)
+
+        with _get_db() as conn:
+            rows = conn.execute(f"""
+                SELECT ra.stock_code, s.name, ra.period_type, ra.period_year, ra.period_quarter,
+                       ra.metric, ra.window_days, ra.revision_pct,
+                       ra.baseline_value, ra.current_value,
+                       ra."current_date" AS current_date, ra.signal, ra.priority
+                FROM revision_alerts ra
+                LEFT JOIN stocks s ON s.code = ra.stock_code
+                WHERE {where_clause}
+                ORDER BY ABS(ra.revision_pct) DESC
+                LIMIT ?
+            """, params + [limit]).fetchall()
+
+        results = [{
+            'code': r["stock_code"], 'name': r["name"],
+            'period_type': r["period_type"], 'period_year': r["period_year"],
+            'period_quarter': r["period_quarter"] if r["period_quarter"] != 0 else None,
+            'metric': r["metric"], 'window_days': r["window_days"],
+            'revision_pct': r["revision_pct"], 'baseline_value': r["baseline_value"],
+            'current_value': r["current_value"], 'current_date': r["current_date"],
+            'signal': r["signal"], 'priority': r["priority"],
+        } for r in rows]
+        return jsonify({
+            'filter': {'signal': signal, 'window': window, 'metric': metric,
+                       'period_type': period_type, 'days': days},
+            'total': len(results), 'results': results,
+        })
+    except Exception as e:
+        log.error("[api_revision_screener]: %s", e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revision/divergence')
+def api_revision_divergence():
+    """컨센 리비전 vs 주가 괴리 발굴.
+    mode=undervalued(컨센↑·주가↓) | overheated(컨센↓·주가↑).
+    Query: mode, window(30), min_consensus_change(5), max_price_change(3), limit(20)."""
+    try:
+        mode = request.args.get('mode', 'undervalued')
+        window = request.args.get('window', 30, type=int)
+        min_consensus = request.args.get('min_consensus_change', 5.0, type=float)
+        max_price = request.args.get('max_price_change', 3.0, type=float)
+        limit = request.args.get('limit', 20, type=int)
+
+        if mode == 'undervalued':
+            consensus_op, consensus_val, price_val = '>=', min_consensus, max_price
+        elif mode == 'overheated':
+            consensus_op, consensus_val, price_val = '<=', -min_consensus, -max_price
+        else:
+            return jsonify({'error': 'invalid mode'}), 400
+
+        results = []
+        with _get_db() as conn:
+            candidates = conn.execute(f"""
+                SELECT ra.stock_code, s.name, ra.revision_pct, ra.metric, ra.window_days,
+                       ra.period_type, ra.period_year, ra.period_quarter, ra."current_date" AS current_date
+                FROM revision_alerts ra
+                LEFT JOIN stocks s ON s.code = ra.stock_code
+                WHERE ra.metric = 'eps' AND ra.window_days = ?
+                  AND ra.revision_pct {consensus_op} ?
+                  AND ra.created_at >= datetime('now', '-7 days')
+                ORDER BY ra.created_at DESC, ABS(ra.revision_pct) DESC
+            """, (window, consensus_val)).fetchall()
+
+            for c in candidates:
+                code = c["stock_code"]
+                oh = conn.execute("""
+                    SELECT date, close FROM ohlcv WHERE code = ?
+                    ORDER BY date DESC LIMIT ?
+                """, (code, window + 5)).fetchall()
+                if len(oh) < window:
+                    continue
+                current_close = oh[0]["close"]
+                baseline_close = oh[min(window, len(oh) - 1)]["close"]
+                if not baseline_close or baseline_close <= 0:
+                    continue
+                price_change = (current_close - baseline_close) / baseline_close * 100
+                if mode == 'undervalued' and price_change > price_val:
+                    continue
+                if mode == 'overheated' and price_change < price_val:
+                    continue
+                results.append({
+                    'code': code, 'name': c["name"],
+                    'consensus_change_pct': round(c["revision_pct"], 2),
+                    'price_change_pct': round(price_change, 2),
+                    'divergence_score': round(abs(c["revision_pct"]) + abs(price_change), 2),
+                    'metric': c["metric"], 'window_days': c["window_days"],
+                    'period_type': c["period_type"], 'period_year': c["period_year"],
+                    'period_quarter': c["period_quarter"] if c["period_quarter"] != 0 else None,
+                    'current_date': c["current_date"],
+                })
+                if len(results) >= limit:
+                    break
+        results.sort(key=lambda x: x['divergence_score'], reverse=True)
+        return jsonify({
+            'mode': mode, 'window': window,
+            'min_consensus_change': min_consensus, 'max_price_change': max_price,
+            'total': len(results), 'results': results,
+        })
+    except Exception as e:
+        log.error("[api_revision_divergence]: %s", e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revision/history/<code>')
+def api_revision_history(code):
+    """종목 컨센서스 스냅샷 시계열 (차트용).
+    Query: period_type, period_year, period_quarter, metric(eps), days(180)."""
+    try:
+        code = code.strip()
+        if not (code.isdigit() and len(code) == 6):
+            return jsonify({'error': 'invalid code'}), 400
+        period_type = request.args.get('period_type')
+        period_year = request.args.get('period_year', type=int)
+        period_quarter = request.args.get('period_quarter', type=int)
+        metric = request.args.get('metric', 'eps')
+        days = request.args.get('days', 180, type=int)
+
+        metric_col = {
+            'revenue': 'revenue_consensus', 'op_income': 'op_income_consensus',
+            'net_income': 'net_income_consensus', 'eps': 'eps_consensus',
+        }.get(metric, 'eps_consensus')
+
+        where = ["stock_code = ?", "snapshot_date >= date('now', ?)", f"{metric_col} IS NOT NULL"]
+        params = [code, f'-{days} days']
+        if period_type:
+            where.append("period_type = ?"); params.append(period_type)
+        if period_year:
+            where.append("period_year = ?"); params.append(period_year)
+        if period_quarter is not None:
+            where.append("period_quarter = ?"); params.append(period_quarter)
+        where_clause = " AND ".join(where)
+
+        with _get_db() as conn:
+            nrow = conn.execute("SELECT name FROM stocks WHERE code=?", (code,)).fetchone()
+            name = nrow["name"] if nrow else None
+            rows = conn.execute(f"""
+                SELECT period_type, period_year, period_quarter, snapshot_date, {metric_col} AS val
+                FROM consensus_snapshot
+                WHERE {where_clause}
+                ORDER BY period_type, period_year, period_quarter, snapshot_date
+            """, params).fetchall()
+
+        series_map = {}
+        for r in rows:
+            key = (r["period_type"], r["period_year"], r["period_quarter"])
+            if key not in series_map:
+                series_map[key] = {
+                    'period_type': r["period_type"], 'period_year': r["period_year"],
+                    'period_quarter': r["period_quarter"] if r["period_quarter"] != 0 else None,
+                    'data': [],
+                }
+            series_map[key]['data'].append({'date': r["snapshot_date"], 'value': r["val"]})
+        return jsonify({'code': code, 'name': name, 'metric': metric,
+                        'days': days, 'series': list(series_map.values())})
+    except Exception as e:
+        log.error("[api_revision_history] %s: %s", code, e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 # gunicorn 이 모듈을 import 하는 시점에 자동 실행
 _startup()
 
