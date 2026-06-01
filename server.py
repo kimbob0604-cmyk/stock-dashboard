@@ -11635,12 +11635,18 @@ def _parse_json_list(s):
         return []
 
 
-def build_market_summary() -> dict:
-    """매크로·섹터·특징주·수급·공시·AI 섹션을 DB/캐시에서 집계."""
+def build_market_summary(dry_run: bool = False) -> dict:
+    """매크로·섹터·특징주·수급·공시·AI 섹션을 DB/캐시에서 집계.
+
+    Args:
+        dry_run: True면 summary["debug"] 에 빌더별 elapsed_ms / error 기록.
+                 (기존 cron/api 호출 호환을 위해 기본값 False)
+    """
     summary = {
         "generated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "sections": [],
     }
+    debug_info: dict = {} if dry_run else {}
 
     # ── 1. 지수 ── (4-5-2-B: KR 라이브, US 캐시+신선도)
     idx_section = {"title": "📈 지수", "items": []}
@@ -11732,7 +11738,8 @@ def build_market_summary() -> dict:
     summary["sections"].append(opts_section)
 
     # ── 4. 섹터 ──
-    sector_section = {"title": "🏭 섹터 등락", "subsections": []}
+    _t_sector = time.time()
+    sector_section = {"title": "🏭 섹터 등락", "subsections": [], "error": None}
     if _SQLITE_OK and USE_SQLITE:
         # 노이즈 필터: 페니 스톡 (close < 1000원), KR 가격 한도 외 변동 (|chg|>30)
         # — 관리종목/거래정지해제/액면병합 후 첫거래 등에서 ±60% 같은 비정상값 발생
@@ -11776,12 +11783,26 @@ def build_market_summary() -> dict:
                     sector_section["subsections"].append(
                         {"subtitle": "🔴 약세 TOP 3", "items": bot_items}
                     )
+        except sqlite3.OperationalError as exc:
+            sector_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
+            log.warning("[summary] sector DB OperationalError: %s "
+                        "(busy_timeout 미적용 또는 부족 가능)", exc)
         except Exception as exc:
-            log.debug("[summary] sector: %s", exc)
+            sector_section["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+            log.warning("[summary] sector 빌더 실패 (rendered=0): %s",
+                        exc, exc_info=True)
+    else:
+        sector_section["error"] = "SQLite unavailable (USE_SQLITE=False or import failed)"
+        log.warning("[summary] sector 스킵: %s", sector_section["error"])
     summary["sections"].append(sector_section)
+    if dry_run:
+        debug_info["sector_ms"] = round((time.time() - _t_sector) * 1000, 1)
+        debug_info["sector_error"] = sector_section["error"]
+        debug_info["sector_subsections"] = len(sector_section["subsections"])
 
     # ── 5. 특징주 ──
-    feat_section = {"title": "⚡ 특징주", "subsections": []}
+    _t_feat = time.time()
+    feat_section = {"title": "⚡ 특징주", "subsections": [], "error": None}
     if _SQLITE_OK and USE_SQLITE:
         # 위와 동일 노이즈 필터 (페니 + 한도외)
         _NOISE_WHERE = ("close >= 1000 AND change_pct IS NOT NULL "
@@ -11839,12 +11860,25 @@ def build_market_summary() -> dict:
                     feat_section["subsections"].append(
                         {"subtitle": "📊 거래대금 상위 (±5% 이내)", "items": items}
                     )
+        except sqlite3.OperationalError as exc:
+            feat_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
+            log.warning("[summary] feat DB OperationalError: %s", exc)
         except Exception as exc:
-            log.debug("[summary] feat: %s", exc)
+            feat_section["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+            log.warning("[summary] feat 빌더 실패 (rendered=0): %s",
+                        exc, exc_info=True)
+    else:
+        feat_section["error"] = "SQLite unavailable"
+        log.warning("[summary] feat 스킵: %s", feat_section["error"])
     summary["sections"].append(feat_section)
+    if dry_run:
+        debug_info["feat_ms"] = round((time.time() - _t_feat) * 1000, 1)
+        debug_info["feat_error"] = feat_section["error"]
+        debug_info["feat_subsections"] = len(feat_section["subsections"])
 
     # ── 6. 수급 (flow_cache에서 오늘 순매수 집계) ──
-    flow_section = {"title": "💰 수급 동향", "subsections": []}
+    _t_flow = time.time()
+    flow_section = {"title": "💰 수급 동향", "subsections": [], "error": None}
     if _SQLITE_OK and USE_SQLITE:
         # flow_cache.name 이 다수 종목코드로 채워져 있어 stocks 테이블로 한글명 보강.
         # name 이 코드와 같거나 비어있으면 stocks.name 사용 → 그래도 없으면 코드.
@@ -11899,9 +11933,21 @@ def build_market_summary() -> dict:
                         "items": [_format_flow_line(a['code'], a['name'],
                                                    a['foreign_sum_20']/1e8) for a in agg]
                     })
+        except sqlite3.OperationalError as exc:
+            flow_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
+            log.warning("[summary] flow DB OperationalError: %s", exc)
         except Exception as exc:
-            log.debug("[summary] flow: %s", exc)
+            flow_section["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+            log.warning("[summary] flow 빌더 실패 (rendered=0): %s",
+                        exc, exc_info=True)
+    else:
+        flow_section["error"] = "SQLite unavailable"
+        log.warning("[summary] flow 스킵: %s", flow_section["error"])
     summary["sections"].append(flow_section)
+    if dry_run:
+        debug_info["flow_ms"] = round((time.time() - _t_flow) * 1000, 1)
+        debug_info["flow_error"] = flow_section["error"]
+        debug_info["flow_subsections"] = len(flow_section["subsections"])
 
     # ── 7. DART 공시 ──
     disc_section = {"title": "📋 주요 공시", "items": []}
@@ -12002,6 +12048,8 @@ def build_market_summary() -> dict:
         out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
+    if dry_run:
+        summary["debug"] = debug_info
     return summary
 
 
@@ -12380,17 +12428,32 @@ def send_market_summary_telegram():
         return
     SKIP_TITLES = {"🤖 AI 추천 요약", "📋 주요 공시"}
     lines = [f"📊 <b>{now_kst().strftime('%m/%d')} 장마감 시황</b>", ""]
+    empty_titles: list = []
     for sec in data.get("sections", []):
         if sec.get("title") in SKIP_TITLES:
             continue
         lines.append(f"<b>{sec['title']}</b>")
-        for it in sec.get("items", []):
+        items = sec.get("items") or []
+        subsections = sec.get("subsections") or []
+        for it in items:
             lines.append(it)
-        for sub in sec.get("subsections", []):
+        for sub in subsections:
             lines.append("")
             lines.append(sub["subtitle"])
             for it in sub.get("items", []):
                 lines.append(it)
+        # 빈 섹션: error 메시지 명시 (S-1-A: 무음 폴백 → 가시화)
+        if not items and not subsections:
+            err = sec.get("error")
+            if err:
+                lines.append("  ⚠️ 데이터 수집 실패")
+                lines.append(f"     <i>{err[:120]}</i>")
+            else:
+                lines.append("  ⚠️ 데이터 없음 (점검 필요)")
+            empty_titles.append(sec.get("title", "?"))
+        lines.append("")
+    if empty_titles:
+        lines.append(f"<i>⚠️ 빈 섹션: {', '.join(empty_titles)} — Render Logs 확인</i>")
         lines.append("")
     lines.append(f"⏰ {now_kst().strftime('%H:%M')} KST")
     msg = "\n".join(lines)
