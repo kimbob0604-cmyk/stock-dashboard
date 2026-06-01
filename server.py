@@ -5643,24 +5643,32 @@ def _refresh_briefing_data():
 
 
 def refresh_us_options_signal():
-    """옵션 시그널 캐시 삭제 + 즉시 재빌드 + 캐시 저장."""
+    """옵션 시그널 재빌드 + 캐시 저장 (S-2-B: race-free).
+
+    원래 선삭제 후 재빌드였으나, 빌드 실패 시 기존 캐시까지 잃고
+    재빌드 중 race window (1~2초) 에 시황 빌더가 SPY 누락 출력하는
+    문제 발생. atomic write 패턴으로 변경 — 성공 시에만 덮어쓰기.
+    """
     for sym in ("SPY", "QQQ"):
         f = BASE_DIR / "cache" / f"options_signal_{sym}.json"
         try:
-            if f.exists():
-                f.unlink()
-        except Exception as exc:
-            log.debug("refresh_us_options del %s: %s", sym, exc)
-        try:
             result = _compute_options_signal(sym)
-            if result and "error" not in result:
-                f.parent.mkdir(exist_ok=True)
-                f.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-                log.info("[옵션] %s 재빌드 + 캐시 저장 OK", sym)
-            else:
-                log.debug("[옵션] %s skip: %s", sym, result.get("error") if result else "no result")
         except Exception as exc:
-            log.debug("refresh_us_options build %s: %s", sym, exc)
+            log.warning("[옵션] %s 빌드 예외 → 기존 캐시 유지: %s", sym, exc)
+            continue
+        if not result or (isinstance(result, dict) and "error" in result):
+            err = (result or {}).get("error") if isinstance(result, dict) else "no result"
+            log.warning("[옵션] %s 빌드 실패 → 기존 캐시 유지: %s", sym, err)
+            continue
+        try:
+            # atomic write: tmp 에 쓰고 rename — 시황 빌더가 부분 파일 못 읽도록.
+            f.parent.mkdir(exist_ok=True)
+            tmp = f.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(f)
+            log.info("[옵션] %s 재빌드 + 캐시 저장 OK", sym)
+        except Exception as exc:
+            log.warning("[옵션] %s 캐시 저장 실패: %s", sym, exc)
 
 
 def _refresh_global_data_periodic():
