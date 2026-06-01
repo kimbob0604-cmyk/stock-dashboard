@@ -3119,9 +3119,28 @@ def _build_naver_universe_background():
         log.info("naver_universe 캐시 이미 존재 — 스킵 (%s)", out_file.name)
         return
     lock_file = out_file.with_suffix(".lock")
+
+    # ── Lock stale TTL (S-2-A): 600초 초과 시 stale 로 간주하고 재시도 ──
+    # daemon thread 가 Render sleep/restart 등으로 죽고 lock 만 남는 케이스
+    # 회복 보장. 5/19~6/1 12일간 stocks 갱신 0건의 근본 원인.
     if lock_file.exists():
-        return
+        try:
+            age = time.time() - lock_file.stat().st_mtime
+        except Exception:
+            age = 0
+        if age < 600:
+            log.info("[KR universe] 빌더 진행 중 스킵 (lock age=%ds)", int(age))
+            return
+        log.warning("[KR universe] stale lock 감지 (age=%ds, threshold=600s) "
+                    "→ 삭제 후 재시도", int(age))
+        try:
+            lock_file.unlink()
+        except Exception as exc:
+            log.error("[KR universe] stale lock 삭제 실패: %s", exc)
+            return
+
     try:
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
         lock_file.touch()
     except Exception:
         pass
@@ -3175,6 +3194,47 @@ def _build_naver_universe_background():
 
 
 _UNI_CACHE: dict = {"data": None, "mtime": 0, "path": None}
+
+
+def _startup_naver_universe_sync():
+    """부팅 직후 naver_universe 동기 빌드 + 가격 갱신 (S-2-A).
+
+    - 오늘자 본체 json 이 이미 있으면 즉시 skip (빠른 부팅)
+    - 없으면 빌더 동기 호출 → 완료 후 _refresh_prices_from_naver() 까지 연쇄
+    - daemon thread 가 죽어 본체 미완성 + lock 잔존 케이스에서도 다음 부팅 시
+      lock TTL(600s) 가드 덕에 자동 회복.
+
+    호출 컨텍스트: _startup() 안의 daemon thread 에서 실행 (Flask 시작 비차단).
+    """
+    today = _get_trading_date()
+    out_file = BASE_DIR / "cache" / f"naver_universe_{today}.json"
+    if out_file.exists():
+        try:
+            size = out_file.stat().st_size
+        except Exception:
+            size = 0
+        log.info("[startup] naver_universe 오늘자 본체 존재 (%d bytes) → 빌드 skip",
+                 size)
+        return
+
+    log.info("[startup] naver_universe 오늘자 본체 없음 → 동기 빌드 시작")
+    try:
+        _build_naver_universe_background()
+    except Exception as exc:
+        log.error("[startup] naver_universe 빌드 실패: %s", exc, exc_info=True)
+        return
+
+    if not out_file.exists():
+        log.warning("[startup] naver_universe 빌드 후에도 본체 파일 없음 — "
+                    "_scrape_naver_sectors 실패 가능성")
+        return
+
+    log.info("[startup] naver_universe 빌드 완료 → 가격 갱신 시작")
+    try:
+        n = _refresh_prices_from_naver()
+        log.info("[startup] 가격 갱신 완료: %d종목", n or 0)
+    except Exception as exc:
+        log.error("[startup] 가격 갱신 실패: %s", exc, exc_info=True)
 
 
 def _load_naver_universe() -> dict:
@@ -6161,8 +6221,10 @@ def _startup():
 
         # Phase 10: Naver 업종 유니버스 백그라운드 빌드 (비차단)
         #   일 1회, 약 79 섹터 × 0.25s ≈ 20 초 소요.
-        threading.Thread(target=_build_naver_universe_background,
-                         daemon=True, name="naver-universe").start()
+        # S-2-A: 빌드 후 즉시 가격 갱신까지 연쇄 (universe 본체 미완성 시
+        # stocks.change_pct 동결되는 회귀 방지).
+        threading.Thread(target=_startup_naver_universe_sync,
+                         daemon=True, name="naver-startup").start()
 
         # Phase 14: S&P 500 market 백그라운드 빌드
         #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
