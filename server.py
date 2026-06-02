@@ -15812,6 +15812,149 @@ def api_ops_cron_trigger(job_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/ops/diag/kr_universe", methods=["GET"])
+def api_ops_diag_kr_universe():
+    """KR universe 진단: 본체 파일 / lock / stocks 카운트 / 캐시 디렉토리 상태.
+
+    Render 환경에서 stocks 테이블이 0건일 때 어디가 막혔는지 빠르게 식별.
+    """
+    import glob as _glob
+    try:
+        today = _get_trading_date()
+        cache_dir = BASE_DIR / "cache"
+        out_file = cache_dir / f"naver_universe_{today}.json"
+        lock_file = out_file.with_suffix(".lock")
+
+        files = sorted(_glob.glob(str(cache_dir / "naver_universe_*.json")))
+        locks = sorted(_glob.glob(str(cache_dir / "naver_universe_*.lock")))
+
+        info: dict = {
+            "trading_date": today,
+            "out_file": str(out_file),
+            "out_exists": out_file.exists(),
+            "out_size": out_file.stat().st_size if out_file.exists() else 0,
+            "lock_exists": lock_file.exists(),
+            "lock_age_sec": (int(time.time() - lock_file.stat().st_mtime)
+                             if lock_file.exists() else None),
+            "all_universe_files": [
+                {"name": Path(f).name, "size": Path(f).stat().st_size}
+                for f in files
+            ],
+            "all_locks": [
+                {"name": Path(f).name,
+                 "age_sec": int(time.time() - Path(f).stat().st_mtime)}
+                for f in locks
+            ],
+        }
+
+        # _load_naver_universe() 시도
+        try:
+            uni = _load_naver_universe()
+            info["load_universe"] = {
+                "ok": bool(uni and uni.get("stocks")),
+                "stocks_count": len(uni.get("stocks") or {}),
+                "fetched_at": uni.get("fetched_at") if isinstance(uni, dict) else None,
+            }
+        except Exception as exc:
+            info["load_universe"] = {"error": str(exc)}
+
+        # stocks 테이블 카운트
+        try:
+            with _get_db() as conn:
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM stocks "
+                    "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                ).fetchone()[0]
+                latest = conn.execute(
+                    "SELECT MAX(updated_at) FROM stocks"
+                ).fetchone()[0]
+            info["stocks"] = {"count_kr": cnt, "latest_updated_at": latest}
+        except Exception as exc:
+            info["stocks"] = {"error": str(exc)}
+
+        return jsonify(info)
+    except Exception as exc:
+        log.exception("ops/diag/kr_universe")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/ops/recover/kr_stocks", methods=["POST"])
+def api_ops_recover_kr_stocks():
+    """수동 KR 가격 회복: stale lock 정리 → universe 동기 빌드 → 가격 갱신.
+
+    Render daemon thread 죽음으로 stocks=0 상태에서 빠른 자동 회복.
+    각 단계 elapsed/result 를 응답에 반환.
+    """
+    import glob as _glob
+    from time import time as _t
+    steps: list = []
+    try:
+        # 1. 모든 stale lock 정리
+        removed = 0
+        for lf in _glob.glob(str(BASE_DIR / "cache" / "naver_universe_*.lock")):
+            try:
+                Path(lf).unlink()
+                removed += 1
+            except Exception as exc:
+                steps.append({"lock_unlink_fail": str(lf), "err": str(exc)})
+        steps.append({"step": "lock_cleanup", "removed": removed})
+
+        # 2. universe 동기 빌드
+        today = _get_trading_date()
+        out_file = BASE_DIR / "cache" / f"naver_universe_{today}.json"
+        t0 = _t()
+        try:
+            _build_naver_universe_background()
+            steps.append({
+                "step": "universe_build",
+                "elapsed_sec": round(_t() - t0, 1),
+                "out_exists": out_file.exists(),
+                "out_size": out_file.stat().st_size if out_file.exists() else 0,
+            })
+        except Exception as exc:
+            steps.append({"step": "universe_build", "error": str(exc),
+                          "elapsed_sec": round(_t() - t0, 1)})
+            return jsonify({"ok": False, "steps": steps}), 500
+
+        if not out_file.exists():
+            steps.append({"step": "stop", "reason": "본체 빌드 실패 — 가격 갱신 스킵"})
+            return jsonify({"ok": False, "steps": steps}), 500
+
+        # 3. _UNI_CACHE 무효화 후 가격 갱신
+        global _UNI_CACHE
+        _UNI_CACHE["mtime"] = 0
+        t0 = _t()
+        try:
+            n = _refresh_prices_from_naver()
+            steps.append({
+                "step": "refresh_prices",
+                "updated": n,
+                "elapsed_sec": round(_t() - t0, 1),
+            })
+        except Exception as exc:
+            steps.append({"step": "refresh_prices", "error": str(exc),
+                          "elapsed_sec": round(_t() - t0, 1)})
+
+        # 4. 검증
+        try:
+            with _get_db() as conn:
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM stocks "
+                    "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                ).fetchone()[0]
+            steps.append({"step": "verify", "stocks_count_kr": cnt})
+            ok = cnt > 100
+        except Exception as exc:
+            steps.append({"step": "verify", "error": str(exc)})
+            ok = False
+
+        return jsonify({"ok": ok, "steps": steps})
+    except Exception as exc:
+        log.exception("ops/recover/kr_stocks")
+        steps.append({"step": "fatal", "error": str(exc)})
+        return jsonify({"ok": False, "steps": steps}), 500
+
+
 @app.route("/api/ops/health", methods=["GET"])
 def api_ops_health():
     """헬스 대시보드용 통합 메트릭.
