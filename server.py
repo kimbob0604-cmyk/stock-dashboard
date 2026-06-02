@@ -6996,45 +6996,65 @@ def _refresh_prices_from_naver():
             log.debug("[가격 갱신] universe 저장 실패: %s", exc)
 
         # SQLite stocks 테이블도 갱신 (시간외 + 시가총액 포함)
-        # market_cap 은 Naver 폴링 응답의 marketValueFullRaw 사용
+        # market_cap 은 Naver 폴링 응답의 marketValueFullRaw 사용.
+        # S-3-B: UPSERT — 빈 stocks 테이블도 universe 정보로 시드 (INSERT) +
+        # 기존 행은 가격만 갱신 (UPDATE). Render 부팅 시 stocks=0 회복.
         if _SQLITE_OK and USE_SQLITE:
             try:
                 today_str = now_kst().strftime("%Y%m%d")
                 with _get_db() as conn:
+                    before_cnt = conn.execute(
+                        "SELECT COUNT(*) FROM stocks "
+                        "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                    ).fetchone()[0]
                     for code, info in stocks_map.items():
-                        mcap = info.get("market_cap")
-                        if mcap is not None and mcap > 0:
-                            conn.execute(
-                                "UPDATE stocks SET close=?, change_pct=?, volume_mn=?, "
-                                "market_cap=?, market_cap_updated=?, "
-                                "after_hours_price=?, after_hours_change_pct=?, "
-                                "after_hours_status=?, after_hours_time=?, "
-                                "updated_at=datetime('now') WHERE code=?",
-                                (info.get("close"), info.get("change_pct"),
-                                 info.get("volume_mn"), mcap, today_str,
-                                 info.get("after_hours_price"),
-                                 info.get("after_hours_change_pct"),
-                                 info.get("after_hours_status"),
-                                 info.get("after_hours_time"),
-                                 code),
-                            )
-                        else:
-                            conn.execute(
-                                "UPDATE stocks SET close=?, change_pct=?, volume_mn=?, "
-                                "after_hours_price=?, after_hours_change_pct=?, "
-                                "after_hours_status=?, after_hours_time=?, "
-                                "updated_at=datetime('now') WHERE code=?",
-                                (info.get("close"), info.get("change_pct"),
-                                 info.get("volume_mn"),
-                                 info.get("after_hours_price"),
-                                 info.get("after_hours_change_pct"),
-                                 info.get("after_hours_status"),
-                                 info.get("after_hours_time"),
-                                 code),
-                            )
+                        mcap = info.get("market_cap") or 0
+                        sectors = info.get("sectors") or []
+                        sector = sectors[0] if sectors else ""
+                        name = info.get("name") or code
+                        conn.execute(
+                            "INSERT INTO stocks "
+                            "(code, name, market, sector, market_cap, market_cap_updated, "
+                            " close, change_pct, volume_mn, sectors_json, "
+                            " after_hours_price, after_hours_change_pct, "
+                            " after_hours_status, after_hours_time, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
+                            "ON CONFLICT(code) DO UPDATE SET "
+                            "  close = excluded.close, "
+                            "  change_pct = excluded.change_pct, "
+                            "  volume_mn = excluded.volume_mn, "
+                            "  market_cap = CASE WHEN excluded.market_cap > 0 "
+                            "                    THEN excluded.market_cap ELSE stocks.market_cap END, "
+                            "  market_cap_updated = CASE WHEN excluded.market_cap > 0 "
+                            "                            THEN excluded.market_cap_updated "
+                            "                            ELSE stocks.market_cap_updated END, "
+                            "  after_hours_price = excluded.after_hours_price, "
+                            "  after_hours_change_pct = excluded.after_hours_change_pct, "
+                            "  after_hours_status = excluded.after_hours_status, "
+                            "  after_hours_time = excluded.after_hours_time, "
+                            "  updated_at = datetime('now')",
+                            (code, name, "", sector,
+                             mcap if mcap > 0 else None,
+                             today_str if mcap > 0 else None,
+                             info.get("close"), info.get("change_pct"),
+                             info.get("volume_mn"),
+                             json.dumps(sectors, ensure_ascii=False),
+                             info.get("after_hours_price"),
+                             info.get("after_hours_change_pct"),
+                             info.get("after_hours_status"),
+                             info.get("after_hours_time")),
+                        )
                     conn.commit()
+                    after_cnt = conn.execute(
+                        "SELECT COUNT(*) FROM stocks "
+                        "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                    ).fetchone()[0]
+                inserted = after_cnt - before_cnt
+                if inserted > 0:
+                    log.info("[가격 갱신] stocks 신규 INSERT %d종목 (이전 %d → 현재 %d)",
+                             inserted, before_cnt, after_cnt)
             except Exception as exc:
-                log.debug("[가격 갱신] stocks DB 갱신 실패: %s", exc)
+                log.warning("[가격 갱신] stocks DB UPSERT 실패: %s", exc)
 
     log.info("[가격 갱신] %d종목 반영, 실패 배치 %d개", updated, _fail)
     return updated
