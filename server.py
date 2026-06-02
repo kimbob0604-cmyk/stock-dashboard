@@ -15811,21 +15811,30 @@ def api_ops_cron_jobs():
 
 @app.route("/api/ops/cron/trigger/<job_id>", methods=["POST"])
 def api_ops_cron_trigger(job_id: str):
-    """수동 트리거 — 등록된 잡을 즉시 한 번 실행 (다음 정기 실행은 유지)."""
+    """수동 트리거 — 등록된 잡의 함수를 별도 thread 에서 즉시 호출.
+
+    이전엔 _scheduler.modify_job(next_run_time=_dt.now()) 사용했으나
+    Render(UTC) + APScheduler(KST) 환경에서 naive datetime 이 9시간 후로
+    해석되어 즉시 실행 안 되는 버그. 함수를 직접 thread 로 호출하면
+    timezone 무관 + max_instances 제약도 우회.
+    """
     try:
         if _scheduler is None or not _scheduler.running:
             return jsonify({"ok": False, "error": "scheduler not running"}), 409
         job = _scheduler.get_job(job_id)
         if not job:
             return jsonify({"ok": False, "error": f"job not found: {job_id}"}), 404
-        # 다음 실행을 지금으로 당김 (modify) — 그러면 즉시 실행 후 trigger 가 다음 시각 자동 계산
-        from datetime import datetime as _dt
-        _scheduler.modify_job(job_id, next_run_time=_dt.now())
+        func = job.func
+        import threading as _th
+        _th.Thread(target=func, daemon=True,
+                   name=f"manual-{job_id}").start()
         return jsonify({
             "ok": True,
             "job_id": job_id,
             "name": job.name or job_id,
+            "func": getattr(func, "__name__", str(func)),
             "triggered_at": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+            "method": "thread_direct",
         })
     except Exception as exc:
         log.exception("ops/cron/trigger")
