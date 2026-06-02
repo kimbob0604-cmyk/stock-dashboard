@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS stocks (
     after_hours_status TEXT,
     after_hours_time TEXT,
     is_etf INTEGER DEFAULT 0,
+    market_cap_updated TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_stocks_market ON stocks(market);

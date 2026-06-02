@@ -14,10 +14,35 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _local = threading.local()
 
 
+def _ensure_stocks_columns(conn):
+    """기존 DB의 stocks 테이블에 누락된 컬럼 ALTER 추가 (idempotent).
+
+    schema.sql 의 CREATE TABLE IF NOT EXISTS 는 기존 테이블엔 영향 없음 →
+    실서비스 DB 마이그레이션은 ALTER 로 보강해야 함.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(stocks)")}
+    required: list[tuple[str, str]] = [
+        ("market_cap_updated", "TEXT"),
+        ("after_hours_price", "REAL"),
+        ("after_hours_change_pct", "REAL"),
+        ("after_hours_status", "TEXT"),
+        ("after_hours_time", "TEXT"),
+        ("is_etf", "INTEGER DEFAULT 0"),
+    ]
+    for name, type_ in required:
+        if name not in cols:
+            try:
+                conn.execute(f"ALTER TABLE stocks ADD COLUMN {name} {type_}")
+                print(f"[DB migrate] stocks.{name} ADD COLUMN")
+            except sqlite3.OperationalError as e:
+                print(f"[DB migrate] stocks.{name} skip: {e}")
+
+
 def init_db():
     """DB 초기화 + 스키마 적용."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _ensure_stocks_columns(conn)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.commit()
     conn.close()
