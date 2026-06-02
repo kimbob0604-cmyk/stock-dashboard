@@ -15841,6 +15841,49 @@ def api_ops_cron_trigger(job_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/ops/diag/stocks_schema", methods=["GET"])
+def api_ops_diag_stocks_schema():
+    """stocks 테이블 schema 진단 (Render 환경에서 ALTER 컬럼 부재 의심 시)."""
+    try:
+        with _get_db() as conn:
+            cols = [dict(r) for r in conn.execute("PRAGMA table_info(stocks)")]
+            cnt = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()[0]
+            # 직접 INSERT 테스트 — 어떤 에러 나는지 확인
+            test_result = "skipped"
+            try:
+                conn.execute(
+                    "INSERT INTO stocks "
+                    "(code, name, market, sector, market_cap, market_cap_updated, "
+                    " close, change_pct, volume_mn, sectors_json, "
+                    " after_hours_price, after_hours_change_pct, "
+                    " after_hours_status, after_hours_time, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
+                    "ON CONFLICT(code) DO UPDATE SET close=excluded.close",
+                    ("__test__", "TEST", "", "", 0, None,
+                     100.0, 0.0, 0.0, "[]",
+                     None, None, None, None)
+                )
+                conn.commit()
+                cnt2 = conn.execute("SELECT COUNT(*) FROM stocks WHERE code='__test__'").fetchone()[0]
+                test_result = "ok" if cnt2 == 1 else "no_row"
+                conn.execute("DELETE FROM stocks WHERE code='__test__'")
+                conn.commit()
+            except Exception as exc:
+                test_result = f"FAIL: {type(exc).__name__}: {exc}"
+
+        return jsonify({
+            "columns": [{"name": c["name"], "type": c["type"],
+                         "notnull": c["notnull"], "dflt": c["dflt_value"]}
+                        for c in cols],
+            "column_names": [c["name"] for c in cols],
+            "row_count": cnt,
+            "insert_test": test_result,
+        })
+    except Exception as exc:
+        log.exception("ops/diag/stocks_schema")
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/ops/diag/kr_universe", methods=["GET"])
 def api_ops_diag_kr_universe():
     """KR universe 진단: 본체 파일 / lock / stocks 카운트 / 캐시 디렉토리 상태.
