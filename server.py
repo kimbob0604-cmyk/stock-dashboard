@@ -12135,33 +12135,67 @@ def build_market_summary(dry_run: bool = False) -> dict:
                 rows = conn.execute("""
                     SELECT f.code AS code,
                            COALESCE(NULLIF(s.name, ''), NULLIF(f.name, ''), f.code) AS name,
-                           f.foreign_value_json, f.inst_value_json
+                           f.dates_json, f.foreign_value_json, f.inst_value_json
                     FROM flow_cache f
                     LEFT JOIN stocks s ON s.code = f.code
                     WHERE f.foreign_value_json IS NOT NULL
                 """).fetchall()
-                # name 이 여전히 code 와 같으면 (== 매칭 실패) 그대로 둠 (희소 케이스)
-                foreign_today: list = []
-                inst_today: list = []
+                # 투자자별 순매매(외국인/기관)는 장마감 직후엔 당일치 미집계 →
+                # Naver frgn 페이지가 전일까지만 제공. 캐시의 실제 최신 거래일을
+                # 읽어 라벨에 표기하고, 모든 종목 값을 그 공통 최신일에 정렬한다.
+                # (기존엔 종목별 마지막 행을 무조건 "(오늘)"로 표기 → 전일 데이터를
+                #  당일로 오인하게 만드는 버그. 예: 삼성전자 06/04 기관 순매수를
+                #  06/05 "오늘"로 표시.)
+                parsed: list = []
+                latest_date: str | None = None
                 for r in rows:
                     name = r["name"] if r["name"] != r["code"] else r["code"]
+                    dts = _parse_json_list(r["dates_json"])
                     fv = _parse_json_list(r["foreign_value_json"])
                     iv = _parse_json_list(r["inst_value_json"])
-                    if fv:
-                        foreign_today.append({"code": r["code"], "name": name, "net": fv[-1]})
-                    if iv:
-                        inst_today.append({"code": r["code"], "name": name, "net": iv[-1]})
+                    if not dts:
+                        continue
+                    d_last = dts[-1]
+                    if latest_date is None or d_last > latest_date:
+                        latest_date = d_last
+                    parsed.append({"code": r["code"], "name": name,
+                                   "d_last": d_last, "fv": fv, "iv": iv})
+
+                foreign_today: list = []
+                inst_today: list = []
+                for p in parsed:
+                    # 공통 최신 거래일과 일치하는 종목만 (날짜 혼재 방지)
+                    if p["d_last"] != latest_date:
+                        continue
+                    if p["fv"]:
+                        foreign_today.append({"code": p["code"], "name": p["name"], "net": p["fv"][-1]})
+                    if p["iv"]:
+                        inst_today.append({"code": p["code"], "name": p["name"], "net": p["iv"][-1]})
+
+                # 라벨용 날짜 문구: 당일이면 "오늘", 아니면 "MM/DD 기준"
+                today_kst_ymd = now_kst().strftime("%Y-%m-%d")
+                if latest_date and latest_date != today_kst_ymd:
+                    _d = latest_date[5:].replace("-", "/")
+                    date_lbl = f"{_d} 기준"
+                    flow_section["subsections"].append({
+                        "subtitle": "ℹ️ 투자자 매매 동향",
+                        "items": [f"  당일 외국인/기관 순매매는 장마감 후 집계 지연 — "
+                                  f"최신 확정치 {_d} 기준"]
+                    })
+                else:
+                    date_lbl = "오늘"
+
                 foreign_top = sorted(foreign_today, key=lambda x: x["net"], reverse=True)[:5]
                 inst_top = sorted(inst_today, key=lambda x: x["net"], reverse=True)[:5]
                 if foreign_top:
                     flow_section["subsections"].append({
-                        "subtitle": "🌐 외국인 순매수 TOP 5 (오늘)",
+                        "subtitle": f"🌐 외국인 순매수 TOP 5 ({date_lbl})",
                         "items": [_format_flow_line(r['code'], r['name'],
                                                    r['net']/1e8) for r in foreign_top]
                     })
                 if inst_top:
                     flow_section["subsections"].append({
-                        "subtitle": "🏛 기관 순매수 TOP 5 (오늘)",
+                        "subtitle": f"🏛 기관 순매수 TOP 5 ({date_lbl})",
                         "items": [_format_flow_line(r['code'], r['name'],
                                                    r['net']/1e8) for r in inst_top]
                     })
