@@ -6434,12 +6434,14 @@ def _startup():
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="flow_batch", max_instances=1,
                                misfire_grace_time=600)
-            # 장마감 자동 시황 요약 (15:50 — 가격 sync 15:35 + flow 15:40 + agent 15:45 후)
-            # 이전 15:42 는 7분 buffer 라 stocks.change_pct / flow_cache 미반영
-            # 케이스 있었음. 15분 buffer 로 모든 데이터 안정화 후 발송.
-            _scheduler.add_job(send_market_summary_telegram, "cron",
-                               day_of_week="mon-fri", hour=15, minute=50,
-                               id="tg_market_summary", max_instances=1)
+            # 저녁 확정 시황 (19:00 — 투자자별 순매매 확정치 반영).
+            # 15:50 직후엔 외국인/기관 당일 순매매가 미집계(KRX 확정 ~18:00,
+            # Naver 반영 ~18:30) → 수급이 전일 기준으로만 나오는 문제.
+            # 19:00 에 가격+수급을 발송 직전 재갱신 → 모든 수치 당일 확정값.
+            # (기존 15:50 발송은 사용자 요청으로 저녁 확정판으로 교체)
+            _scheduler.add_job(send_evening_market_summary, "cron",
+                               day_of_week="mon-fri", hour=19, minute=0,
+                               id="tg_evening_summary", max_instances=1)
             # 미국 장마감 시황 (KST 06:10 — 미국 월~금 마감 = KST 화~토)
             _scheduler.add_job(send_us_market_summary_telegram, "cron",
                                day_of_week="tue-sat", hour=6, minute=10,
@@ -12696,12 +12698,15 @@ def send_us_market_summary_telegram():
     send_telegram(msg)
 
 
-def send_market_summary_telegram():
-    """장마감 시황 텔레그램 발송 (15:50 cron).
+def send_market_summary_telegram(header: str | None = None):
+    """장마감 시황 텔레그램 발송.
     사용자 요청으로 텔레 메시지에서 제외하는 섹션:
       - 🤖 AI 추천 요약 (대시보드에는 유지)
       - 📋 주요 공시 (별도 알림 차단됨)
     API 응답(/api/market_summary) 에는 그대로 유지 — UI 영향 X.
+
+    header: 메시지 상단 제목 (기본 "📊 장마감 시황"). 저녁 확정판은
+            "🌙 장마감 확정 시황" 등으로 구분 표기.
     """
     try:
         data = build_market_summary()
@@ -12709,7 +12714,8 @@ def send_market_summary_telegram():
         log.exception("send_market_summary build")
         return
     SKIP_TITLES = {"🤖 AI 추천 요약", "📋 주요 공시"}
-    lines = [f"📊 <b>{now_kst().strftime('%m/%d')} 장마감 시황</b>", ""]
+    _title = header or "📊 장마감 시황"
+    lines = [f"<b>{now_kst().strftime('%m/%d')} {_title}</b>", ""]
     empty_titles: list = []
     for sec in data.get("sections", []):
         if sec.get("title") in SKIP_TITLES:
@@ -12742,6 +12748,58 @@ def send_market_summary_telegram():
     if len(msg) > 4000:
         msg = msg[:3990] + "\n…(생략)"
     send_telegram(msg)
+
+
+def send_evening_market_summary():
+    """저녁 확정 시황 텔레그램 발송 (평일 19:00 cron).
+
+    15:50 장마감 직후엔 투자자별(외국인/기관) 순매매가 미집계 → KRX 확정치는
+    통상 18:00 전후 공개되어 Naver frgn 에 ~18:30 반영. 19:00 에 가격·수급을
+    발송 직전 재갱신하면 수급까지 당일 확정값으로 채워진다.
+
+    수급 확정 데이터 미반영 방지: 수급 최신일이 오늘이 아니면 최대 3회
+    (10분 간격) 재시도 후, 그래도 미공개면 build_market_summary 의 날짜
+    라벨 로직이 실제 기준일을 정확히 표기하므로 오인 없이 발송된다.
+    """
+    # 1) 종가 가격 재갱신 (장 마감 확정값)
+    try:
+        n = _refresh_prices_from_naver()
+        log.info("[저녁시황] 가격 갱신 %d종목", n)
+    except Exception as exc:
+        log.warning("[저녁시황] 가격 갱신 실패: %s", exc)
+
+    # 2) 수급 재갱신 — 당일 확정치 공개 대기 (최대 3회 재시도)
+    today_ymd = now_kst().strftime("%Y-%m-%d")
+    for attempt in range(1, 4):
+        try:
+            r = _refresh_flow_batch(top_n=200)
+            log.info("[저녁시황] 수급 갱신 시도 %d: %s", attempt, r)
+        except Exception as exc:
+            log.warning("[저녁시황] 수급 갱신 실패 (시도 %d): %s", attempt, exc)
+
+        # 삼성전자(005930) 기준 최신 수급일이 오늘이면 확정 공개됨
+        latest = None
+        if _SQLITE_OK and USE_SQLITE:
+            try:
+                with _get_db() as conn:
+                    row = conn.execute(
+                        "SELECT dates_json FROM flow_cache WHERE code='005930'"
+                    ).fetchone()
+                if row and row["dates_json"]:
+                    dts = _parse_json_list(row["dates_json"])
+                    latest = dts[-1] if dts else None
+            except Exception as exc:
+                log.debug("[저녁시황] 수급 최신일 확인 실패: %s", exc)
+
+        if latest == today_ymd:
+            log.info("[저녁시황] 당일 수급 확정 공개 확인 (%s)", latest)
+            break
+        if attempt < 3:
+            log.info("[저녁시황] 당일 수급 미공개 (최신=%s) — 10분 후 재시도", latest)
+            time.sleep(600)
+
+    # 3) 발송 (모든 수치 당일 확정 — 수급 라벨은 실제 기준일 자동 표기)
+    send_market_summary_telegram(header="🌙 장마감 확정 시황")
 
 
 # ── 섹터 로테이션 2.0: DB 기반 동적 추천/회피 + 시장 국면 ────────────────────────────────────
