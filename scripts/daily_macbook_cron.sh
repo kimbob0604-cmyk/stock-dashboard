@@ -73,8 +73,24 @@ log "▶  git commit + push"
     log "  변경사항 없음 — push 생략"
   else
     git commit -m "auto: daily refresh $(date +%Y-%m-%d)" 2>&1 | tee -a "$LOG_FILE"
-    git push 2>&1 | tee -a "$LOG_FILE"
-    log "✓  git push 완료 (Render 자동 배포 트리거)"
+    # push 결과를 실제 exit code 로 확인 (DNS/네트워크 실패 시 재시도).
+    # 기존엔 실패해도 무조건 "완료" 로깅 → Render 미배포를 은폐했음.
+    _pushed=0
+    for _try in 1 2 3; do
+      # 파이프(tee) 없이 직접 실행해야 git push 의 exit code 를 검사할 수 있음.
+      _push_out="$(git push 2>&1)"; _push_rc=$?
+      printf '%s\n' "$_push_out" | tee -a "$LOG_FILE"
+      if [ "$_push_rc" = "0" ]; then
+        _pushed=1; break
+      fi
+      log "⚠  git push 시도 $_try 실패 (rc=$_push_rc) — 20s 후 재시도"
+      sleep 20
+    done
+    if [ "$_pushed" = "1" ]; then
+      log "✓  git push 완료 (Render 자동 배포 트리거)"
+    else
+      log "❌ git push 3회 실패 — Render 미배포 (네트워크/DNS 확인 필요)"
+    fi
   fi
 } >> "$LOG_FILE" 2>&1
 

@@ -3264,6 +3264,17 @@ def _load_naver_universe() -> dict:
         except Exception:
             pass
 
+    # 최종 폴백: git 커밋된 시드 (data/naver_universe_seed.json).
+    # Render 무료플랜은 cache/ 영속 디스크가 없고 finance.naver.com HTML
+    # 스크랩이 데이터센터 IP에서 실패 → 유니버스 공백 → stocks 영구 빈값.
+    # 시드(종목코드+섹터)는 git 으로 항상 배포되므로, polling API(작동함)로
+    # 가격만 덮어쓰면 stocks/flow/섹터 시황이 정상 복구된다.
+    if target is None:
+        seed = BASE_DIR / "data" / "naver_universe_seed.json"
+        if seed.exists():
+            log.info("[KR universe] 스크랩 캐시 없음 → 커밋된 시드 폴백 (%s)", seed.name)
+            target = seed
+
     if target is None:
         return {}
 
