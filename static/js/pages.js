@@ -996,7 +996,7 @@ function navigateTo(page, params, opts) {
 
   document.body.classList.remove('page-thememap','page-market',
                                   'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain',
-                                  'page-verification','page-ops-freshness','page-ops-cron','page-ops-health');
+                                  'page-verification','page-ops-freshness','page-ops-cron','page-ops-health','page-stockdetail');
   document.body.classList.add(`page-${page}`);
 
   try { PAGE_RENDERERS[page](params); }
@@ -8943,6 +8943,194 @@ async function renderOpsHealthPlaceholder() {
   _opsScheduleNext('health', renderOpsHealthPlaceholder);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 종목 통합 상세 (stockdetail) — 가격·밸류·수급·동종비교·공시 원클릭 통합
+// ─────────────────────────────────────────────────────────────────────────────
+function _sdNum(v, digits) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return Number(v).toLocaleString('ko-KR', { maximumFractionDigits: digits ?? 0 });
+}
+function _sdEok(won) {
+  if (won === null || won === undefined || isNaN(won)) return '—';
+  const e = won / 1e8;
+  const s = e >= 0 ? '+' : '';
+  return `${s}${_sdNum(e, 0)}억`;
+}
+
+function renderStockDetailPage(params) {
+  const container = document.getElementById('stockdetail-view');
+  if (!container) return;
+  const code = params && params.code;
+  if (!code) { _sdRenderSearch(container); return; }
+  _sdRenderDetail(container, code);
+}
+
+function _sdRenderSearch(container) {
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>🔎 종목 통합 상세</h2>
+      <p class="page-desc">가격·밸류에이션·수급·동종비교·공시를 한 화면에</p>
+    </div>
+    <div class="verif-search-container">
+      <div class="verif-search-icon">🔎</div>
+      <div class="verif-search-title">종목명 또는 코드 입력</div>
+      <div class="verif-search-hint">예: 삼성전자, 005930, 한미반도체</div>
+      <div class="verif-search-box">
+        <input type="text" id="sd-search-input" class="verif-search-input"
+               placeholder="2글자 이상 입력 시 자동완성" autocomplete="off"/>
+        <div id="sd-search-dropdown" class="verif-search-dropdown"></div>
+      </div>
+    </div>`;
+  const input = document.getElementById('sd-search-input');
+  const dropdown = document.getElementById('sd-search-dropdown');
+  let t = null;
+  input.addEventListener('input', (e) => {
+    const q = e.target.value.trim();
+    if (t) clearTimeout(t);
+    if (q.length < 2) { dropdown.innerHTML = ''; dropdown.classList.remove('active'); return; }
+    t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/stock_search?q=${encodeURIComponent(q)}`);
+        const data = await r.json();
+        const results = (Array.isArray(data) ? data : []).slice(0, 15);
+        if (!results.length) {
+          dropdown.innerHTML = '<div class="verif-search-empty">검색 결과 없음</div>';
+          dropdown.classList.add('active'); return;
+        }
+        dropdown.innerHTML = results.map(s => `
+          <div class="verif-search-item" data-code="${_phEsc(s.code)}">
+            <span class="verif-item-code">${_phEsc(s.code)}</span>
+            <span class="verif-item-name">${_phEsc(s.name)}</span>
+          </div>`).join('');
+        dropdown.classList.add('active');
+        dropdown.querySelectorAll('.verif-search-item').forEach(el =>
+          el.addEventListener('click', () => navigateTo('stockdetail', { code: el.dataset.code })));
+      } catch (e) {
+        dropdown.innerHTML = '<div class="verif-search-empty">검색 오류</div>';
+        dropdown.classList.add('active');
+      }
+    }, 200);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { const f = dropdown.querySelector('.verif-search-item'); if (f) f.click(); }
+  });
+  setTimeout(() => input.focus(), 100);
+}
+
+async function _sdRenderDetail(container, code) {
+  container.innerHTML = `
+    <div class="page-header" style="display:flex;align-items:center;gap:12px;">
+      <a href="#" onclick="event.preventDefault(); navigateTo('stockdetail');"
+         style="color:#60a5fa;text-decoration:none;">← 검색</a>
+      <h2 style="margin:0;">🔎 종목 통합 상세 — ${_phEsc(code)}</h2>
+    </div>
+    <div id="sd-body" style="padding:4px;"><div style="color:#94a3b8;padding:30px;">로딩 중…</div></div>`;
+  const body = document.getElementById('sd-body');
+
+  const [price, fin, flow, peers, disc] = await Promise.all([
+    fetch(`/api/price/${code}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/financial/${code}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/flow/${code}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/peers/${code}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/disclosure_events/${code}`).then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+
+  const name = (price && price.name) || (fin && fin.name) || code;
+  const chg = price ? (price.change_pct || 0) : 0;
+  const chgColor = chg > 0 ? '#ef4444' : (chg < 0 ? '#3b82f6' : '#94a3b8');
+  const sign = chg >= 0 ? '+' : '';
+
+  const card = (title, inner) => `
+    <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;
+                padding:14px 16px;margin-bottom:12px;">
+      <div style="font-weight:700;color:#e2e8f0;margin-bottom:10px;font-size:14px;">${title}</div>
+      ${inner}
+    </div>`;
+  const kv = (label, val) => `
+    <div style="display:flex;justify-content:space-between;padding:3px 0;font-size:13px;">
+      <span style="color:#94a3b8;">${label}</span><span style="color:#e2e8f0;font-weight:600;">${val}</span>
+    </div>`;
+
+  // 1) 시세 헤더
+  let html = `
+    <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+      <span style="font-size:22px;font-weight:800;color:#f1f5f9;">${_phEsc(name)}</span>
+      <span style="color:#64748b;">${_phEsc(code)}</span>
+      ${price ? `<span style="font-size:20px;font-weight:800;color:${chgColor};">
+        ${_sdNum(price.price)}원 ${sign}${chg.toFixed(2)}%</span>` : ''}
+    </div>`;
+
+  // 2) 밸류에이션
+  if (fin) {
+    html += card('💵 밸류에이션', `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 24px;">
+        ${kv('PER', _sdNum(fin.per, 2) + (fin.industry_per ? ` <span style="color:#64748b;">(업종 ${_sdNum(fin.industry_per,1)})</span>` : ''))}
+        ${kv('PBR', _sdNum(fin.pbr, 2))}
+        ${kv('EPS', _sdNum(fin.eps) + '원')}
+        ${kv('BPS', _sdNum(fin.bps) + '원')}
+        ${kv('배당수익률', fin.dividend_yield != null ? _sdNum(fin.dividend_yield, 2) + '%' : '—')}
+        ${kv('외국인비중', fin.foreign_ratio != null ? _sdNum(fin.foreign_ratio, 2) + '%' : '—')}
+        ${kv('시가총액', fin.market_cap ? _sdNum(fin.market_cap / 1e8) + '억' : '—')}
+        ${kv('시총순위', fin.market_cap_rank ? '#' + fin.market_cap_rank : '—')}
+      </div>`);
+  }
+
+  // 3) 수급 (최근 5일 + 20일 누적)
+  if (flow && flow.dates && flow.dates.length) {
+    const d = flow.dates, fv = flow.foreign_value || [], iv = flow.inst_value || [];
+    const n = Math.min(5, d.length);
+    let rowsHtml = '';
+    for (let i = d.length - n; i < d.length; i++) {
+      const fEok = _sdEok(fv[i]); const iEok = _sdEok(iv[i]);
+      const fc = (fv[i] || 0) >= 0 ? '#ef4444' : '#3b82f6';
+      const ic = (iv[i] || 0) >= 0 ? '#ef4444' : '#3b82f6';
+      rowsHtml += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12.5px;">
+        <span style="color:#94a3b8;">${d[i].slice(5)}</span>
+        <span>외 <b style="color:${fc};">${fEok}</b> · 기 <b style="color:${ic};">${iEok}</b></span></div>`;
+    }
+    rowsHtml += `<div style="border-top:1px solid #334155;margin-top:6px;padding-top:6px;font-size:12.5px;
+        display:flex;justify-content:space-between;">
+        <span style="color:#94a3b8;">20일 누적</span>
+        <span>외 <b>${_sdEok(flow.foreign_sum_20)}</b> · 기 <b>${_sdEok(flow.inst_sum_20)}</b></span></div>`;
+    html += card('💰 수급 (외국인 · 기관)', rowsHtml);
+  }
+
+  // 4) 동종 비교
+  if (peers && peers.peers && peers.peers.length) {
+    const rows = peers.peers.slice(0, 6).map(p => `
+      <div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12.5px;">
+        <span style="color:#cbd5e1;">${_phEsc(p.name || p.code)}</span>
+        <span style="color:#94a3b8;">PER ${_sdNum(p.per, 1)} · ${p.change_pct != null
+          ? `<b style="color:${p.change_pct>=0?'#ef4444':'#3b82f6'};">${p.change_pct>=0?'+':''}${_sdNum(p.change_pct,2)}%</b>` : '—'}</span>
+      </div>`).join('');
+    html += card(`🔗 동종 비교 — ${_phEsc(peers.sector || '')}${peers.target_rank ? ` (순위 ${peers.target_rank}/${peers.peer_count})` : ''}`, rows);
+  }
+
+  // 5) 최근 공시
+  if (disc && disc.events && disc.events.length) {
+    const rows = disc.events.slice(0, 5).map(e => `
+      <div style="padding:3px 0;font-size:12.5px;border-bottom:1px solid #283548;">
+        <span style="color:#64748b;">${_phEsc((e.date || e.rcept_dt || '').slice(0,10))}</span>
+        <span style="color:#cbd5e1;margin-left:8px;">${_phEsc(e.title || e.report_nm || e.name || '')}</span>
+      </div>`).join('');
+    html += card(`📢 최근 공시 (${disc.count || disc.events.length})`, rows);
+  }
+
+  // 6) 바로가기
+  html += `<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
+      <button onclick="navigateTo('verification',{code:'${_phEsc(code)}'})"
+        style="background:#2563eb;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;">✅ 검증 시트</button>
+      <button onclick="navigateTo('market')"
+        style="background:#334155;color:#e2e8f0;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;">📈 시황분석</button>
+    </div>`;
+
+  if (!price && !fin && !flow) {
+    body.innerHTML = `<div style="color:#ef4444;padding:30px;">데이터를 불러오지 못했습니다 (${_phEsc(code)})</div>`;
+    return;
+  }
+  body.innerHTML = html;
+}
+
 // PAGE_RENDERERS에 신규 placeholder 등록
 if (typeof PAGE_RENDERERS !== 'undefined') {
   PAGE_RENDERERS.verification     = renderVerificationPlaceholder;
@@ -8950,6 +9138,7 @@ if (typeof PAGE_RENDERERS !== 'undefined') {
   PAGE_RENDERERS['ops-freshness'] = renderOpsFreshnessPlaceholder;
   PAGE_RENDERERS['ops-cron']      = renderOpsCronPlaceholder;
   PAGE_RENDERERS['ops-health']    = renderOpsHealthPlaceholder;
+  PAGE_RENDERERS.stockdetail      = renderStockDetailPage;
 }
 
 window.renderVerificationPlaceholder  = renderVerificationPlaceholder;
