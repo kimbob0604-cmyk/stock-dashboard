@@ -6442,6 +6442,11 @@ def _startup():
             _scheduler.add_job(send_evening_market_summary, "cron",
                                day_of_week="mon-fri", hour=19, minute=0,
                                id="tg_evening_summary", max_instances=1)
+            # 수급 심화 시그널 (19:30 — 저녁 확정 수급 분석 후)
+            # 쌍끌이 매수/매도 · 외국인 연속 순매수/순매도 · 수급 반전 포착.
+            _scheduler.add_job(alert_flow_signals, "cron",
+                               day_of_week="mon-fri", hour=19, minute=30,
+                               id="tg_flow_signals", max_instances=1)
             # 데이터 정합성 워치독 (평일 08:00~20:00 30분 간격) — 시황 핵심
             # 데이터(stocks·flow_cache) 공백/정체 감지 시 자동 재갱신 + 1회 알림.
             _scheduler.add_job(_market_watchdog, "cron",
@@ -12941,6 +12946,175 @@ def api_ops_watchdog():
                          name="watchdog-manual").start()
         return jsonify({"ok": True, "message": "워치독 백그라운드 실행"})
     return jsonify(_check_market_data_health())
+
+
+# ── 수급 심화 시그널 (flow_cache 20일 시계열 분석) ───────────────────────────
+def _flow_streak(series: list, positive: bool) -> int:
+    """series 끝에서부터 연속 동일부호 일수. positive=True면 순매수 연속."""
+    n = 0
+    for v in reversed(series):
+        if (v is None):
+            break
+        if (v > 0) if positive else (v < 0):
+            n += 1
+        else:
+            break
+    return n
+
+
+def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
+    """flow_cache 20일 시계열 → 수급 시그널 포착.
+
+    min_eok: 노이즈 컷 (최신일 |순매매| 억원 하한)
+    Returns: {
+      "date": 최신 거래일,
+      "dual_buy":  [외국인+기관 동시 순매수],   "dual_sell": [동시 순매도],
+      "streak_buy":[외국인 N일 연속 순매수],     "streak_sell":[연속 순매도],
+      "reversal":  [최근 순매도→당일 강한 순매수 전환],
+    }  각 종목: {code, name, foreign, inst, fstreak} (foreign/inst 단위: 억원)
+    """
+    empty = {"date": None, "dual_buy": [], "dual_sell": [],
+             "streak_buy": [], "streak_sell": [], "reversal": []}
+    if not (_SQLITE_OK and USE_SQLITE):
+        return empty
+    try:
+        with _get_db() as conn:
+            rows = conn.execute("""
+                SELECT f.code AS code,
+                       COALESCE(NULLIF(s.name,''), NULLIF(f.name,''), f.code) AS name,
+                       f.dates_json, f.foreign_value_json, f.inst_value_json
+                FROM flow_cache f
+                LEFT JOIN stocks s ON s.code = f.code
+                WHERE f.foreign_value_json IS NOT NULL
+            """).fetchall()
+    except Exception as exc:
+        log.warning("[수급시그널] 조회 실패: %s", exc)
+        return empty
+
+    parsed: list = []
+    latest_date: str | None = None
+    for r in rows:
+        name = r["name"] if r["name"] != r["code"] else r["code"]
+        dts = _parse_json_list(r["dates_json"])
+        fv = _parse_json_list(r["foreign_value_json"])
+        iv = _parse_json_list(r["inst_value_json"])
+        if not dts or not fv:
+            continue
+        if latest_date is None or dts[-1] > latest_date:
+            latest_date = dts[-1]
+        parsed.append({"code": r["code"], "name": name,
+                       "dts": dts, "fv": fv, "iv": iv})
+
+    thr = min_eok * 1e8  # 억 → 원
+    cand: list = []
+    for p in parsed:
+        if p["dts"][-1] != latest_date:   # 공통 최신일만 (날짜 혼재 방지)
+            continue
+        f_last = p["fv"][-1] if p["fv"] else 0
+        i_last = p["iv"][-1] if p["iv"] else 0
+        cand.append({
+            "code": p["code"], "name": p["name"],
+            "foreign": f_last / 1e8, "inst": i_last / 1e8,
+            "f_raw": f_last, "i_raw": i_last,
+            "fstreak_buy": _flow_streak(p["fv"], True),
+            "fstreak_sell": _flow_streak(p["fv"], False),
+            "fv": p["fv"],
+        })
+
+    # 1) 쌍끌이 매수/매도 (외국인·기관 동시, 각 |값| >= thr)
+    dual_buy = sorted(
+        [c for c in cand if c["f_raw"] >= thr and c["i_raw"] >= thr],
+        key=lambda c: c["f_raw"] + c["i_raw"], reverse=True)[:5]
+    dual_sell = sorted(
+        [c for c in cand if c["f_raw"] <= -thr and c["i_raw"] <= -thr],
+        key=lambda c: c["f_raw"] + c["i_raw"])[:5]
+
+    # 2) 외국인 연속 순매수/순매도 (streak >= streak_min, 최신일 |값| >= thr/2)
+    half = thr / 2
+    streak_buy = sorted(
+        [c for c in cand if c["fstreak_buy"] >= streak_min and c["f_raw"] >= half],
+        key=lambda c: (c["fstreak_buy"], c["f_raw"]), reverse=True)[:5]
+    streak_sell = sorted(
+        [c for c in cand if c["fstreak_sell"] >= streak_min and c["f_raw"] <= -half],
+        key=lambda c: (c["fstreak_sell"], -c["f_raw"]), reverse=True)[:5]
+
+    # 3) 수급 반전 — 직전 3일 외국인 순매도였다가 당일 강한 순매수 전환
+    reversal: list = []
+    for c in cand:
+        fv = c["fv"]
+        if len(fv) < 4:
+            continue
+        prior3 = sum(fv[-4:-1])
+        if prior3 < 0 and c["f_raw"] >= thr:
+            reversal.append(c)
+    reversal = sorted(reversal, key=lambda c: c["f_raw"], reverse=True)[:5]
+
+    return {"date": latest_date, "dual_buy": dual_buy, "dual_sell": dual_sell,
+            "streak_buy": streak_buy, "streak_sell": streak_sell,
+            "reversal": reversal}
+
+
+def alert_flow_signals():
+    """수급 심화 시그널 텔레그램 발송 (평일 19:30 — 저녁 확정 수급 분석)."""
+    sig = _analyze_flow_signals()
+    if not sig.get("date"):
+        log.info("[수급시그널] 데이터 없음 — 스킵")
+        return
+    date_lbl = sig["date"][5:].replace("-", "/")
+    lines = [f"💰 <b>{date_lbl} 수급 시그널</b>", ""]
+
+    def _fline(c, with_streak=False):
+        sgn_f = "+" if c["foreign"] >= 0 else ""
+        sgn_i = "+" if c["inst"] >= 0 else ""
+        base = (f"  {c['name']} 외 {sgn_f}{c['foreign']:,.0f}억 · "
+                f"기 {sgn_i}{c['inst']:,.0f}억")
+        if with_streak and c.get("fstreak_buy", 0) >= 3:
+            base += f" ({c['fstreak_buy']}일 연속)"
+        elif with_streak and c.get("fstreak_sell", 0) >= 3:
+            base += f" ({c['fstreak_sell']}일 연속)"
+        return base
+
+    any_section = False
+    if sig["dual_buy"]:
+        any_section = True
+        lines.append("🤝 <b>쌍끌이 순매수</b> (외국인+기관)")
+        lines += [_fline(c) for c in sig["dual_buy"]]
+        lines.append("")
+    if sig["dual_sell"]:
+        any_section = True
+        lines.append("💥 <b>쌍끌이 순매도</b> (외국인+기관)")
+        lines += [_fline(c) for c in sig["dual_sell"]]
+        lines.append("")
+    if sig["streak_buy"]:
+        any_section = True
+        lines.append("🔼 <b>외국인 연속 순매수</b>")
+        lines += [_fline(c, with_streak=True) for c in sig["streak_buy"]]
+        lines.append("")
+    if sig["streak_sell"]:
+        any_section = True
+        lines.append("🔽 <b>외국인 연속 순매도</b>")
+        lines += [_fline(c, with_streak=True) for c in sig["streak_sell"]]
+        lines.append("")
+    if sig["reversal"]:
+        any_section = True
+        lines.append("🔁 <b>수급 반전</b> (외국인 순매도→순매수 전환)")
+        lines += [_fline(c) for c in sig["reversal"]]
+        lines.append("")
+
+    if not any_section:
+        log.info("[수급시그널] 포착된 시그널 없음 — 스킵")
+        return
+    lines.append(f"⏰ {now_kst().strftime('%H:%M')} KST")
+    msg = "\n".join(lines)
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…(생략)"
+    send_telegram(msg)
+
+
+@app.route("/api/flow/signals")
+def api_flow_signals():
+    """수급 심화 시그널 JSON (쌍끌이/연속/반전)."""
+    return jsonify(_analyze_flow_signals())
 
 
 # ── 섹터 로테이션 2.0: DB 기반 동적 추천/회피 + 시장 국면 ────────────────────────────────────
