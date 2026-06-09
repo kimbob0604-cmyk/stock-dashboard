@@ -5281,6 +5281,188 @@ def api_briefing_test():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+# ── 텔레그램 양방향 봇 (webhook 명령 처리) ───────────────────────────────────
+# push 전용 → 온디맨드 조회 지원. 보안: 소유자 chat_id 만 응답 + 시크릿 헤더.
+def _telegram_secret() -> str:
+    """webhook 시크릿 토큰 (봇 토큰 파생 — 별도 설정 불필요)."""
+    import hashlib
+    tok = os.getenv("TELEGRAM_BOT_TOKEN") or "no-token"
+    return hashlib.sha256(("wh:" + tok).encode()).hexdigest()[:32]
+
+
+def _resolve_kr_code(q: str) -> tuple[str, str] | None:
+    """종목명 또는 코드 → (code, name). 정확>접두>부분 일치 우선."""
+    q = (q or "").strip()
+    if not q:
+        return None
+    import re as _re
+    if _re.fullmatch(r"\d{6}", q):
+        return (q, _get_stock_name(q) or q)
+    ql = q.lower()
+    uni = _load_naver_universe()
+    stocks = (uni or {}).get("stocks") or {}
+    best = None  # (score, code, name)
+    for code, rec in stocks.items():
+        name = rec.get("name") or ""
+        nl = name.lower()
+        if nl == ql:
+            return (code, name)
+        if nl.startswith(ql):
+            sc = 1
+        elif ql in nl:
+            sc = 2
+        else:
+            continue
+        if best is None or sc < best[0]:
+            best = (sc, code, name)
+    return (best[1], best[2]) if best else None
+
+
+def _tg_reply(text: str) -> None:
+    send_telegram(text)
+
+
+def _tg_cmd_price(arg: str) -> str:
+    hit = _resolve_kr_code(arg)
+    if not hit:
+        return f"❓ '{arg}' 종목을 찾지 못했습니다."
+    code, name = hit
+    d = _call_api_internal(f"/api/price/{code}") or {}
+    price = d.get("price") or d.get("close")
+    chg = d.get("change_pct")
+    if price is None:
+        return f"❓ {name}({code}) 가격 조회 실패"
+    sign = "+" if (chg or 0) >= 0 else ""
+    vol = d.get("volume_mn")
+    vol_str = f"\n거래대금 {vol/1e2:,.0f}억" if vol else ""
+    return (f"📈 <b>{name}</b> ({code})\n"
+            f"{price:,.0f}원 {sign}{(chg or 0):.2f}%{vol_str}")
+
+
+def _tg_cmd_flow(arg: str) -> str:
+    hit = _resolve_kr_code(arg)
+    if not hit:
+        return f"❓ '{arg}' 종목을 찾지 못했습니다."
+    code, name = hit
+    try:
+        _fetch_and_save_flow(code)  # 최신 갱신 (Naver 라이브)
+    except Exception:
+        pass
+    d = _read_flow_db(code) if (_SQLITE_OK and USE_SQLITE) else None
+    if not d or not d.get("dates"):
+        return f"❓ {name}({code}) 수급 데이터 없음"
+    dates = d["dates"]; fv = d.get("foreign_value") or []; iv = d.get("inst_value") or []
+    n = min(5, len(dates))
+    lines = [f"💰 <b>{name}</b> ({code}) 최근 수급"]
+    for i in range(len(dates) - n, len(dates)):
+        md = dates[i][5:].replace("-", "/")
+        f_eok = (fv[i] / 1e8) if i < len(fv) else 0
+        i_eok = (iv[i] / 1e8) if i < len(iv) else 0
+        sf = "+" if f_eok >= 0 else ""; si = "+" if i_eok >= 0 else ""
+        lines.append(f"  {md} 외 {sf}{f_eok:,.0f}억 · 기 {si}{i_eok:,.0f}억")
+    f20 = d.get("foreign_sum_20"); i20 = d.get("inst_sum_20")
+    if f20 is not None:
+        lines.append(f"📊 20일 누적 외 {f20/1e8:+,.0f}억 · 기 {(i20 or 0)/1e8:+,.0f}억")
+    return "\n".join(lines)
+
+
+def _tg_help() -> str:
+    return ("🤖 <b>명령어</b>\n"
+            "/시황 — 장마감 확정 시황\n"
+            "/시그널 — 수급 시그널 (쌍끌이·연속·반전)\n"
+            "/수급 &lt;종목&gt; — 종목 최근 수급 (예: /수급 삼성전자)\n"
+            "/가격 &lt;종목&gt; — 현재가\n"
+            "/도움 — 이 안내")
+
+
+def _handle_telegram_command(text: str) -> None:
+    """명령 디스패치 → 백그라운드 응답 발송."""
+    text = (text or "").strip()
+    if not text.startswith("/"):
+        return
+    parts = text[1:].split(maxsplit=1)
+    cmd = parts[0].lower().lstrip("/")
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    # @botname 접미사 제거 (그룹 채팅 대응)
+    cmd = cmd.split("@")[0]
+
+    try:
+        if cmd in ("도움", "help", "start", "명령"):
+            _tg_reply(_tg_help())
+        elif cmd in ("시황", "summary"):
+            _tg_reply("⏳ 시황 생성 중…")
+            send_market_summary_telegram(header="🌙 장마감 확정 시황 (요청)")
+        elif cmd in ("시그널", "수급시그널", "signals"):
+            _tg_reply("⏳ 수급 시그널 분석 중…")
+            alert_flow_signals()
+        elif cmd in ("수급", "flow"):
+            if not arg:
+                _tg_reply("사용법: /수급 삼성전자")
+            else:
+                _tg_reply(_tg_cmd_flow(arg))
+        elif cmd in ("가격", "시세", "price"):
+            if not arg:
+                _tg_reply("사용법: /가격 삼성전자")
+            else:
+                _tg_reply(_tg_cmd_price(arg))
+        else:
+            _tg_reply(f"❓ 알 수 없는 명령: /{cmd}\n" + _tg_help())
+    except Exception as exc:
+        log.warning("[봇] 명령 처리 실패 (%s): %s", cmd, exc)
+        _tg_reply(f"⚠️ 처리 중 오류: {str(exc)[:100]}")
+
+
+@app.route("/api/telegram/webhook", methods=["POST"])
+def api_telegram_webhook():
+    """텔레그램 webhook — 소유자 chat 명령만 처리."""
+    # 시크릿 검증 (Telegram 이 setWebhook 의 secret_token 을 헤더로 재전송)
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if secret != _telegram_secret():
+        return jsonify({"ok": False}), 403
+    try:
+        upd = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        upd = {}
+    msg = upd.get("message") or upd.get("edited_message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id") or "")
+    text = msg.get("text") or ""
+    owner = os.getenv("TELEGRAM_CHAT_ID") or ""
+    # 소유자만 응답 (타인 chat 무시)
+    if owner and chat_id and chat_id == owner and text.startswith("/"):
+        threading.Thread(target=_handle_telegram_command, args=(text,),
+                         daemon=True, name="tg-cmd").start()
+    return jsonify({"ok": True})
+
+
+def _telegram_setup_webhook() -> None:
+    """부팅 시 webhook 자동 등록 (Render — 공개 URL 있을 때만)."""
+    base = (os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not base or not token:
+        return
+    try:
+        import requests as _rq
+        r = _rq.post(
+            f"https://api.telegram.org/bot{token}/setWebhook",
+            json={"url": f"{base}/api/telegram/webhook",
+                  "secret_token": _telegram_secret(),
+                  "allowed_updates": ["message", "edited_message"]},
+            timeout=10)
+        if r.status_code == 200 and r.json().get("ok"):
+            log.info("[봇] webhook 등록 완료: %s/api/telegram/webhook", base)
+        else:
+            log.warning("[봇] webhook 등록 실패: %s", r.text[:200])
+    except Exception as exc:
+        log.warning("[봇] webhook 등록 예외: %s", exc)
+
+
+@app.route("/api/telegram/setup_webhook", methods=["POST"])
+def api_telegram_setup_webhook():
+    """webhook 수동 등록 트리거."""
+    _telegram_setup_webhook()
+    return jsonify({"ok": True, "message": "webhook 등록 시도 (로그 확인)"})
+
+
 @app.route("/api/watchlist/sync", methods=["POST"])
 def api_watchlist_sync():
     """프론트 localStorage 관심종목 → 서버 파일 동기화 (알림용)."""
@@ -6386,6 +6568,11 @@ def _startup():
         # stocks.change_pct 동결되는 회귀 방지).
         threading.Thread(target=_startup_naver_universe_sync,
                          daemon=True, name="naver-startup").start()
+
+        # 텔레그램 양방향 봇 webhook 등록 (Render 공개 URL 있을 때만)
+        if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
+            threading.Thread(target=_telegram_setup_webhook,
+                             daemon=True, name="tg-webhook-setup").start()
 
         # Phase 14: S&P 500 market 백그라운드 빌드
         #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
