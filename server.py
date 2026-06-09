@@ -6442,6 +6442,12 @@ def _startup():
             _scheduler.add_job(send_evening_market_summary, "cron",
                                day_of_week="mon-fri", hour=19, minute=0,
                                id="tg_evening_summary", max_instances=1)
+            # 데이터 정합성 워치독 (평일 08:00~20:00 30분 간격) — 시황 핵심
+            # 데이터(stocks·flow_cache) 공백/정체 감지 시 자동 재갱신 + 1회 알림.
+            _scheduler.add_job(_market_watchdog, "cron",
+                               day_of_week="mon-fri", hour="8-20", minute="0,30",
+                               id="data_watchdog", max_instances=1,
+                               misfire_grace_time=300)
             # 미국 장마감 시황 (KST 06:10 — 미국 월~금 마감 = KST 화~토)
             _scheduler.add_job(send_us_market_summary_telegram, "cron",
                                day_of_week="tue-sat", hour=6, minute=10,
@@ -12800,6 +12806,141 @@ def send_evening_market_summary():
 
     # 3) 발송 (모든 수치 당일 확정 — 수급 라벨은 실제 기준일 자동 표기)
     send_market_summary_telegram(header="🌙 장마감 확정 시황")
+
+
+# ── 데이터 정합성 워치독 + 자가복구 ────────────────────────────────────────
+# 시황 3개 섹션(섹터/특징주/수급)이 의존하는 stocks·flow_cache 가 비거나
+# stale 해지는 사고가 반복됨 (Render 비영속 디스크 + Naver 스크랩 실패).
+# 워치독이 주기적으로 건강도를 점검 → 비정상이면 자동 재갱신 + 관리자 1회 알림.
+_WATCHDOG_STATE: dict = {"alerted": False, "last_summary": None}
+
+
+def _check_market_data_health() -> dict:
+    """KR 시황 핵심 데이터 건강도 점검.
+
+    Returns: {
+      "healthy": bool, "issues": [str, ...],
+      "stocks_kr": int,        # change_pct 있는 KR 종목 수
+      "flow_rows": int,        # 외인 수급 있는 flow_cache 행 수
+      "flow_latest": str|None, # 수급 최신 거래일
+      "stocks_age_min": float|None,  # stocks 최신 updated_at 경과(분)
+    }
+    """
+    out = {"healthy": True, "issues": [], "stocks_kr": 0,
+           "flow_rows": 0, "flow_latest": None, "stocks_age_min": None}
+    if not (_SQLITE_OK and USE_SQLITE):
+        out["healthy"] = False
+        out["issues"].append("SQLite 비활성")
+        return out
+    try:
+        with _get_db() as conn:
+            out["stocks_kr"] = conn.execute(
+                "SELECT COUNT(*) FROM stocks "
+                "WHERE (market='' OR market LIKE 'KOS%') "
+                "  AND COALESCE(is_etf,0)=0 AND change_pct IS NOT NULL "
+                "  AND close >= 1000"
+            ).fetchone()[0]
+            out["flow_rows"] = conn.execute(
+                "SELECT COUNT(*) FROM flow_cache WHERE foreign_value_json IS NOT NULL"
+            ).fetchone()[0]
+            row = conn.execute(
+                "SELECT MAX(updated_at) FROM stocks "
+                "WHERE (market='' OR market LIKE 'KOS%')"
+            ).fetchone()
+            if row and row[0]:
+                from datetime import datetime as _dt
+                try:
+                    upd = _dt.fromisoformat(row[0])
+                    out["stocks_age_min"] = round(
+                        (now_kst().replace(tzinfo=None) - upd).total_seconds() / 60, 1)
+                except Exception:
+                    pass
+            frow = conn.execute(
+                "SELECT dates_json FROM flow_cache WHERE code='005930'"
+            ).fetchone()
+            if frow and frow["dates_json"]:
+                dts = _parse_json_list(frow["dates_json"])
+                out["flow_latest"] = dts[-1] if dts else None
+    except Exception as exc:
+        out["healthy"] = False
+        out["issues"].append(f"DB 조회 실패: {str(exc)[:80]}")
+        return out
+
+    # 판정 기준
+    if out["stocks_kr"] < 1000:
+        out["healthy"] = False
+        out["issues"].append(f"KR 종목 부족 ({out['stocks_kr']}개, 정상 ~2500)")
+    if out["flow_rows"] < 50:
+        out["healthy"] = False
+        out["issues"].append(f"수급 데이터 부족 ({out['flow_rows']}행)")
+    # 장중/장직후에 stocks 가 6시간 넘게 안 갱신되면 동결 의심
+    if (out["stocks_age_min"] is not None and out["stocks_age_min"] > 360
+            and now_kst().weekday() < 5):
+        out["healthy"] = False
+        out["issues"].append(f"stocks 갱신 정체 ({out['stocks_age_min']:.0f}분 전)")
+    return out
+
+
+def _market_watchdog():
+    """주기 워치독 — 비정상 감지 시 자동 재갱신 + 관리자 1회 알림/복구 알림.
+    cron: 평일 08:00~20:00 30분 간격."""
+    health = _check_market_data_health()
+    if health["healthy"]:
+        # 직전에 사고 알림을 보냈다면 복구 알림 1회
+        if _WATCHDOG_STATE["alerted"]:
+            _WATCHDOG_STATE["alerted"] = False
+            send_telegram(
+                f"🛠 <b>[시스템] 데이터 복구됨</b>\n"
+                f"KR 종목 {health['stocks_kr']}개 · 수급 {health['flow_rows']}행 정상화"
+            )
+        _WATCHDOG_STATE["last_summary"] = health
+        return
+
+    log.warning("[워치독] 비정상 감지: %s", "; ".join(health["issues"]))
+    # ── 자가복구 시도: 가격 → 수급 재갱신 ──
+    recovered = {}
+    try:
+        recovered["prices"] = _refresh_prices_from_naver()
+    except Exception as exc:
+        log.warning("[워치독] 가격 복구 실패: %s", exc)
+    try:
+        if health["flow_rows"] < 50:
+            r = _refresh_flow_batch(top_n=200)
+            recovered["flow"] = r.get("success", 0) if isinstance(r, dict) else 0
+    except Exception as exc:
+        log.warning("[워치독] 수급 복구 실패: %s", exc)
+
+    after = _check_market_data_health()
+    if after["healthy"]:
+        log.info("[워치독] 자가복구 성공 (prices=%s, flow=%s)",
+                 recovered.get("prices"), recovered.get("flow"))
+        # 이전에 사고 알림을 이미 보냈으면 복구 알림, 아니면 조용히 복구
+        if _WATCHDOG_STATE["alerted"]:
+            _WATCHDOG_STATE["alerted"] = False
+            send_telegram(
+                f"🛠 <b>[시스템] 자동 복구 완료</b>\n"
+                f"KR 종목 {after['stocks_kr']}개 · 수급 {after['flow_rows']}행"
+            )
+    else:
+        # 복구 실패 — 사고 알림 1회만 (중복 방지)
+        if not _WATCHDOG_STATE["alerted"]:
+            _WATCHDOG_STATE["alerted"] = True
+            send_telegram(
+                "🛠 <b>[시스템] 데이터 이상 — 자동복구 실패</b>\n"
+                + "\n".join(f"  • {i}" for i in after["issues"])
+                + "\n<i>Naver 차단/네트워크 의심 — Render Logs 확인</i>"
+            )
+    _WATCHDOG_STATE["last_summary"] = after
+
+
+@app.route("/api/ops/watchdog", methods=["GET", "POST"])
+def api_ops_watchdog():
+    """워치독 수동 점검(GET) / 복구 실행(POST)."""
+    if request.method == "POST":
+        threading.Thread(target=_market_watchdog, daemon=True,
+                         name="watchdog-manual").start()
+        return jsonify({"ok": True, "message": "워치독 백그라운드 실행"})
+    return jsonify(_check_market_data_health())
 
 
 # ── 섹터 로테이션 2.0: DB 기반 동적 추천/회피 + 시장 국면 ────────────────────────────────────
