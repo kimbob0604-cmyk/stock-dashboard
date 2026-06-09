@@ -8498,6 +8498,8 @@ function _verifSetupUnsavedWarning() {
     }
   });
 }
+
+function _verifRenderNotFound(container, code, errorMsg) {
   container.innerHTML = `
     <div class="page-header">
       <h2>✅ 검증 시트</h2>
