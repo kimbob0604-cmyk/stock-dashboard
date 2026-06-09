@@ -105,6 +105,27 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
+
+
+class _PykrxNoiseFilter(logging.Filter):
+    """pykrx 내부 로깅 버그 억제.
+
+    pykrx 는 상장폐지/미상장 티커(예: 294400) 조회 실패 시
+    comm/util.py 의 `logging.info(args, kwargs)` (튜플을 메시지로 전달) +
+    내부 트레이스백을 root 로거로 쏟아낸다 → "not all arguments converted"
+    Logging error + NoneType 트레이스백 노이즈. 우리 호출은 _pykrx_call /
+    _pykrx_ticker_name 이 None 으로 안전 처리하므로 로그만 차단한다.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        p = record.pathname or ""
+        return "pykrx" not in p
+
+# root 로거 + 모든 핸들러에 필터 부착 (record 출처가 pykrx 면 차단)
+_pf = _PykrxNoiseFilter()
+logging.getLogger().addFilter(_pf)
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_pf)
+
 log = logging.getLogger("server")
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"), static_url_path="/static")
@@ -234,6 +255,21 @@ def _pykrx_call(func, *args, timeout: int | None = None, **kwargs):
         log.debug("[pykrx] %s(%s) timeout/fail (%ds): %s",
                   getattr(func, "__name__", "?"), args[:2], timeout, exc)
         return None
+
+
+def _pykrx_ticker_name(code: str) -> str | None:
+    """pykrx 종목명 안전 조회. 비정상 반환(DataFrame/Series 등)·예외 시 None.
+
+    pykrx 가 상장폐지/미상장 코드에 str 이 아닌 값을 돌려주는 케이스에서
+    호출부의 `... or code` 진리값 평가가 'DataFrame is ambiguous' ValueError
+    로 터지는 버그를 방지한다. 반드시 str 또는 None 만 반환.
+    """
+    try:
+        from pykrx import stock as _s
+    except ImportError:
+        return None
+    nm = _pykrx_call(_s.get_market_ticker_name, code, timeout=5)
+    return nm if isinstance(nm, str) and nm.strip() else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3446,11 +3482,11 @@ def api_compare():
     dates    = [d.strftime("%Y-%m-%d") for d in common]
 
     try:
-        name1 = _pykrx_call(_stock.get_market_ticker_name, code1, timeout=5) or code1
+        name1 = _pykrx_ticker_name(code1) or code1
     except Exception:
         name1 = code1
     try:
-        name2 = _pykrx_call(_stock.get_market_ticker_name, code2, timeout=5) or code2
+        name2 = _pykrx_ticker_name(code2) or code2
     except Exception:
         name2 = code2
 
@@ -4123,7 +4159,7 @@ def api_chart(code: str):
     trendlines = _calc_trendlines(highs, lows, closes)
     analysis   = _generate_analysis(closes, volumes, bollinger, fibonacci, trendlines)
 
-    name = _pykrx_call(_stock.get_market_ticker_name, code, timeout=5) or code
+    name = _pykrx_ticker_name(code) or code
 
     result = {
         "code": code, "name": name,
@@ -6634,6 +6670,11 @@ def _startup():
             _scheduler.add_job(alert_flow_signals, "cron",
                                day_of_week="mon-fri", hour=19, minute=30,
                                id="tg_flow_signals", max_instances=1)
+            # 신고가 캐시 프리워밍 (15:48 — 가격 sync 15:35 후) — 첫 진입 행 방지
+            _scheduler.add_job(_prewarm_new_highs, "cron",
+                               day_of_week="mon-fri", hour=15, minute=48,
+                               id="prewarm_new_highs", max_instances=1,
+                               misfire_grace_time=600)
             # 데이터 정합성 워치독 (평일 08:00~20:00 30분 간격) — 시황 핵심
             # 데이터(stocks·flow_cache) 공백/정체 감지 시 자동 재갱신 + 1회 알림.
             _scheduler.add_job(_market_watchdog, "cron",
@@ -9649,28 +9690,68 @@ def _kr_new_highs_from_charts(top_by_volume: int = 200,
     return out
 
 
-@app.route("/api/new_highs")
-def api_new_highs_kr():
-    """KR 52주 신고가 근접 종목. 거래대금 상위 200 스캔, 일 1회 캐시."""
-    today = _get_trading_date()
-    cache_file = BASE_DIR / "cache" / f"new_highs_kr_{today}.json"
+# ── 신고가 비차단 캐시 빌더 ──────────────────────────────────────────────
+# 콜드 캐시 시 200종목 차트(KR)/500종목 yfinance(US) 순차 스캔이 60초+ 걸려
+# 요청이 행 걸리던 문제. 캐시 없으면 백그라운드 빌드 시작 + 즉시 building 응답.
+_NH_BUILDING: set = set()
+_NH_LOCK = threading.Lock()
+
+
+def _new_highs_cached_or_build(market: str, cache_file, builder) -> dict:
+    """new_highs 비차단 반환. 캐시 있으면 즉시, 없으면 백그라운드 빌드 + building 응답."""
     cached = _read_fresh_json(cache_file, 1440)   # 24h
     if cached:
-        return jsonify(cached)
+        return cached
+    with _NH_LOCK:
+        already = market in _NH_BUILDING
+        if not already:
+            _NH_BUILDING.add(market)
+    if not already:
+        def _bg():
+            try:
+                items = builder()
+                result = {"updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                          "market": market, "count": len(items), "items": items}
+                cache_file.parent.mkdir(exist_ok=True)
+                cache_file.write_text(json.dumps(result, ensure_ascii=False),
+                                      encoding="utf-8")
+                log.info("[신고가] %s 캐시 빌드 완료 (%d종목)", market, len(items))
+            except Exception as exc:
+                log.warning("[신고가] %s 빌드 실패: %s", market, exc)
+            finally:
+                with _NH_LOCK:
+                    _NH_BUILDING.discard(market)
+        threading.Thread(target=_bg, daemon=True, name=f"newhigh-{market}").start()
+    return {"updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "market": market, "count": 0, "items": [], "building": True}
 
-    items = _kr_new_highs_from_charts()
-    result = {
-        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "market":     "kr",
-        "count":      len(items),
-        "items":      items,
-    }
-    try:
-        cache_file.parent.mkdir(exist_ok=True)
-        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    return jsonify(result)
+
+def _prewarm_new_highs():
+    """신고가 캐시 프리워밍 (장 마감 후 cron + 부팅). 첫 진입 즉시 응답 보장."""
+    today = _get_trading_date()
+    for market, builder in (("kr", _kr_new_highs_from_charts),
+                            ("us", _us_new_highs_from_yinfo)):
+        cf = BASE_DIR / "cache" / f"new_highs_{market}_{today}.json"
+        if _read_fresh_json(cf, 1440):
+            continue
+        try:
+            items = builder()
+            cf.parent.mkdir(exist_ok=True)
+            cf.write_text(json.dumps(
+                {"updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                 "market": market, "count": len(items), "items": items},
+                ensure_ascii=False), encoding="utf-8")
+            log.info("[신고가 프리워밍] %s %d종목", market, len(items))
+        except Exception as exc:
+            log.warning("[신고가 프리워밍] %s 실패: %s", market, exc)
+
+
+@app.route("/api/new_highs")
+def api_new_highs_kr():
+    """KR 52주 신고가 근접 종목. 거래대금 상위 200 스캔, 일 1회 캐시 (비차단)."""
+    today = _get_trading_date()
+    cache_file = BASE_DIR / "cache" / f"new_highs_kr_{today}.json"
+    return jsonify(_new_highs_cached_or_build("kr", cache_file, _kr_new_highs_from_charts))
 
 
 def _us_new_highs_from_yinfo(ratio_threshold: float = 0.95) -> list[dict]:
@@ -9753,26 +9834,10 @@ def _us_new_highs_from_yinfo(ratio_threshold: float = 0.95) -> list[dict]:
 
 @app.route("/api/us/new_highs")
 def api_new_highs_us():
-    """US 52주 신고가 근접 종목. S&P500 전체 스캔, 일 1회 캐시."""
+    """US 52주 신고가 근접 종목. S&P500 전체 스캔, 일 1회 캐시 (비차단)."""
     today = _get_trading_date()
     cache_file = BASE_DIR / "cache" / f"new_highs_us_{today}.json"
-    cached = _read_fresh_json(cache_file, 1440)
-    if cached:
-        return jsonify(cached)
-
-    items = _us_new_highs_from_yinfo()
-    result = {
-        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "market":     "us",
-        "count":      len(items),
-        "items":      items,
-    }
-    try:
-        cache_file.parent.mkdir(exist_ok=True)
-        cache_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    return jsonify(result)
+    return jsonify(_new_highs_cached_or_build("us", cache_file, _us_new_highs_from_yinfo))
 
 
 @app.route("/api/calendar/economic")

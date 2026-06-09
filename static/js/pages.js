@@ -5643,6 +5643,10 @@ function _nhRender(data) {
   const items = (data && data.items) || [];
   meta.textContent = `${data.updated_at || ''} 기준 · ${items.length}종목 (상위 ${NH_STATE.market === 'kr' ? 200 : 503}개 스캔)`;
 
+  if (data && data.building) {
+    box.innerHTML = '<div class="pg-empty"><div class="pg-empty-title">📊 데이터 준비 중…</div>신고가 스캔을 백그라운드에서 계산하고 있습니다. 10~30초 후 새로고침해 주세요.</div>';
+    return;
+  }
   if (!items.length) {
     box.innerHTML = '<div class="pg-empty">52주 고점 대비 95% 이상 종목이 없습니다.</div>';
     return;
