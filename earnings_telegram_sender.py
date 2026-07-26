@@ -53,6 +53,8 @@ def send_telegram_message(text: str, parse_mode: str = '',
                           timeout: int = 30, max_retries: int = 2) -> Dict:
     """텔레그램 발송. timeout 30s + 지수 백오프 재시도.
     실패해도 raise 안 하고 결과 dict."""
+    if os.environ.get('TELEGRAM_ENABLED', '1').strip().lower() in ('0', 'false', 'no', 'off'):
+        return {'success': False, 'error': 'TELEGRAM_ENABLED=0 (알림 OFF)'}
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return {'success': False, 'error': 'TELEGRAM_BOT_TOKEN/CHAT_ID 미설정'}
 

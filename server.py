@@ -4859,7 +4859,10 @@ def api_options_signal():
 # PHASE 23 — 텔레그램 알림 / ETF 히트맵 / 배당 스크리너
 # ─────────────────────────────────────────────────────────────────────────
 def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
-    """텔레그램 메시지 전송. 토큰 미설정 시 silently skip."""
+    """텔레그램 메시지 전송. 토큰 미설정 또는 알림 OFF 시 silently skip."""
+    if os.getenv("TELEGRAM_ENABLED", "1").strip().lower() in ("0", "false", "no", "off"):
+        log.info("[텔레그램] 알림 OFF (TELEGRAM_ENABLED) — 발송 생략")
+        return False
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
