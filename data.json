@@ -1,56 +1,244 @@
 {
-  "updated_at": "2026-08-10 19:29:01",
-  "actual_date": "20260810",
+  "updated_at": "2026-08-11 18:17:57",
+  "actual_date": "20260811",
   "kospi": {
-    "value": 0.0,
-    "change_pct": 0.0
+    "value": 6345.53,
+    "change_pct": 0.73
   },
   "kosdaq": {
-    "value": 0.0,
-    "change_pct": 0.0
+    "value": 857.84,
+    "change_pct": 0.39
   },
   "themes": [
     {
+      "id": 1,
+      "name": "방산/항공우주",
+      "weighted_avg_pct": -5.57,
+      "stock_count": 8,
+      "active_count": 1,
+      "stocks": [
+        {
+          "code": "012450",
+          "name": "한화에어로스페이스",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "047810",
+          "name": "한국항공우주",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "064350",
+          "name": "현대로템",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "079550",
+          "name": "LIG넥스원",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "272210",
+          "name": "한화시스템",
+          "change_pct": -5.57,
+          "volume_mn": 28594,
+          "sparkline": [
+            100.0,
+            105.11,
+            104.63,
+            97.6,
+            96.81,
+            98.88,
+            111.34,
+            108.95,
+            100.64,
+            97.76,
+            86.58,
+            88.02,
+            99.84,
+            100.8,
+            110.38,
+            115.65,
+            111.98,
+            112.94,
+            123.32,
+            116.45
+          ]
+        },
+        {
+          "code": "042670",
+          "name": "HD현대인프라코어",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "267250",
+          "name": "HD현대",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "000880",
+          "name": "한화",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        }
+      ],
+      "rank_change": 0
+    },
+    {
+      "id": 2,
+      "name": "2차전지",
+      "weighted_avg_pct": -3.68,
+      "stock_count": 10,
+      "active_count": 1,
+      "stocks": [
+        {
+          "code": "373220",
+          "name": "LG에너지솔루션",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "006400",
+          "name": "삼성SDI",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "051910",
+          "name": "LG화학",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "096770",
+          "name": "SK이노베이션",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "247540",
+          "name": "에코프로비엠",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "086520",
+          "name": "에코프로",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "066970",
+          "name": "엘앤에프",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "019570",
+          "name": "신원종합개발",
+          "change_pct": -3.68,
+          "volume_mn": 94,
+          "sparkline": [
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            96.05,
+            97.71,
+            98.34,
+            104.57,
+            102.08,
+            105.41,
+            124.32,
+            119.75
+          ]
+        },
+        {
+          "code": "001260",
+          "name": "남광토건",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "100120",
+          "name": "코오롱인더",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        }
+      ],
+      "rank_change": 0
+    },
+    {
       "id": 4,
       "name": "조선",
-      "weighted_avg_pct": 1.38,
+      "weighted_avg_pct": -3.33,
       "stock_count": 6,
       "active_count": 1,
       "stocks": [
         {
           "code": "009540",
           "name": "HD한국조선해양",
-          "change_pct": 1.38,
-          "volume_mn": 55871,
-          "sparkline": [
-            100.0,
-            95.75,
-            98.1,
-            103.66,
-            99.56,
-            98.98,
-            103.51,
-            111.57,
-            108.93,
-            110.83,
-            103.66,
-            98.1,
-            107.91,
-            112.59,
-            107.91,
-            109.52,
-            115.96,
-            117.13,
-            116.69,
-            118.3
-          ]
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
         },
         {
           "code": "010140",
           "name": "삼성중공업",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
+          "change_pct": -3.33,
+          "volume_mn": 61365,
+          "sparkline": [
+            100.0,
+            102.82,
+            104.94,
+            98.59,
+            100.0,
+            101.65,
+            111.29,
+            107.76,
+            106.59,
+            97.41,
+            91.29,
+            96.71,
+            100.47,
+            98.35,
+            101.88,
+            104.47,
+            104.0,
+            103.76,
+            106.12,
+            102.59
+          ]
         },
         {
           "code": "042660",
@@ -81,88 +269,81 @@
           "sparkline": []
         }
       ],
-      "rank_change": 19
+      "rank_change": -1
     },
     {
-      "id": 6,
-      "name": "AI/빅데이터",
-      "weighted_avg_pct": 0.45,
-      "stock_count": 8,
+      "id": 17,
+      "name": "음식료",
+      "weighted_avg_pct": -0.38,
+      "stock_count": 7,
       "active_count": 1,
       "stocks": [
         {
-          "code": "035420",
-          "name": "NAVER",
+          "code": "097950",
+          "name": "CJ제일제당",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
         },
         {
-          "code": "035720",
-          "name": "카카오",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "018260",
-          "name": "삼성SDS",
-          "change_pct": 0.45,
-          "volume_mn": 42371,
+          "code": "004370",
+          "name": "농심",
+          "change_pct": -0.38,
+          "volume_mn": 7200,
           "sparkline": [
             100.0,
-            101.47,
-            104.78,
-            104.78,
-            97.69,
-            100.68,
-            103.05,
-            114.62,
-            110.15,
-            114.35,
-            105.42,
-            103.73,
-            104.47,
-            108.31,
-            106.73,
-            115.4,
-            121.19,
-            122.24,
-            116.46,
-            116.98
+            97.72,
+            99.71,
+            99.57,
+            99.43,
+            100.14,
+            103.85,
+            104.85,
+            107.42,
+            107.56,
+            107.7,
+            110.41,
+            109.27,
+            106.99,
+            107.42,
+            107.42,
+            111.27,
+            115.55,
+            113.27,
+            112.84
           ]
         },
         {
-          "code": "079940",
-          "name": "가비아",
+          "code": "271560",
+          "name": "오리온",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
         },
         {
-          "code": "259480",
-          "name": "AICT",
+          "code": "007310",
+          "name": "오뚜기",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
         },
         {
-          "code": "030530",
-          "name": "원익홀딩스",
+          "code": "003230",
+          "name": "삼양식품",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
         },
         {
-          "code": "078935",
-          "name": "GS",
+          "code": "004170",
+          "name": "신세계",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
         },
         {
-          "code": "034220",
-          "name": "LG디스플레이",
+          "code": "001680",
+          "name": "대상",
           "change_pct": 0.0,
           "volume_mn": 0,
           "sparkline": []
@@ -171,225 +352,9 @@
       "rank_change": 0
     },
     {
-      "id": 8,
-      "name": "바이오/제약",
-      "weighted_avg_pct": 3.59,
-      "stock_count": 8,
-      "active_count": 2,
-      "stocks": [
-        {
-          "code": "068270",
-          "name": "셀트리온",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "207940",
-          "name": "삼성바이오로직스",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "128940",
-          "name": "한미약품",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "145020",
-          "name": "휴젤",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "000100",
-          "name": "유한양행",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "009420",
-          "name": "한올바이오파마",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "185750",
-          "name": "종근당",
-          "change_pct": 0.14,
-          "volume_mn": 952,
-          "sparkline": [
-            100.0,
-            95.17,
-            96.45,
-            97.02,
-            94.74,
-            93.75,
-            93.89,
-            95.88,
-            97.44,
-            97.44,
-            95.88,
-            93.18,
-            95.45,
-            95.03,
-            94.18,
-            95.88,
-            95.88,
-            97.73,
-            100.14,
-            100.28
-          ]
-        },
-        {
-          "code": "326030",
-          "name": "SK바이오팜",
-          "change_pct": 3.86,
-          "volume_mn": 12243,
-          "sparkline": [
-            100.0,
-            94.07,
-            98.61,
-            100.13,
-            96.85,
-            97.86,
-            96.85,
-            100.5,
-            101.64,
-            103.28,
-            100.25,
-            95.33,
-            97.86,
-            99.62,
-            98.87,
-            100.63,
-            103.4,
-            105.3,
-            107.69,
-            111.85
-          ]
-        }
-      ],
-      "rank_change": 16
-    },
-    {
-      "id": 9,
-      "name": "콘텐츠/엔터",
-      "weighted_avg_pct": 1.35,
-      "stock_count": 8,
-      "active_count": 2,
-      "stocks": [
-        {
-          "code": "041510",
-          "name": "SM엔터테인먼트",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "035900",
-          "name": "JYP엔터테인먼트",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "122870",
-          "name": "YG엔터테인먼트",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "352820",
-          "name": "하이브",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "253450",
-          "name": "스튜디오드래곤",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "067160",
-          "name": "아프리카TV",
-          "change_pct": 1.39,
-          "volume_mn": 3287,
-          "sparkline": [
-            100.0,
-            99.27,
-            98.23,
-            98.64,
-            94.26,
-            95.2,
-            96.87,
-            99.58,
-            98.96,
-            103.75,
-            99.9,
-            97.91,
-            100.63,
-            100.1,
-            87.8,
-            89.68,
-            89.05,
-            89.78,
-            90.3,
-            91.55
-          ]
-        },
-        {
-          "code": "036420",
-          "name": "CJ ENM",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
-        },
-        {
-          "code": "034120",
-          "name": "SBS",
-          "change_pct": 0.51,
-          "volume_mn": 139,
-          "sparkline": [
-            100.0,
-            99.5,
-            100.5,
-            98.18,
-            94.88,
-            94.14,
-            94.22,
-            95.38,
-            94.72,
-            95.63,
-            93.15,
-            89.77,
-            88.28,
-            90.76,
-            92.16,
-            92.74,
-            94.8,
-            95.46,
-            96.53,
-            97.03
-          ]
-        }
-      ],
-      "rank_change": 12
-    },
-    {
       "id": 23,
       "name": "스테이블코인/디지털자산",
-      "weighted_avg_pct": 2.83,
+      "weighted_avg_pct": 0.76,
       "stock_count": 6,
       "active_count": 1,
       "stocks": [
@@ -410,30 +375,9 @@
         {
           "code": "150900",
           "name": "파수",
-          "change_pct": 2.83,
-          "volume_mn": 152,
-          "sparkline": [
-            100.0,
-            98.26,
-            102.53,
-            103.01,
-            99.53,
-            101.9,
-            101.42,
-            104.75,
-            103.64,
-            104.91,
-            102.85,
-            96.36,
-            98.73,
-            105.7,
-            109.65,
-            116.93,
-            118.51,
-            117.09,
-            117.41,
-            120.73
-          ]
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
         },
         {
           "code": "115500",
@@ -445,9 +389,30 @@
         {
           "code": "053300",
           "name": "한국정보인증",
-          "change_pct": 0.0,
-          "volume_mn": 0,
-          "sparkline": []
+          "change_pct": 0.76,
+          "volume_mn": 315,
+          "sparkline": [
+            100.0,
+            103.13,
+            101.69,
+            98.19,
+            99.52,
+            101.33,
+            104.22,
+            101.69,
+            103.73,
+            99.4,
+            95.66,
+            96.02,
+            103.13,
+            103.61,
+            107.83,
+            108.67,
+            107.95,
+            108.55,
+            111.57,
+            112.41
+          ]
         },
         {
           "code": "078150",
@@ -457,9 +422,92 @@
           "sparkline": []
         }
       ],
-      "rank_change": 24
+      "rank_change": -3
+    },
+    {
+      "id": 25,
+      "name": "우주/저궤도위성",
+      "weighted_avg_pct": -5.57,
+      "stock_count": 5,
+      "active_count": 1,
+      "stocks": [
+        {
+          "code": "099320",
+          "name": "쎄트렉아이",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "272210",
+          "name": "한화시스템",
+          "change_pct": -5.57,
+          "volume_mn": 28594,
+          "sparkline": [
+            100.0,
+            105.11,
+            104.63,
+            97.6,
+            96.81,
+            98.88,
+            111.34,
+            108.95,
+            100.64,
+            97.76,
+            86.58,
+            88.02,
+            99.84,
+            100.8,
+            110.38,
+            115.65,
+            111.98,
+            112.94,
+            123.32,
+            116.45
+          ]
+        },
+        {
+          "code": "211270",
+          "name": "AP위성",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "189300",
+          "name": "인텔리안테크",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        },
+        {
+          "code": "274090",
+          "name": "켄코아에어로스페이스",
+          "change_pct": 0.0,
+          "volume_mn": 0,
+          "sparkline": []
+        }
+      ],
+      "rank_change": 0
     }
   ],
   "new_high_sectors": [],
-  "market_overview": {}
+  "market_overview": {
+    "sp500": {
+      "value": 7753.11,
+      "change_pct": -0.06
+    },
+    "nasdaq": {
+      "value": 26605.36,
+      "change_pct": -0.32
+    },
+    "usd_krw": {
+      "value": 1416.58,
+      "change_pct": 0.68
+    },
+    "nasdaq_futures": {
+      "value": 29746.5,
+      "change_pct": 0.03
+    }
+  }
 }
