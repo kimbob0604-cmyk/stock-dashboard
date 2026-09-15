@@ -13194,6 +13194,37 @@ def send_evening_market_summary():
 # 워치독이 주기적으로 건강도를 점검 → 비정상이면 자동 재갱신 + 관리자 1회 알림.
 _WATCHDOG_STATE: dict = {"alerted": False, "last_summary": None}
 
+# 언제부터 언제까지 따질지 — 갱신이 돌았어야 하는 시각에만 따진다.
+#   가격: 평일 09:05~15:35(30분 간격) + 16:00~17:55(5분 간격)
+#   수급: 평일 15:40 배치 1회
+_WD_STALE_FROM, _WD_STALE_TO = 1000, 1800   # 가격 정체를 따지는 시간대(HHMM)
+_WD_STALE_MAX_MIN = 120                     # 이 시간대에 이만큼 안 바뀌면 정체
+_WD_FLOW_FROM = 1610                        # 수급 0행을 따지기 시작하는 시각
+
+
+def _watchdog_checks_due(now=None) -> dict:
+    """지금 무엇을 따질 수 있는지.
+
+    예전 판정은 '평일이고 6시간 넘었으면 정체' 뿐이었다. 그런데 가격 동기화는
+    평일 17:55 이 마지막이라 다음 날 08:00 에는 **항상** 13시간이 지나 있다 —
+    워치독이 08:00 부터 도니까 평일 아침마다 한 번은 반드시 울렸다. 정상인데
+    울리는 알림은 곧 안 보게 되므로, 갱신이 돌았어야 하는 시간대에만 따진다.
+
+    수급(flow_cache)은 평일 15:40 배치가 하루 한 번 채운다. Gist 백업에서
+    빠져 있어(재수집 대상) 재시작하면 0행에서 시작하므로, 배치 전 0행은
+    사고가 아니라 정상이다.
+
+    공휴일은 갱신 자체가 없는 날이니 둘 다 따지지 않는다.
+    """
+    now = now or now_kst()
+    hhmm = now.hour * 100 + now.minute
+    trading = not _is_kr_holiday(now)          # 주말도 여기서 걸러진다
+    return {
+        "trading_day": trading,
+        "stocks_stale": trading and _WD_STALE_FROM <= hhmm <= _WD_STALE_TO,
+        "flow_rows": trading and hhmm >= _WD_FLOW_FROM,
+    }
+
 
 def _check_market_data_health() -> dict:
     """KR 시황 핵심 데이터 건강도 점검.
@@ -13246,16 +13277,18 @@ def _check_market_data_health() -> dict:
         out["issues"].append(f"DB 조회 실패: {str(exc)[:80]}")
         return out
 
-    # 판정 기준
+    # 판정 기준 — 갱신이 돌았어야 하는 때만 따진다(_watchdog_checks_due)
+    due = _watchdog_checks_due()
+    out["due"] = due
+    # 종목 수는 시각과 무관하다. 비었으면 언제 봐도 사고다.
     if out["stocks_kr"] < 1000:
         out["healthy"] = False
         out["issues"].append(f"KR 종목 부족 ({out['stocks_kr']}개, 정상 ~2500)")
-    if out["flow_rows"] < 50:
+    if due["flow_rows"] and out["flow_rows"] < 50:
         out["healthy"] = False
         out["issues"].append(f"수급 데이터 부족 ({out['flow_rows']}행)")
-    # 장중/장직후에 stocks 가 6시간 넘게 안 갱신되면 동결 의심
-    if (out["stocks_age_min"] is not None and out["stocks_age_min"] > 360
-            and now_kst().weekday() < 5):
+    if (due["stocks_stale"] and out["stocks_age_min"] is not None
+            and out["stocks_age_min"] > _WD_STALE_MAX_MIN):
         out["healthy"] = False
         out["issues"].append(f"stocks 갱신 정체 ({out['stocks_age_min']:.0f}분 전)")
     return out
