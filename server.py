@@ -12404,6 +12404,10 @@ def build_market_summary(dry_run: bool = False) -> dict:
     #
     # 한 종목은 가장 센 줄에만 담는다. 역사적 신고가면 52주·60일도 당연히 뚫은
     # 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
+    #
+    # 오늘 거래가 없던 종목(volume_mn=0)은 뺀다. 체결이 없으면 종가가 어제
+    # 그대로라 '오늘 신고가' 라고 부를 것이 없고, 5년치 일봉을 훑는 이 쿼리의
+    # 대상만 늘린다.
     _t_nh = time.time()
     nh_section = {"title": "🏔 신고가", "subsections": [], "error": None}
     if _SQLITE_OK and USE_SQLITE:
@@ -12435,6 +12439,7 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         WHERE (s.market = '' OR s.market LIKE 'KOS%')
                           AND COALESCE(s.is_etf, 0) = 0
                           AND s.close >= 1000 AND s.change_pct IS NOT NULL
+                          AND COALESCE(s.volume_mn, 0) > 0
                         GROUP BY s.code
                     """, (cut60, cut252, today_ymd)).fetchall()
 
@@ -12450,8 +12455,9 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         elif r["h60"] and c >= r["h60"]:
                             buckets["d60"].append(r)
 
-                    for key, label in (("hist", f"역사적(일봉 {first_day}~)"),
-                                       ("w52", "52주"), ("d60", "60일")):
+                    for key, label, icon in (("hist", "역사적", "🏔"),
+                                             ("w52", "52주", "📈"),
+                                             ("d60", "60일", "📊")):
                         got = sorted(buckets[key],
                                      key=lambda x: -(x["volume_mn"] or 0))
                         if not got:
@@ -12464,11 +12470,13 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         if len(got) > 5:
                             items.append(f"  … 외 {len(got) - 5}종목")
                         nh_section["subsections"].append(
-                            {"subtitle": f"🏔 {label} 신고가 {len(got)}종목",
+                            {"subtitle": f"{icon} {label} 신고가 {len(got)}종목",
                              "items": items})
                     if nh_section["subsections"]:
-                        nh_section["subsections"][0]["items"].insert(
-                            0, f"  <i>오늘 종가 vs {last_day}까지 고가</i>")
+                        # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
+                        nh_section["items"] = [
+                            f"  <i>오늘 종가 vs {last_day}까지 고가 · "
+                            f"역사적=일봉 {first_day}~</i>"]
                     else:
                         nh_section["error"] = (
                             f"오늘 신고가 종목 없음 ({last_day}까지 고가 기준)")
