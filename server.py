@@ -12427,15 +12427,19 @@ def build_market_summary(dry_run: bool = False) -> dict:
                     first_day = conn.execute(
                         f"SELECT MIN(date) FROM ohlcv WHERE code GLOB '{_KRG}'"
                     ).fetchone()[0]
+                    # 두 번에 나눠 묻는다. 한 번에 MAX(o.high) 를 같이 구하면
+                    # 전 종목 5년 일봉(수천 종목 x 1,250봉)을 통째로 훑는다.
+                    # 52주를 못 뚫은 종목은 역사적일 수 없으므로, 전 구간
+                    # 최고가는 **52주를 뚫은 몇 종목에만** 물으면 된다.
                     rows = conn.execute("""
                         SELECT s.code AS code, s.name AS name, s.sector AS sector,
                                s.change_pct AS change_pct, s.close AS close,
                                s.volume_mn AS volume_mn, s.market_cap AS market_cap,
                                MAX(CASE WHEN o.date >= ? THEN o.high END) AS h60,
-                               MAX(CASE WHEN o.date >= ? THEN o.high END) AS h252,
-                               MAX(o.high) AS hall
+                               MAX(o.high) AS h252
                         FROM stocks s
-                        JOIN ohlcv o ON o.code = s.code AND o.date < ?
+                        JOIN ohlcv o ON o.code = s.code
+                                    AND o.date >= ? AND o.date < ?
                         WHERE (s.market = '' OR s.market LIKE 'KOS%')
                           AND COALESCE(s.is_etf, 0) = 0
                           AND s.close >= 1000 AND s.change_pct IS NOT NULL
@@ -12443,12 +12447,24 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         GROUP BY s.code
                     """, (cut60, cut252, today_ymd)).fetchall()
 
+                    over52 = [r for r in rows
+                              if r["close"] and r["h252"] and r["close"] >= r["h252"]]
+                    hall_of = {}
+                    if over52:
+                        codes = [r["code"] for r in over52]
+                        qs = ",".join("?" * len(codes))
+                        hall_of = {x[0]: x[1] for x in conn.execute(
+                            f"""SELECT code, MAX(high) FROM ohlcv
+                                WHERE code IN ({qs}) AND date < ?
+                                GROUP BY code""", (*codes, today_ymd)).fetchall()}
+
                     buckets = {"hist": [], "w52": [], "d60": []}
                     for r in rows:
                         c = r["close"]
                         if not c:
                             continue
-                        if r["hall"] and c >= r["hall"]:
+                        hall = hall_of.get(r["code"])
+                        if hall and c >= hall:
                             buckets["hist"].append(r)
                         elif r["h252"] and c >= r["h252"]:
                             buckets["w52"].append(r)

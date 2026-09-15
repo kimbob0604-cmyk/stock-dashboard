@@ -7,8 +7,12 @@ import sqlite3, datetime as dt, re, sys
 
 SRC = open('/home/user/stock-dashboard/server.py', encoding='utf-8').read()
 m = re.search(r'rows = conn\.execute\("""\s*(SELECT s\.code AS code.*?)"""', SRC, re.S)
-assert m, '신고가 쿼리를 server.py 에서 못 찾았다'
+assert m, '신고가 창(60·252일) 쿼리를 server.py 에서 못 찾았다'
 QUERY = m.group(1)
+
+m2 = re.search(r'f"""(SELECT code, MAX\(high\) FROM ohlcv.*?)"""', SRC, re.S)
+assert m2, '전 구간 최고가 쿼리를 server.py 에서 못 찾았다'
+HALL_QUERY = m2.group(1)
 
 conn = sqlite3.connect(':memory:')
 conn.row_factory = sqlite3.Row
@@ -51,12 +55,22 @@ trading = [r[0] for r in conn.execute(
 cut60, cut252 = trading[59], trading[-1]
 rows = conn.execute(QUERY, (cut60, cut252, TODAY)).fetchall()
 
+# server.py 와 같은 2단계: 52주를 뚫은 종목에만 전 구간 최고가를 묻는다.
+over52 = [r for r in rows if r['close'] and r['h252'] and r['close'] >= r['h252']]
+hall_of = {}
+if over52:
+    codes = [r['code'] for r in over52]
+    qs = ','.join('?' * len(codes))
+    hall_of = {x[0]: x[1] for x in conn.execute(
+        HALL_QUERY.replace('{qs}', qs), (*codes, TODAY)).fetchall()}
+
 buckets = {'hist': [], 'w52': [], 'd60': []}
 for r in rows:
     c = r['close']
     if not c:
         continue
-    if r['hall'] and c >= r['hall']:
+    hall = hall_of.get(r['code'])
+    if hall and c >= hall:
         buckets['hist'].append(r['name'])
     elif r['h252'] and c >= r['h252']:
         buckets['w52'].append(r['name'])
@@ -80,5 +94,7 @@ want(buckets['d60'] == ['육십일'], f"60일 줄이 {buckets['d60']}")
 want('평범' not in sum(buckets.values(), []), '못 뚫은 종목이 들어갔다')
 want('오늘행' not in sum(buckets.values(), []),
      '오늘 자기 행을 최고가에 넣어 제 고가와 비겼다')
+want(len(hall_of) == len(over52),
+     '전 구간 최고가를 52주 통과 종목에만 묻지 않았다')
 print('\n통과' if ok else '\n실패')
 sys.exit(0 if ok else 1)
