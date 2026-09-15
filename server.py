@@ -12392,6 +12392,101 @@ def build_market_summary(dry_run: bool = False) -> dict:
         debug_info["feat_error"] = feat_section["error"]
         debug_info["feat_subsections"] = len(feat_section["subsections"])
 
+    # ── 5-2. 신고가 (역사적 · 52주 · 60일) ──
+    # 오늘 종가(stocks.close, 라이브)를 **직전 거래일까지의 고가**와 견준다.
+    # 오늘 행까지 최고가에 넣으면 모든 종목이 제 고가와 비겨 늘 신고가가 된다.
+    #
+    # 구간은 달력일이 아니라 ohlcv 에 실제로 있는 거래일로 센다 — 공휴일이 끼면
+    # 달력 60일이 거래일 40일이 되기도 한다.
+    #
+    # '역사적' 은 **보유한 일봉 전 구간**이다(수집기가 5년). 상장 이후 전부가
+    # 아니므로 기준 구간을 함께 적는다. 안 적으면 5년 최고가가 사상 최고가로 읽힌다.
+    #
+    # 한 종목은 가장 센 줄에만 담는다. 역사적 신고가면 52주·60일도 당연히 뚫은
+    # 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
+    _t_nh = time.time()
+    nh_section = {"title": "🏔 신고가", "subsections": [], "error": None}
+    if _SQLITE_OK and USE_SQLITE:
+        _KRG = "[0-9][0-9][0-9][0-9][0-9][0-9]"
+        try:
+            today_ymd = now_kst().strftime("%Y-%m-%d")
+            with _get_db() as conn:
+                days = [r[0] for r in conn.execute(
+                    f"""SELECT DISTINCT date FROM ohlcv
+                        WHERE code GLOB '{_KRG}' AND date < ?
+                        ORDER BY date DESC LIMIT 252""", (today_ymd,)).fetchall()]
+                if len(days) < 60:
+                    nh_section["error"] = (
+                        f"일봉 거래일이 {len(days)}일뿐 — 60일 구간을 못 만든다")
+                else:
+                    last_day, cut60, cut252 = days[0], days[59], days[-1]
+                    first_day = conn.execute(
+                        f"SELECT MIN(date) FROM ohlcv WHERE code GLOB '{_KRG}'"
+                    ).fetchone()[0]
+                    rows = conn.execute("""
+                        SELECT s.code AS code, s.name AS name, s.sector AS sector,
+                               s.change_pct AS change_pct, s.close AS close,
+                               s.volume_mn AS volume_mn, s.market_cap AS market_cap,
+                               MAX(CASE WHEN o.date >= ? THEN o.high END) AS h60,
+                               MAX(CASE WHEN o.date >= ? THEN o.high END) AS h252,
+                               MAX(o.high) AS hall
+                        FROM stocks s
+                        JOIN ohlcv o ON o.code = s.code AND o.date < ?
+                        WHERE (s.market = '' OR s.market LIKE 'KOS%')
+                          AND COALESCE(s.is_etf, 0) = 0
+                          AND s.close >= 1000 AND s.change_pct IS NOT NULL
+                        GROUP BY s.code
+                    """, (cut60, cut252, today_ymd)).fetchall()
+
+                    buckets = {"hist": [], "w52": [], "d60": []}
+                    for r in rows:
+                        c = r["close"]
+                        if not c:
+                            continue
+                        if r["hall"] and c >= r["hall"]:
+                            buckets["hist"].append(r)
+                        elif r["h252"] and c >= r["h252"]:
+                            buckets["w52"].append(r)
+                        elif r["h60"] and c >= r["h60"]:
+                            buckets["d60"].append(r)
+
+                    for key, label in (("hist", f"역사적(일봉 {first_day}~)"),
+                                       ("w52", "52주"), ("d60", "60일")):
+                        got = sorted(buckets[key],
+                                     key=lambda x: -(x["volume_mn"] or 0))
+                        if not got:
+                            continue
+                        items = [
+                            f"  {g['name']} {(g['change_pct'] or 0):+.1f}%"
+                            f"{_fmt_cap(g['market_cap'])} — {g['sector'] or '?'}"
+                            for g in got[:5]
+                        ]
+                        if len(got) > 5:
+                            items.append(f"  … 외 {len(got) - 5}종목")
+                        nh_section["subsections"].append(
+                            {"subtitle": f"🏔 {label} 신고가 {len(got)}종목",
+                             "items": items})
+                    if nh_section["subsections"]:
+                        nh_section["subsections"][0]["items"].insert(
+                            0, f"  <i>오늘 종가 vs {last_day}까지 고가</i>")
+                    else:
+                        nh_section["error"] = (
+                            f"오늘 신고가 종목 없음 ({last_day}까지 고가 기준)")
+        except sqlite3.OperationalError as exc:
+            nh_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
+            log.warning("[summary] newhigh DB OperationalError: %s", exc)
+        except Exception as exc:
+            nh_section["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+            log.warning("[summary] newhigh 빌더 실패: %s", exc, exc_info=True)
+    else:
+        nh_section["error"] = "SQLite unavailable"
+        log.warning("[summary] newhigh 스킵: %s", nh_section["error"])
+    summary["sections"].append(nh_section)
+    if dry_run:
+        debug_info["newhigh_ms"] = round((time.time() - _t_nh) * 1000, 1)
+        debug_info["newhigh_error"] = nh_section["error"]
+        debug_info["newhigh_subsections"] = len(nh_section["subsections"])
+
     # ── 6. 수급 (flow_cache에서 오늘 순매수 집계) ──
     _t_flow = time.time()
     flow_section = {"title": "💰 수급 동향", "subsections": [], "error": None}
@@ -12969,6 +13064,7 @@ def send_market_summary_telegram(header: str | None = None):
     사용자 요청으로 텔레 메시지에서 제외하는 섹션:
       - 🤖 AI 추천 요약 (대시보드에는 유지)
       - 📋 주요 공시 (별도 알림 차단됨)
+      - 💰 수급 동향 (대시보드에는 유지)
     API 응답(/api/market_summary) 에는 그대로 유지 — UI 영향 X.
 
     header: 메시지 상단 제목 (기본 "📊 장마감 시황"). 저녁 확정판은
@@ -12979,7 +13075,7 @@ def send_market_summary_telegram(header: str | None = None):
     except Exception as exc:
         log.exception("send_market_summary build")
         return
-    SKIP_TITLES = {"🤖 AI 추천 요약", "📋 주요 공시"}
+    SKIP_TITLES = {"🤖 AI 추천 요약", "📋 주요 공시", "💰 수급 동향"}
     _title = header or "📊 장마감 시황"
     lines = [f"<b>{now_kst().strftime('%m/%d')} {_title}</b>", ""]
     empty_titles: list = []
