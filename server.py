@@ -12402,6 +12402,12 @@ def build_market_summary(dry_run: bool = False) -> dict:
     # '역사적' 은 **보유한 일봉 전 구간**이다(수집기가 5년). 상장 이후 전부가
     # 아니므로 기준 구간을 함께 적는다. 안 적으면 5년 최고가가 사상 최고가로 읽힌다.
     #
+    # **종가 기준이다** — 오늘 종가를 과거 **종가**들의 최고와 견준다. 과거 고가와
+    # 견주면 기준이 섞여(오늘은 종가, 과거는 장중 고가) 판정이 보수적으로 치우치고,
+    # 반대로 오늘 고가까지 보면 장중에 잠깐 뚫고 하락 마감한 날도 신고가가 되어
+    # '등락률 마이너스인데 신고가' 가 나온다. 신고가 보드(ETF-Traker)도 종가 기준
+    # (board/config/settings.yaml default_basis: close)이라 두 화면이 같은 말을 한다.
+    #
     # 한 종목은 가장 센 줄에만 담는다. 역사적 신고가면 52주·60일도 당연히 뚫은
     # 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
     #
@@ -12427,16 +12433,16 @@ def build_market_summary(dry_run: bool = False) -> dict:
                     first_day = conn.execute(
                         f"SELECT MIN(date) FROM ohlcv WHERE code GLOB '{_KRG}'"
                     ).fetchone()[0]
-                    # 두 번에 나눠 묻는다. 한 번에 MAX(o.high) 를 같이 구하면
+                    # 두 번에 나눠 묻는다. 한 번에 MAX(o.close) 를 같이 구하면
                     # 전 종목 5년 일봉(수천 종목 x 1,250봉)을 통째로 훑는다.
                     # 52주를 못 뚫은 종목은 역사적일 수 없으므로, 전 구간
-                    # 최고가는 **52주를 뚫은 몇 종목에만** 물으면 된다.
+                    # 최고 종가는 **52주를 뚫은 몇 종목에만** 물으면 된다.
                     rows = conn.execute("""
                         SELECT s.code AS code, s.name AS name, s.sector AS sector,
                                s.change_pct AS change_pct, s.close AS close,
                                s.volume_mn AS volume_mn, s.market_cap AS market_cap,
-                               MAX(CASE WHEN o.date >= ? THEN o.high END) AS h60,
-                               MAX(o.high) AS h252
+                               MAX(CASE WHEN o.date >= ? THEN o.close END) AS h60,
+                               MAX(o.close) AS h252
                         FROM stocks s
                         JOIN ohlcv o ON o.code = s.code
                                     AND o.date >= ? AND o.date < ?
@@ -12454,7 +12460,7 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         codes = [r["code"] for r in over52]
                         qs = ",".join("?" * len(codes))
                         hall_of = {x[0]: x[1] for x in conn.execute(
-                            f"""SELECT code, MAX(high) FROM ohlcv
+                            f"""SELECT code, MAX(close) FROM ohlcv
                                 WHERE code IN ({qs}) AND date < ?
                                 GROUP BY code""", (*codes, today_ymd)).fetchall()}
 
@@ -12491,11 +12497,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
                     if nh_section["subsections"]:
                         # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
                         nh_section["items"] = [
-                            f"  <i>오늘 종가 vs {last_day}까지 고가 · "
+                            f"  <i>종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
                             f"역사적=일봉 {first_day}~</i>"]
                     else:
                         nh_section["error"] = (
-                            f"오늘 신고가 종목 없음 ({last_day}까지 고가 기준)")
+                            f"오늘 신고가 종목 없음 ({last_day}까지 종가 기준)")
         except sqlite3.OperationalError as exc:
             nh_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
             log.warning("[summary] newhigh DB OperationalError: %s", exc)
