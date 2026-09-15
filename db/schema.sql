@@ -227,3 +227,12 @@ CREATE INDEX IF NOT EXISTS idx_ralert_signal
     ON revision_alerts(signal, alert_sent, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ralert_dedupe
     ON revision_alerts(stock_code, period_type, period_year, period_quarter, metric, window_days, created_at DESC);
+
+-- 운영 상태 (워치독 알림 중복 방지 등) — 작고 오래 남아야 하는 값만.
+-- Render 무료 플랜은 디스크가 비영속이라 재시작하면 DB 가 사라진다.
+-- db_backup.CORE_TABLES 에 넣어 Gist 백업/복원에 실어 보낸다.
+CREATE TABLE IF NOT EXISTS ops_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);

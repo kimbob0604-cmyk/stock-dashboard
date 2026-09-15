@@ -59,6 +59,7 @@ CORE_TABLES = [
     # ↓↓ Step 5-1 — 컨센서스 리비전 트래커 ↓↓
     "consensus_snapshot",       # 컨센서스 시계열 스냅샷
     "revision_alerts",          # 리비전 시그널 알림 이력
+    "ops_state",                # 운영 상태 (워치독 알림 중복 방지 — 재시작 대비)
 ]
 
 # 사용자 설정/입력이 들어있는 JSON 캐시 파일도 함께 백업
