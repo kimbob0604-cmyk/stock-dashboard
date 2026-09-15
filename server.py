@@ -13192,7 +13192,69 @@ def send_evening_market_summary():
 # 시황 3개 섹션(섹터/특징주/수급)이 의존하는 stocks·flow_cache 가 비거나
 # stale 해지는 사고가 반복됨 (Render 비영속 디스크 + Naver 스크랩 실패).
 # 워치독이 주기적으로 건강도를 점검 → 비정상이면 자동 재갱신 + 관리자 1회 알림.
-_WATCHDOG_STATE: dict = {"alerted": False, "last_summary": None}
+# 알림 중복 방지 상태는 ops_state(DB)에 있다 — 여기 dict 는 마지막 점검 결과와
+# DB 가 막혔을 때의 임시 사본만 들고 있다(_ops_get/_ops_set).
+_WATCHDOG_STATE: dict = {"last_summary": None}
+
+# 언제부터 언제까지 따질지 — 갱신이 돌았어야 하는 시각에만 따진다.
+#   가격: 평일 09:05~15:35(30분 간격) + 16:00~17:55(5분 간격)
+#   수급: 평일 15:40 배치 1회
+_WD_STALE_FROM, _WD_STALE_TO = 1000, 1800   # 가격 정체를 따지는 시간대(HHMM)
+_WD_STALE_MAX_MIN = 120                     # 이 시간대에 이만큼 안 바뀌면 정체
+_WD_FLOW_FROM = 1610                        # 수급 0행을 따지기 시작하는 시각
+
+
+def _watchdog_checks_due(now=None) -> dict:
+    """지금 무엇을 따질 수 있는지.
+
+    예전 판정은 '평일이고 6시간 넘었으면 정체' 뿐이었다. 그런데 가격 동기화는
+    평일 17:55 이 마지막이라 다음 날 08:00 에는 **항상** 13시간이 지나 있다 —
+    워치독이 08:00 부터 도니까 평일 아침마다 한 번은 반드시 울렸다. 정상인데
+    울리는 알림은 곧 안 보게 되므로, 갱신이 돌았어야 하는 시간대에만 따진다.
+
+    수급(flow_cache)은 평일 15:40 배치가 하루 한 번 채운다. Gist 백업에서
+    빠져 있어(재수집 대상) 재시작하면 0행에서 시작하므로, 배치 전 0행은
+    사고가 아니라 정상이다.
+
+    공휴일은 갱신 자체가 없는 날이니 둘 다 따지지 않는다.
+    """
+    now = now or now_kst()
+    hhmm = now.hour * 100 + now.minute
+    trading = not _is_kr_holiday(now)          # 주말도 여기서 걸러진다
+    return {
+        "trading_day": trading,
+        "stocks_stale": trading and _WD_STALE_FROM <= hhmm <= _WD_STALE_TO,
+        "flow_rows": trading and hhmm >= _WD_FLOW_FROM,
+    }
+
+
+def _ops_get(key: str, default=None):
+    """운영 상태 읽기. DB 가 없으면 메모리로 물러난다(기능은 계속 돈다)."""
+    try:
+        with _get_db() as conn:
+            row = conn.execute(
+                "SELECT value FROM ops_state WHERE key=?", (key,)).fetchone()
+        if row is not None:
+            return row[0]
+    except Exception as exc:
+        log.debug("[워치독] 상태 읽기 실패(%s): %s", key, exc)
+        return _WATCHDOG_STATE.get(key, default)
+    return default
+
+
+def _ops_set(key: str, value) -> None:
+    """운영 상태 쓰기. 메모리에도 같이 둔다 — DB 가 막혀도 한 프로세스 안에서는 산다."""
+    _WATCHDOG_STATE[key] = value
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                "INSERT INTO ops_state (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "                               updated_at=excluded.updated_at",
+                (key, str(value), now_kst().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+    except Exception as exc:
+        log.debug("[워치독] 상태 쓰기 실패(%s): %s", key, exc)
 
 
 def _check_market_data_health() -> dict:
@@ -13246,16 +13308,18 @@ def _check_market_data_health() -> dict:
         out["issues"].append(f"DB 조회 실패: {str(exc)[:80]}")
         return out
 
-    # 판정 기준
+    # 판정 기준 — 갱신이 돌았어야 하는 때만 따진다(_watchdog_checks_due)
+    due = _watchdog_checks_due()
+    out["due"] = due
+    # 종목 수는 시각과 무관하다. 비었으면 언제 봐도 사고다.
     if out["stocks_kr"] < 1000:
         out["healthy"] = False
         out["issues"].append(f"KR 종목 부족 ({out['stocks_kr']}개, 정상 ~2500)")
-    if out["flow_rows"] < 50:
+    if due["flow_rows"] and out["flow_rows"] < 50:
         out["healthy"] = False
         out["issues"].append(f"수급 데이터 부족 ({out['flow_rows']}행)")
-    # 장중/장직후에 stocks 가 6시간 넘게 안 갱신되면 동결 의심
-    if (out["stocks_age_min"] is not None and out["stocks_age_min"] > 360
-            and now_kst().weekday() < 5):
+    if (due["stocks_stale"] and out["stocks_age_min"] is not None
+            and out["stocks_age_min"] > _WD_STALE_MAX_MIN):
         out["healthy"] = False
         out["issues"].append(f"stocks 갱신 정체 ({out['stocks_age_min']:.0f}분 전)")
     return out
@@ -13265,10 +13329,15 @@ def _market_watchdog():
     """주기 워치독 — 비정상 감지 시 자동 재갱신 + 관리자 1회 알림/복구 알림.
     cron: 평일 08:00~20:00 30분 간격."""
     health = _check_market_data_health()
+    today = now_kst().strftime("%Y-%m-%d")
+    # 중복 방지 상태는 DB(ops_state)에 둔다. 예전엔 프로세스 메모리라
+    # 재시작·재배포마다 False 로 돌아가 같은 사고를 또 알렸다.
+    alerted = str(_ops_get("watchdog_alerted", "0")) == "1"
+
     if health["healthy"]:
         # 직전에 사고 알림을 보냈다면 복구 알림 1회
-        if _WATCHDOG_STATE["alerted"]:
-            _WATCHDOG_STATE["alerted"] = False
+        if alerted:
+            _ops_set("watchdog_alerted", 0)
             send_telegram(
                 f"🛠 <b>[시스템] 데이터 복구됨</b>\n"
                 f"KR 종목 {health['stocks_kr']}개 · 수급 {health['flow_rows']}행 정상화"
@@ -13284,7 +13353,10 @@ def _market_watchdog():
     except Exception as exc:
         log.warning("[워치독] 가격 복구 실패: %s", exc)
     try:
-        if health["flow_rows"] < 50:
+        # 수급 복구는 200종목을 네이버에서 다시 긁는다. 아직 따질 때가 아닌
+        # 0행(15:40 배치 전)까지 긁으면 헛되이 200번을 두드리는 셈이고,
+        # 차단이 의심되는 상황에서 더 두드리는 건 역효과다.
+        if (health.get("due") or {}).get("flow_rows") and health["flow_rows"] < 50:
             r = _refresh_flow_batch(top_n=200)
             recovered["flow"] = r.get("success", 0) if isinstance(r, dict) else 0
     except Exception as exc:
@@ -13295,21 +13367,26 @@ def _market_watchdog():
         log.info("[워치독] 자가복구 성공 (prices=%s, flow=%s)",
                  recovered.get("prices"), recovered.get("flow"))
         # 이전에 사고 알림을 이미 보냈으면 복구 알림, 아니면 조용히 복구
-        if _WATCHDOG_STATE["alerted"]:
-            _WATCHDOG_STATE["alerted"] = False
+        if alerted:
+            _ops_set("watchdog_alerted", 0)
             send_telegram(
                 f"🛠 <b>[시스템] 자동 복구 완료</b>\n"
                 f"KR 종목 {after['stocks_kr']}개 · 수급 {after['flow_rows']}행"
             )
+    elif alerted:
+        log.warning("[워치독] 비정상 지속 — 이미 알림 보냄, 다시 보내지 않는다")
+    elif _ops_get("watchdog_alert_date") == today:
+        # 하루 1회 상한. 고쳤다 다시 깨지기를 반복해도 하루에 한 번만 알린다.
+        log.warning("[워치독] 비정상 — 오늘 이미 알렸다(상한). 로그만 남긴다: %s",
+                    "; ".join(after["issues"]))
     else:
-        # 복구 실패 — 사고 알림 1회만 (중복 방지)
-        if not _WATCHDOG_STATE["alerted"]:
-            _WATCHDOG_STATE["alerted"] = True
-            send_telegram(
-                "🛠 <b>[시스템] 데이터 이상 — 자동복구 실패</b>\n"
-                + "\n".join(f"  • {i}" for i in after["issues"])
-                + "\n<i>Naver 차단/네트워크 의심 — Render Logs 확인</i>"
-            )
+        _ops_set("watchdog_alerted", 1)
+        _ops_set("watchdog_alert_date", today)
+        send_telegram(
+            "🛠 <b>[시스템] 데이터 이상 — 자동복구 실패</b>\n"
+            + "\n".join(f"  • {i}" for i in after["issues"])
+            + "\n<i>Naver 차단/네트워크 의심 — Render Logs 확인</i>"
+        )
     _WATCHDOG_STATE["last_summary"] = after
 
 
@@ -13320,7 +13397,16 @@ def api_ops_watchdog():
         threading.Thread(target=_market_watchdog, daemon=True,
                          name="watchdog-manual").start()
         return jsonify({"ok": True, "message": "워치독 백그라운드 실행"})
-    return jsonify(_check_market_data_health())
+    out = _check_market_data_health()
+    # 손으로 열어 봤을 때 '왜 조용한지' 가 보여야 한다. due 가 꺼져 있으면
+    # 값이 나빠 보여도 아직 따질 때가 아니라는 뜻이다.
+    due = out.get("due") or {}
+    skipped = [n for n, k in (("수급 0행", "flow_rows"), ("가격 정체", "stocks_stale"))
+               if not due.get(k)]
+    out["note"] = ("휴장일 — 갱신 자체가 없는 날이다" if not due.get("trading_day")
+                   else (f"지금은 안 따짐: {', '.join(skipped)}" if skipped
+                         else "전부 따지는 시간대"))
+    return jsonify(out)
 
 
 # ── 수급 심화 시그널 (flow_cache 20일 시계열 분석) ───────────────────────────
