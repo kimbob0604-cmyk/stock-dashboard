@@ -13317,7 +13317,10 @@ def _market_watchdog():
     except Exception as exc:
         log.warning("[워치독] 가격 복구 실패: %s", exc)
     try:
-        if health["flow_rows"] < 50:
+        # 수급 복구는 200종목을 네이버에서 다시 긁는다. 아직 따질 때가 아닌
+        # 0행(15:40 배치 전)까지 긁으면 헛되이 200번을 두드리는 셈이고,
+        # 차단이 의심되는 상황에서 더 두드리는 건 역효과다.
+        if (health.get("due") or {}).get("flow_rows") and health["flow_rows"] < 50:
             r = _refresh_flow_batch(top_n=200)
             recovered["flow"] = r.get("success", 0) if isinstance(r, dict) else 0
     except Exception as exc:
@@ -13353,7 +13356,16 @@ def api_ops_watchdog():
         threading.Thread(target=_market_watchdog, daemon=True,
                          name="watchdog-manual").start()
         return jsonify({"ok": True, "message": "워치독 백그라운드 실행"})
-    return jsonify(_check_market_data_health())
+    out = _check_market_data_health()
+    # 손으로 열어 봤을 때 '왜 조용한지' 가 보여야 한다. due 가 꺼져 있으면
+    # 값이 나빠 보여도 아직 따질 때가 아니라는 뜻이다.
+    due = out.get("due") or {}
+    skipped = [n for n, k in (("수급 0행", "flow_rows"), ("가격 정체", "stocks_stale"))
+               if not due.get(k)]
+    out["note"] = ("휴장일 — 갱신 자체가 없는 날이다" if not due.get("trading_day")
+                   else (f"지금은 안 따짐: {', '.join(skipped)}" if skipped
+                         else "전부 따지는 시간대"))
+    return jsonify(out)
 
 
 # ── 수급 심화 시그널 (flow_cache 20일 시계열 분석) ───────────────────────────
