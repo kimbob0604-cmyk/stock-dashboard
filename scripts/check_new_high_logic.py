@@ -10,9 +10,16 @@ m = re.search(r'rows = conn\.execute\("""\s*(SELECT s\.code AS code.*?)"""', SRC
 assert m, '신고가 창(60·252일) 쿼리를 server.py 에서 못 찾았다'
 QUERY = m.group(1)
 
-m2 = re.search(r'f"""(SELECT code, MAX\(high\) FROM ohlcv.*?)"""', SRC, re.S)
-assert m2, '전 구간 최고가 쿼리를 server.py 에서 못 찾았다'
+m2 = re.search(r'f"""(SELECT code, MAX\(close\) FROM ohlcv.*?)"""', SRC, re.S)
+assert m2, '전 구간 최고 종가 쿼리를 server.py 에서 못 찾았다'
 HALL_QUERY = m2.group(1)
+
+# 기준을 못 박는다. 과거 고가와 견주면 기준이 섞이고(오늘은 종가, 과거는 장중
+# 고가), 오늘 고가까지 보면 장중에 잠깐 뚫고 하락 마감한 날도 신고가가 된다.
+assert 'MAX(o.close)' in QUERY and 'THEN o.close END' in QUERY, \
+    '신고가 창 쿼리가 종가 기준이 아니다'
+assert 'o.high' not in QUERY, '고가가 아직 판정에 쓰인다'
+assert 'MAX(high)' not in HALL_QUERY, '전 구간 최고가가 아직 고가 기준이다'
 
 conn = sqlite3.connect(':memory:')
 conn.row_factory = sqlite3.Row
@@ -76,6 +83,16 @@ for r in rows:
         buckets['w52'].append(r['name'])
     elif r['h60'] and c >= r['h60']:
         buckets['d60'].append(r['name'])
+
+# 종가 기준이면 '등락률 마이너스인데 신고가' 가 나올 수 없다 — 오늘 종가가
+# 과거 종가 최고 이상이면 어제 종가보다도 높다. 그 성질을 여기서 확인한다.
+add('000006', '장중만뚫음', 8000, [9000] * (n - 1) + [9000])
+conn.execute("UPDATE ohlcv SET high = 12000 WHERE code = '000006' AND date = ?",
+             (days[-1],))
+rows2 = conn.execute(QUERY, (cut60, cut252, TODAY)).fetchall()
+intra = [r for r in rows2 if r['code'] == '000006']
+assert intra and not (intra[0]['close'] >= (intra[0]['h252'] or 0)), \
+    '장중 고가로만 뚫은 종목이 신고가로 잡힌다'
 
 print('역사적:', buckets['hist'])
 print('52주  :', buckets['w52'])

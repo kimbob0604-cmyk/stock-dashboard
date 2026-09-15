@@ -41,7 +41,8 @@ SECTIONS = [
     {'title': '⚡ 특징주', 'subsections': [
         {'subtitle': '🔺 급등 (+5%↑) TOP 10', 'items': ['  A +30.0% — IT']}], 'error': None},
     {'title': '🏔 신고가',
-     'items': ['  <i>오늘 종가 vs 2026-09-14까지 고가 · 역사적=일봉 2021-09-16~</i>'],
+     'items': ['  <i>종가 기준 · 오늘 종가 vs 2026-09-14까지 종가 · '
+               '역사적=일봉 2021-09-16~</i>'],
      'subsections': [
         {'subtitle': '🏔 역사적 신고가 2종목', 'items': ['  삼성전자 +3.5% — 반도체']},
         {'subtitle': '📈 52주 신고가 5종목', 'items': ['  B +2.0% — 은행']},
@@ -75,6 +76,7 @@ for icon, label in (('🏔', '역사적'), ('📈', '52주'), ('📊', '60일'))
     want(f'{icon} {label} 신고가' in msg, f'{label} 줄이 없다')
 want('일봉 2021-09-16~' in msg, "'역사적' 의 기준 구간 표기가 빠졌다")
 want(msg.count('일봉 2021-09-16~') == 1, '기준 표기가 여러 줄에 반복된다')
+want('종가 기준' in msg, '어느 기준인지 적지 않는다')
 want('🤖 AI 추천 요약' not in msg and '📋 주요 공시' not in msg,
      '기존에 빼던 섹션이 다시 들어왔다')
 
