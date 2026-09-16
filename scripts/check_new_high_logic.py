@@ -26,7 +26,7 @@ conn.row_factory = sqlite3.Row
 conn.executescript("""
 CREATE TABLE stocks (code TEXT PRIMARY KEY, name TEXT, market TEXT DEFAULT '',
   sector TEXT, market_cap REAL, close REAL, change_pct REAL, volume_mn REAL,
-  is_etf INTEGER DEFAULT 0);
+  is_etf INTEGER DEFAULT 0, market_cap_updated TEXT);
 CREATE TABLE ohlcv (code TEXT, date TEXT, open REAL, high REAL, low REAL,
   close REAL, volume REAL, PRIMARY KEY (code, date));
 """)
@@ -36,8 +36,11 @@ days = [(dt.date(2026, 9, 15) - dt.timedelta(days=i)).isoformat() for i in range
 days.reverse()                      # 오래된 → 최근 (전부 '거래일' 로 취급)
 
 def add(code, name, close, highs):
-    conn.execute("INSERT INTO stocks VALUES (?,?,'KOSPI','테스트',1e12,?,1.0,100,0)",
-                 (code, name, close))
+    conn.execute(
+        "INSERT INTO stocks (code, name, market, sector, market_cap, close, "
+        " change_pct, volume_mn, is_etf, market_cap_updated) "
+        "VALUES (?,?,'KOSPI','테스트',1e12,?,1.0,100,0,'20260915')",
+        (code, name, close))
     for d, h in zip(days, highs):
         conn.execute("INSERT INTO ohlcv VALUES (?,?,?,?,?,?,?)", (code, d, h, h, h, h, 1))
 
@@ -51,7 +54,10 @@ add('000003', '육십일', 9500, [20000] * (n - 60) + [9000] * 60)
 # 아무것도 못 뚫음
 add('000004', '평범', 5000, [20000] * n)
 # 오늘 자기 행이 이미 들어와 있는 종목 — 그 행을 최고가에 넣으면 늘 신고가가 된다
-conn.execute("INSERT INTO stocks VALUES ('000005','오늘행','KOSPI','테스트',1e12,5000,1.0,100,0)")
+conn.execute(
+    "INSERT INTO stocks (code, name, market, sector, market_cap, close, "
+    " change_pct, volume_mn, is_etf, market_cap_updated) "
+    "VALUES ('000005','오늘행','KOSPI','테스트',1e12,5000,1.0,100,0,'20260915')")
 for d in days:
     conn.execute("INSERT INTO ohlcv VALUES ('000005',?,20000,20000,20000,20000,1)", (d,))
 conn.execute("INSERT INTO ohlcv VALUES ('000005',?,5000,5000,5000,5000,1)", (TODAY,))
