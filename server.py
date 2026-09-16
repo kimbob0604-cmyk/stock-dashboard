@@ -3273,6 +3273,27 @@ def _startup_naver_universe_sync():
         log.error("[startup] 가격 갱신 실패: %s", exc, exc_info=True)
 
 
+def _seed_cap_asof(uni: dict) -> str | None:
+    """유니버스가 들고 있는 시가총액이 **언제 것인지** (YYYYMMDD).
+
+    시드(data/naver_universe_seed.json)는 `source_date`, 폴링이 쓴 캐시는
+    `fetched_at` 을 남긴다. 둘 다 없으면 None — 모르는 것을 오늘로 적지 않는다.
+    None 이면 그 시총은 '언제 것인지 모름' 으로 다뤄져 시황에서 `*` 가 붙는다.
+    """
+    for key in ("source_date", "fetched_at"):
+        raw = (uni or {}).get(key)
+        if not raw:
+            continue
+        digits = re.sub(r"\D", "", str(raw))
+        if len(digits) >= 8:
+            try:
+                datetime.strptime(digits[:8], "%Y%m%d")
+                return digits[:8]
+            except ValueError:
+                continue
+    return None
+
+
 def _load_naver_universe() -> dict:
     """
     naver_universe 캐시 로드 (메모리 캐싱).
@@ -4881,6 +4902,68 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
     except Exception as exc:
         log.warning("[텔레그램] error: %s", exc)
         return False
+
+
+# 텔레그램 sendMessage 본문 상한. 넘기면 400 이 나거나 잘린다.
+_TG_LIMIT = 4096
+# 실제로 한 조각에 담는 양. "(1/3)" 같은 조각 표시와 멀티바이트 여유를 뺀 값이다.
+_TG_CHUNK = 3900
+
+
+def _split_telegram_lines(text: str, limit: int = _TG_CHUNK) -> list[str]:
+    """본문을 **줄 경계에서만** 잘라 여러 조각으로 나눈다.
+
+    종목 한 줄이 문장 중간에서 끊기면 그 종목은 이름도 수치도 못 읽는 쓰레기가
+    된다. 그래서 줄은 절대 쪼개지 않는다 — 한 줄이 통째로 한도를 넘는 병적인
+    경우에만 어쩔 수 없이 공백에서 자르고, 그마저 없으면 글자 수로 자른다.
+
+    이 저장소가 여태 쓰던 `msg[:3990] + '…(생략)'` 은 두 가지가 잘못이었다.
+    (1) 뒤쪽 종목이 통째로 사라지는데 몇 종목이 사라졌는지 안 적었고,
+    (2) 자르는 위치가 줄 한가운데라 마지막 줄이 깨진 채 나갔다. HTML 파스
+    모드에서는 `<b>` 가 열린 채 잘리면 텔레그램이 400 으로 거절하기까지 한다.
+    줄 경계로 나누면 이 빌더가 만드는 태그는 줄 안에서 열고 닫히므로 항상
+    짝이 맞는다.
+    """
+    out: list[str] = []
+    cur = ""
+    for line in (text or "").split("\n"):
+        while len(line) > limit:            # 한 줄이 통째로 한도를 넘는 경우
+            cut = line.rfind(" ", 0, limit)
+            cut = cut if cut > 0 else limit
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:cut])
+            line = line[cut:].lstrip()
+        if not cur:
+            cur = line
+        elif len(cur) + 1 + len(line) <= limit:
+            cur += "\n" + line
+        else:
+            out.append(cur)
+            cur = line
+    if cur:
+        out.append(cur)
+    return [c for c in out if c.strip()] or [""]
+
+
+def send_telegram_long(message: str, parse_mode: str = "HTML") -> bool:
+    """긴 본문을 줄 경계에서 나눠 여러 건으로 보낸다. 전부 성공해야 True.
+
+    조각이 둘 이상이면 각 조각 머리에 `(i/n)` 을 붙인다. 안 붙이면 받는 쪽에서
+    두 번째 조각이 왜 제목도 없이 종목 목록부터 시작하는지 알 수 없다.
+    """
+    chunks = _split_telegram_lines(message)
+    if len(chunks) == 1:
+        return send_telegram(chunks[0], parse_mode=parse_mode)
+    ok = True
+    for i, chunk in enumerate(chunks, 1):
+        head = f"<i>({i}/{len(chunks)})</i>\n"
+        if not send_telegram(head + chunk, parse_mode=parse_mode):
+            ok = False
+            log.warning("[텔레그램] %d/%d 조각 발송 실패", i, len(chunks))
+    log.info("[텔레그램] 본문 %d자 → %d건 분할 발송", len(message), len(chunks))
+    return ok
 
 
 @app.route("/api/volume_profile/<code>")
@@ -7147,6 +7230,10 @@ def _refresh_prices_from_naver():
     codes = list(stocks_map.keys())
     updated = 0
 
+    # 폴링이 시가총액(marketValueFullRaw)을 준 종목 / 안 준 종목. 이 둘의 비가
+    # 곧 '오늘 시총을 아는 종목의 비율' 이라, 필드명이 바뀌거나 응답에서
+    # 빠지면 _mv_ok 가 0 으로 떨어져 로그에 바로 드러난다.
+    _mv_ok = _mv_miss = 0
     _fail = 0
     for i in range(0, len(codes), 100):
         batch = codes[i:i + 100]
@@ -7198,13 +7285,25 @@ def _refresh_prices_from_naver():
                 stocks_map[code]["volume"] = vol
                 stocks_map[code]["volume_mn"] = int(vol * price / 1_000_000)
                 # 시가총액 (marketValueFullRaw — 원 단위). 가격 sync 때 같이 갱신.
+                #
+                # **오늘 폴링이 준 값인지 표시해 둔다.** stocks_map 은 시드
+                # (data/naver_universe_seed.json)에서 온 market_cap 을 이미 들고
+                # 있다. 폴링이 시총을 안 주면 그 시드 값이 그대로 남는데, 여태
+                # 아래 UPSERT 가 그것까지 '오늘 갱신' 으로 도장을 찍었다.
+                # Render 는 영속 디스크가 없어 재시작마다 cache/ 가 비고 시드로
+                # 되돌아가므로, 이 도장 하나 때문에 몇 달 묵은 시총이 매일
+                # 오늘 값으로 되살아난다. 출처를 갈라 두면 그 일이 없다.
                 mv_raw = s.get("marketValueFullRaw")
                 try:
                     mv = int(str(mv_raw).replace(",", "")) if mv_raw else 0
                     if mv > 0:
                         stocks_map[code]["market_cap"] = mv
+                        stocks_map[code]["market_cap_asof"] = now_kst().strftime("%Y%m%d")
+                        _mv_ok += 1
+                    else:
+                        _mv_miss += 1
                 except (ValueError, TypeError):
-                    pass
+                    _mv_miss += 1
 
                 # 시간외 단일가 (overMarketPriceInfo)
                 # tradingSessionType=REGULAR_MARKET 은 정규장 데이터 → 시간외로 쓰지 않음
@@ -7237,6 +7336,16 @@ def _refresh_prices_from_naver():
             log.warning("[가격 갱신] 배치 %d 파싱 실패: %s", i, exc)
         time.sleep(0.2)
 
+    # 시총을 몇 종목에서 받았는지 한 줄로 남긴다. marketValueFullRaw 가
+    # 응답에서 사라지거나 이름이 바뀌면 _mv_ok 가 0 이 되어 여기서 드러난다 —
+    # 예전에는 그래도 시드 값이 오늘 날짜로 찍혀 나가 아무 흔적이 없었다.
+    if _mv_ok == 0 and _mv_miss:
+        log.warning("[가격 갱신] 시가총액을 한 종목도 못 받았다 (%d종목 시도) — "
+                    "polling 응답에 marketValueFullRaw 가 없다. "
+                    "DB 시총은 갱신되지 않고 기존 값이 그대로 남는다", _mv_miss)
+    else:
+        log.info("[가격 갱신] 시가총액 %d종목 수신 / %d종목 미수신", _mv_ok, _mv_miss)
+
     # naver_universe JSON 파일 덮어쓰기
     if updated > 0:
         # 네이버 실시간 API 기준 "실제 거래된 날짜"를 우선 사용 (pykrx 지연 영향 배제)
@@ -7251,12 +7360,26 @@ def _refresh_prices_from_naver():
             log.debug("[가격 갱신] universe 저장 실패: %s", exc)
 
         # SQLite stocks 테이블도 갱신 (시간외 + 시가총액 포함)
-        # market_cap 은 Naver 폴링 응답의 marketValueFullRaw 사용.
+        # market_cap 은 Naver 폴링 응답의 marketValueFullRaw(원 단위) 사용.
         # S-3-B: UPSERT — 빈 stocks 테이블도 universe 정보로 시드 (INSERT) +
         # 기존 행은 가격만 갱신 (UPDATE). Render 부팅 시 stocks=0 회복.
+        #
+        # **market_cap_updated 는 그 시총이 실제로 언제 것인지를 적는다.**
+        # 예전에는 값이 0 만 아니면 무조건 오늘 날짜를 찍었다. 그래서 시드
+        # (source_date 2026-06-02)에서 온 몇 달 묵은 시총이 매일 '오늘 갱신'
+        # 으로 되살아났고, 시황 메시지는 오늘 등락률 옆에 6월 시총을 나란히
+        # 실었다. 값이 틀렸다는 신호가 어디에도 없었던 것이 진짜 문제다.
+        #
+        # 그리고 **낡은 값이 새 값을 덮지 못하게** 한다. UPDATE 조건에
+        # 날짜 비교를 넣었다 (YYYYMMDD 문자열이라 사전순 비교가 곧 날짜순).
+        # 이게 없으면 Render 가 재시작해 시드로 되돌아간 순간, 어제 폴링으로
+        # 받아 둔 제대로 된 시총을 6월 값이 덮어쓴다.
         if _SQLITE_OK and USE_SQLITE:
             try:
-                today_str = now_kst().strftime("%Y%m%d")
+                # 시드에서 온 시총은 시드가 밝힌 날짜의 값이다. 모르면 NULL —
+                # 모르는 것을 오늘로 적지 않는다. 오늘 폴링이 준 값의 날짜는
+                # 수집 시점에 stocks_map['market_cap_asof'] 로 이미 박아 뒀다.
+                seed_asof = _seed_cap_asof(uni)
                 with _get_db() as conn:
                     before_cnt = conn.execute(
                         "SELECT COUNT(*) FROM stocks "
@@ -7264,6 +7387,8 @@ def _refresh_prices_from_naver():
                     ).fetchone()[0]
                     for code, info in stocks_map.items():
                         mcap = info.get("market_cap") or 0
+                        # 오늘 폴링이 준 값이면 오늘, 시드에서 온 값이면 시드 날짜.
+                        cap_asof = info.get("market_cap_asof") or seed_asof
                         sectors = info.get("sectors") or []
                         sector = sectors[0] if sectors else ""
                         name = info.get("name") or code
@@ -7278,9 +7403,19 @@ def _refresh_prices_from_naver():
                             "  close = excluded.close, "
                             "  change_pct = excluded.change_pct, "
                             "  volume_mn = excluded.volume_mn, "
+                            # 새 값이 있고, 그 값이 DB 에 있는 것보다 오래되지
+                            # 않았을 때만 바꾼다. 시총을 과거로 되돌리지 않는다.
                             "  market_cap = CASE WHEN excluded.market_cap > 0 "
+                            "                    AND excluded.market_cap_updated IS NOT NULL "
+                            "                    AND (stocks.market_cap_updated IS NULL "
+                            "                         OR excluded.market_cap_updated "
+                            "                            >= stocks.market_cap_updated) "
                             "                    THEN excluded.market_cap ELSE stocks.market_cap END, "
                             "  market_cap_updated = CASE WHEN excluded.market_cap > 0 "
+                            "                    AND excluded.market_cap_updated IS NOT NULL "
+                            "                    AND (stocks.market_cap_updated IS NULL "
+                            "                         OR excluded.market_cap_updated "
+                            "                            >= stocks.market_cap_updated) "
                             "                            THEN excluded.market_cap_updated "
                             "                            ELSE stocks.market_cap_updated END, "
                             "  after_hours_price = excluded.after_hours_price, "
@@ -7290,7 +7425,7 @@ def _refresh_prices_from_naver():
                             "  updated_at = datetime('now')",
                             (code, name, "", sector,
                              mcap if mcap > 0 else None,
-                             today_str if mcap > 0 else None,
+                             cap_asof if mcap > 0 else None,
                              info.get("close"), info.get("change_pct"),
                              info.get("volume_mn"),
                              json.dumps(sectors, ensure_ascii=False),
@@ -12064,17 +12199,67 @@ def api_recommendation_migrate():
 
 
 # ── 장마감 시황 자동 요약 (순수 데이터 기반) ────────────────────────────────────
-def _fmt_cap(cap):
+
+# stocks.market_cap 이 며칠 지나면 '오늘 시총' 이라고 부를 수 없는가.
+# 시총은 주가 x 상장주식수라 주가가 움직인 만큼 매일 바뀐다. 며칠 전 값을
+# 오늘 값인 척 내보내면 등락률(오늘)과 시총(며칠 전)이 한 줄에 섞인다.
+# 7일로 잡은 이유는 주말·연휴를 한 번 건너뛰어도 정상으로 보되, 그 이상
+# 묵으면 반드시 눈에 띄게 하려는 것이다. 바꾸려면 여기만 고친다.
+_CAP_STALE_DAYS = 7
+
+# 신고가 등급별로 메시지에 몇 종목까지 이름을 적는가. None = 전 종목.
+#
+# 역사적·52주는 **전부 적는다.** 사용자가 이 메시지를 읽는 이유가 그것이고,
+# '외 N종목' 으로 접으면 접힌 쪽을 확인할 방법이 메시지 안에 없다. 역사적
+# 신고가는 하루 한 자릿수, 52주도 대개 수십 종목이라 다 적어도 길이가 감당된다.
+#
+# 60일만 요약을 남긴다. 등급이 가장 낮아 하루에 수백 종목이 서는 날이 있고
+# (60일 최고가는 두 달 조정만 끝나도 갱신된다), 그날 그 목록은 신호가 아니라
+# 시장 전체가 오른다는 말의 긴 사본이다. 역사적·52주에 든 종목은 여기서
+# 빠지므로(한 종목은 가장 센 줄에만 담는다) 접어도 놓치는 이름이 없다.
+# 전부 보고 싶으면 이 값을 None 으로 두면 된다 — 메시지는 나눠 보내진다.
+_NH_LIST_MAX = {"hist": None, "w52": None, "d60": 5}
+
+
+def _fmt_cap(cap, updated: str | None = None):
+    """시가총액 표시. `updated` 는 그 값이 실제로 언제 것인지(YYYYMMDD).
+
+    단위는 **원**이다. stocks.market_cap 에 쓰는 경로가 네이버 폴링 응답의
+    marketValueFullRaw(원) 하나뿐이라 그렇다. KIS(hts_avls, 억)·KRX(MKTCAP/1e6,
+    백만원) 값은 API 응답으로만 나가고 이 열에 들어오지 않는다 — 들어오게
+    되면 1e8 배 어긋나므로 그때는 이 함수부터 다시 봐야 한다.
+
+    `updated` 가 없거나 _CAP_STALE_DAYS 보다 묵었으면 `*` 를 붙인다.
+    값을 지우지 않는 이유는, 낡은 시총도 자릿수를 가늠하는 데는 쓸모가 있고
+    아예 안 보여 주면 '시총을 못 구했다' 와 구분되지 않기 때문이다. 대신
+    낡았다는 사실을 숨기지 않는다. `*` 의 뜻은 섹션 머리에 한 번 적는다.
+    """
     if not cap or cap <= 0:
         return ""
     try:
+        mark = "" if _cap_is_fresh(updated) else "*"
         if cap >= 1e12:
-            return f" [{cap / 1e12:.1f}조]"
+            return f" [{cap / 1e12:.1f}조{mark}]"
         if cap >= 1e8:
-            return f" [{cap / 1e8:.0f}억]"
+            return f" [{cap / 1e8:.0f}억{mark}]"
     except Exception:
         pass
     return ""
+
+
+def _cap_is_fresh(updated: str | None) -> bool:
+    """market_cap_updated(YYYYMMDD) 가 _CAP_STALE_DAYS 안쪽인가.
+
+    모르면(None/빈값/형식 불명) **낡은 것으로 본다.** 언제 것인지 모르는 값을
+    오늘 값으로 쳐 주면 지금 고치려는 사고가 그대로 되돌아온다.
+    """
+    if not updated:
+        return False
+    try:
+        d = datetime.strptime(str(updated).strip()[:8], "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return False
+    return 0 <= (now_kst().date() - d).days <= _CAP_STALE_DAYS
 
 
 # ── 시총 대비 강도 표기 헬퍼 (4-5: 수급 동향 / 거래대금 의미 부여) ────────────
@@ -12326,7 +12511,8 @@ def build_market_summary(dry_run: bool = False) -> dict:
         try:
             with _get_db() as conn:
                 risers = conn.execute(f"""
-                    SELECT code, name, change_pct, volume_mn, sector, market_cap
+                    SELECT code, name, change_pct, volume_mn, sector, market_cap,
+                           market_cap_updated
                     FROM stocks
                     WHERE (market = '' OR market LIKE 'KOS%')
                       AND COALESCE(is_etf, 0) = 0 AND change_pct > 5
@@ -12335,7 +12521,9 @@ def build_market_summary(dry_run: bool = False) -> dict:
                 """).fetchall()
                 if risers:
                     items = [
-                        f"  {r['name']} {r['change_pct']:+.1f}%{_fmt_cap(r['market_cap'])} — {r['sector'] or '?'}"
+                        f"  {r['name']} {r['change_pct']:+.1f}%"
+                        f"{_fmt_cap(r['market_cap'], r['market_cap_updated'])}"
+                        f" — {r['sector'] or '?'}"
                         for r in risers
                     ]
                     feat_section["subsections"].append(
@@ -12441,6 +12629,7 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         SELECT s.code AS code, s.name AS name, s.sector AS sector,
                                s.change_pct AS change_pct, s.close AS close,
                                s.volume_mn AS volume_mn, s.market_cap AS market_cap,
+                               s.market_cap_updated AS market_cap_updated,
                                MAX(CASE WHEN o.date >= ? THEN o.close END) AS h60,
                                MAX(o.close) AS h252
                         FROM stocks s
@@ -12484,21 +12673,31 @@ def build_market_summary(dry_run: bool = False) -> dict:
                                      key=lambda x: -(x["volume_mn"] or 0))
                         if not got:
                             continue
+                        cap_n = _NH_LIST_MAX.get(key)
+                        shown = got if cap_n is None else got[:cap_n]
                         items = [
                             f"  {g['name']} {(g['change_pct'] or 0):+.1f}%"
-                            f"{_fmt_cap(g['market_cap'])} — {g['sector'] or '?'}"
-                            for g in got[:5]
+                            f"{_fmt_cap(g['market_cap'], g['market_cap_updated'])}"
+                            f" — {g['sector'] or '?'}"
+                            for g in shown
                         ]
-                        if len(got) > 5:
-                            items.append(f"  … 외 {len(got) - 5}종목")
+                        if len(got) > len(shown):
+                            items.append(f"  … 외 {len(got) - len(shown)}종목")
                         nh_section["subsections"].append(
                             {"subtitle": f"{icon} {label} 신고가 {len(got)}종목",
                              "items": items})
                     if nh_section["subsections"]:
                         # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
-                        nh_section["items"] = [
-                            f"  <i>종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
-                            f"역사적=일봉 {first_day}~</i>"]
+                        basis = (f"  <i>종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
+                                 f"역사적=일봉 {first_day}~")
+                        # `*` 를 쓴 줄이 하나라도 있으면 그 뜻을 여기서 밝힌다.
+                        # 범례 없는 기호는 읽는 사람에게 오타로 보인다.
+                        if any("*]" in it
+                               for sub in nh_section["subsections"]
+                               for it in sub["items"]):
+                            basis += (f" · 시총 <b>*</b> 는 {_CAP_STALE_DAYS}일 넘게 "
+                                      f"갱신되지 않은 값")
+                        nh_section["items"] = [basis + "</i>"]
                     else:
                         nh_section["error"] = (
                             f"오늘 신고가 종목 없음 ({last_day}까지 종가 기준)")
@@ -13137,9 +13336,10 @@ def send_market_summary_telegram(header: str | None = None):
         lines.append("")
     lines.append(f"⏰ {now_kst().strftime('%H:%M')} KST")
     msg = "\n".join(lines)
-    if len(msg) > 4000:
-        msg = msg[:3990] + "\n…(생략)"
-    send_telegram(msg)
+    # 잘라서 버리지 않고 나눠 보낸다. 신고가 역사적·52주를 전 종목 싣기로 한
+    # 이상(_NH_LIST_MAX) 본문이 4,096자를 넘는 날이 정상이고, 예전처럼
+    # msg[:3990] 으로 자르면 뒤쪽 종목이 말없이 사라진다.
+    send_telegram_long(msg)
 
 
 def send_evening_market_summary():

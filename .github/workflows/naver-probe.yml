@@ -1,0 +1,32 @@
+name: 네이버 시총 필드 점검
+
+# 일회성 진단이다. 개발 환경에서는 네이버가 조직 프록시에 막혀 있어 응답 필드를
+# 확인할 수 없다. 러너는 열려 있으므로 여기서 한 번 받아 **필드 이름만** 찍는다.
+# 아무것도 고치지 않고 아무 데도 쓰지 않는다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/brief-newhigh-marketcap']
+    paths:
+      - 'scripts/probe_naver_fields.py'
+      - '.github/workflows/naver-probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 점검
+        run: |
+          python3 scripts/probe_naver_fields.py 2>&1 | tee /tmp/probe.txt
+      - name: 런 요약에 올린다
+        if: always()
+        run: |
+          { echo '## 네이버 시총 필드 점검'; echo '```'; \
+            cat /tmp/probe.txt 2>/dev/null || echo '(출력 없음)'; echo '```'; \
+          } >> "$GITHUB_STEP_SUMMARY"
