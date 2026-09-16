@@ -1,0 +1,47 @@
+name: 일봉 소스 점검
+
+# 일회성 진단이다. ohlcv 자동 수집을 붙이기 전에 **어느 소스가 데이터센터
+# IP에서 실제로 되는지**(pykrx vs 네이버 일봉) 러너에서 한 번 재 본다.
+# 개발 환경은 네이버·KRX 가 조직 프록시에 막혀 있어 여기서만 확인된다.
+# 아무것도 고치지 않고 아무 데도 쓰지 않는다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/ohlcv-autofill']
+    paths:
+      - 'scripts/probe_ohlcv_sources.py'
+      - 'scripts/probe_ohlcv_fill.py'
+      - 'ohlcv_autofill.py'
+      - '.github/workflows/ohlcv-probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: pykrx 설치 (requirements 와 같은 버전)
+        run: pip install "pykrx>=1.0.51" "pandas>=2.0"
+      - name: 소스 비교 (pykrx vs 네이버)
+        run: |
+          python3 scripts/probe_ohlcv_sources.py 2>&1 | tee /tmp/probe.txt
+      - name: 네트워크 없는 단위 시험
+        run: |
+          python3 scripts/check_ohlcv_autofill.py 2>&1 | tee /tmp/unit.txt
+      - name: 실제 수집 한 번 (임시 DB — 레포 DB 는 건드리지 않는다)
+        run: |
+          python3 scripts/probe_ohlcv_fill.py 15 2>&1 | tee /tmp/fill.txt
+      - name: 런 요약에 올린다
+        if: always()
+        run: |
+          { echo '## 일봉 소스 점검 (pykrx vs 네이버)'; echo '```'; \
+            cat /tmp/probe.txt 2>/dev/null || echo '(출력 없음)'; echo '```'; \
+            echo '## 단위 시험'; echo '```'; \
+            cat /tmp/unit.txt 2>/dev/null || echo '(출력 없음)'; echo '```'; \
+            echo '## 실제 수집'; echo '```'; \
+            cat /tmp/fill.txt 2>/dev/null || echo '(출력 없음)'; echo '```'; \
+          } >> "$GITHUB_STEP_SUMMARY"

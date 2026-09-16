@@ -3273,6 +3273,37 @@ def _startup_naver_universe_sync():
         log.error("[startup] 가격 갱신 실패: %s", exc, exc_info=True)
 
 
+def _startup_ohlcv_fill():
+    """부팅 직후 일봉(ohlcv) 채움. 별도 데몬 스레드에서 돈다.
+
+    **유니버스가 선다음이라야 한다** — 대상을 거래대금 상위로 고르는데 유니버스가
+    비어 있으면 0종목을 받고 끝난다. `_startup_naver_universe_sync` 는 오늘자
+    본체가 이미 있으면 일찍 return 하므로 그 함수 끝에 매달 수 없다. 그래서
+    여기서 유니버스가 찰 때까지 기다렸다가 시작한다.
+
+    기다림에 상한을 둔다. 못 차면 **그 사실을 로그로 남기고 물러난다** —
+    빈 유니버스로 0종목을 받아 놓고 성공한 척하지 않는다. 다음 16:10 잡이
+    다시 시도하고, 그때까지 시황은 신고가 섹션에 사유를 적어 내보낸다.
+    """
+    deadline = time.time() + 600                 # 최대 10분 기다린다
+    while time.time() < deadline:
+        try:
+            uni = _load_naver_universe() or {}
+            if len(uni.get("stocks") or {}) >= 100:
+                break
+        except Exception:                        # noqa: BLE001
+            pass
+        time.sleep(15)
+    else:
+        log.warning("[startup] 유니버스가 10분 안에 차지 않아 일봉 채움을 건너뛴다 "
+                    "— 16:10 잡이 다시 시도한다")
+        return
+    try:
+        _fill_ohlcv_job()
+    except Exception as exc:                     # noqa: BLE001
+        log.error("[startup] 일봉 채움 실패: %s", exc, exc_info=True)
+
+
 def _seed_cap_asof(uni: dict) -> str | None:
     """유니버스가 들고 있는 시가총액이 **언제 것인지** (YYYYMMDD).
 
@@ -6691,6 +6722,12 @@ def _startup():
         threading.Thread(target=_startup_naver_universe_sync,
                          daemon=True, name="naver-startup").start()
 
+        # 일봉(ohlcv) 채움. Render 는 재시작마다 DB 가 사라지므로 부팅 때
+        # 한 번 받아 둬야 신고가가 산다. 유니버스가 선 뒤 스스로 시작한다.
+        # 데몬 스레드라 Flask 기동을 막지 않는다(약 5분 소요).
+        threading.Thread(target=_startup_ohlcv_fill,
+                         daemon=True, name="ohlcv-startup").start()
+
         # 텔레그램 양방향 봇 webhook 등록 (Render 공개 URL 있을 때만)
         if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
             threading.Thread(target=_telegram_setup_webhook,
@@ -6808,6 +6845,22 @@ def _startup():
                            day_of_week="mon-fri", hour="16-17", minute="*/5",
                            id="price_sync_afterhours", max_instances=1)
         log.info("[가격 동기화] 장중 30분 + 장마감 + 시간외 스케줄 등록")
+
+        # ── 일봉(ohlcv) 자동 채움 ──
+        # ohlcv 는 신고가·52주 밴드·상관관계 등 server.py 읽기 15곳의 입력인데
+        # 채우는 자동 경로가 없었다. Render 는 영속 디스크가 없어 재시작마다
+        # db/dashboard.db 가 사라지므로 재시작 한 번에 신고가 섹션이 영구히
+        # 비었다("일봉 거래일이 0일뿐"). 그 구멍을 막는다.
+        #
+        # 16:10 인 이유 — 15:35 장마감 가격 sync 뒤라서 거래대금 상위로 고르는
+        # 대상이 당일 확정 거래대금 기준이 된다. 300종목에 약 5분이라
+        # (실측 1.04초/종목) 19:00 저녁 시황까지 두 시간 반 넘게 남는다 —
+        # **시황 잡보다 반드시 먼저 끝난다.**
+        _scheduler.add_job(_fill_ohlcv_job, "cron",
+                           day_of_week="mon-fri", hour=16, minute=10,
+                           id="ohlcv_autofill", max_instances=1,
+                           misfire_grace_time=1800)
+        log.info("[일봉 채움] 평일 16:10 스케줄 등록")
 
         # ── Stage 2 자동 스캔 ──
         # 1) 장중 5분 간격 KR 실시간 스캔 (SQLite 기반 ~1초)
@@ -7457,6 +7510,73 @@ def api_refresh_prices():
         _refresh_prices_from_naver()
     threading.Thread(target=_bg, daemon=True, name="price-refresh").start()
     return jsonify({"ok": True, "message": "백그라운드 갱신 시작"})
+
+
+# ── 일봉(ohlcv) 자동 채움 ──────────────────────────────────────────────────
+def _fill_ohlcv_job(force: bool = False) -> dict:
+    """일봉을 받아 ohlcv 를 채운다. 스케줄러(16:10)와 부팅 스레드가 부른다.
+
+    수집 자체는 ohlcv_autofill 모듈이 한다 — 여기는 유니버스를 넘겨 주고
+    결과를 로그로 남기는 얇은 껍데기다. 예외를 올리지 않는다(부르는 쪽이
+    데몬 스레드와 스케줄러라 죽으면 침묵이 된다).
+
+    force=False 면 **최근 거래일까지 이미 채워져 있을 때만** 건너뛴다. 부팅이
+    잦은 Render 에서 재시작마다 5분을 다시 쓰지 않으려는 것이다.
+
+    건너뛰는 기준을 '며칠 이내' 로 두면 안 된다 — 16:10 잡이 도는 시점에
+    테이블의 최신 날짜는 늘 전 거래일이라, 그런 기준이면 **매일 자기 자신을
+    건너뛰고 오늘 봉이 영영 안 들어온다.** 기준은 `_get_trading_date()` 가
+    말하는 최근 거래일이다. 주말·휴장에는 그 값이 금요일이므로 부팅 때
+    재수집이 도는 일도 없다.
+    """
+    try:
+        import ohlcv_autofill as _oa
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[일봉 채움] 모듈 로드 실패: %s", exc)
+        return {"error": f"import 실패: {exc}"}
+
+    if not force:
+        st = _oa.status()
+        # 신고가 판정에 60거래일이 필요하다. 그만큼 있고 최근 거래일까지
+        # 들어와 있으면 다시 받지 않는다. '있다' 와 '쓸 만하다' 는 다르므로
+        # 행 수·종목 수·최신일을 모두 본다.
+        if st["rows"] and st["codes"] >= 50 and st["last"]:
+            try:
+                td = _get_trading_date()                   # YYYYMMDD
+                latest_needed = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+                if st["last"] >= latest_needed:
+                    log.info("[일봉 채움] 이미 최근 거래일(%s)까지 있음 "
+                             "(%s행/%s종목) — 건너뜀",
+                             st["last"], f"{st['rows']:,}", st["codes"])
+                    return {"skipped": True, "status": st}
+            except Exception:                              # noqa: BLE001
+                pass       # 거래일을 못 구하면 그냥 받는다
+
+    try:
+        return _oa.fill(load_universe=_load_naver_universe, now=now_kst())
+    except Exception as exc:                               # noqa: BLE001
+        log.exception("[일봉 채움] 실패")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.route("/api/ops/ohlcv/fill", methods=["POST"])
+def api_ops_ohlcv_fill():
+    """일봉 수동 채움 (백그라운드). `?force=1` 이면 최신이어도 다시 받는다."""
+    force = (request.args.get("force") or "").strip() in ("1", "true", "yes")
+    threading.Thread(target=_fill_ohlcv_job, args=(force,),
+                     daemon=True, name="ohlcv-fill").start()
+    return jsonify({"ok": True, "message": "백그라운드 일봉 채움 시작",
+                    "force": force})
+
+
+@app.route("/api/ops/ohlcv/status")
+def api_ops_ohlcv_status():
+    """ohlcv 현황 — 행 수·종목 수·구간. 비었는지 한눈에 본다."""
+    try:
+        import ohlcv_autofill as _oa
+        return jsonify(_oa.status())
+    except Exception as exc:                               # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/after_hours/<code>")
@@ -12221,6 +12341,37 @@ _CAP_STALE_DAYS = 7
 _NH_LIST_MAX = {"hist": None, "w52": None, "d60": 5}
 
 
+def _ohlcv_scope_note(scanned: int) -> str:
+    """신고가가 **무엇을 모집단으로 한 결과인지** 한 조각.
+
+    일봉은 거래대금 상위 N종목만 받아 둔다(ohlcv_autofill.UNIVERSE_TOP_N).
+    전 종목이 아니므로 그 사실을 메시지가 말해야 한다 — 300종목을 훑고
+    "신고가 3종목" 이라고만 쓰면 읽는 사람은 4,000종목 중 3종목으로 읽는다.
+
+    실제로 훑은 수(`scanned`)를 적는다. 설정값이 아니라 결과다 — 수집이
+    일부 실패하면 설정값은 300이어도 실제는 260일 수 있고, 그 차이가
+    읽는 사람에게 중요하다.
+    """
+    return f"{scanned:,}종목 대상"
+
+
+def _ohlcv_fill_hint() -> str:
+    """일봉이 모자랄 때 '언제 마지막으로 채워졌는지' 를 덧붙인다.
+
+    '0일뿐' 만 보면 언제부터 빈 것인지, 수집이 아예 안 도는 것인지 모른다.
+    """
+    try:
+        import ohlcv_autofill as _oa
+        st = _oa.status()
+    except Exception as exc:                               # noqa: BLE001
+        return f"일봉 현황 조회 실패: {type(exc).__name__}"
+    if not st.get("rows"):
+        return ("일봉 테이블이 비어 있다 — 평일 16:10 채움 잡과 부팅 스레드가 "
+                "채운다. /api/ops/ohlcv/status 로 확인")
+    return (f"일봉 {st['rows']:,}행/{st['codes']}종목, "
+            f"최신 {st.get('last') or '?'}")
+
+
 def _fmt_cap(cap, updated: str | None = None):
     """시가총액 표시. `updated` 는 그 값이 실제로 언제 것인지(YYYYMMDD).
 
@@ -12614,8 +12765,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         WHERE code GLOB '{_KRG}' AND date < ?
                         ORDER BY date DESC LIMIT 252""", (today_ymd,)).fetchall()]
                 if len(days) < 60:
+                    # 왜 모자란지까지 적는다. '0일' 만 보면 고칠 데를 못 찾는다.
+                    # ohlcv 는 16:10 잡과 부팅 스레드가 채운다(_fill_ohlcv_job).
                     nh_section["error"] = (
-                        f"일봉 거래일이 {len(days)}일뿐 — 60일 구간을 못 만든다")
+                        f"일봉 거래일이 {len(days)}일뿐 — 60일 구간을 못 만든다"
+                        f" · {_ohlcv_fill_hint()}")
                 else:
                     last_day, cut60, cut252 = days[0], days[59], days[-1]
                     first_day = conn.execute(
@@ -12688,7 +12842,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
                              "items": items})
                     if nh_section["subsections"]:
                         # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
-                        basis = (f"  <i>종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
+                        # **모집단을 반드시 밝힌다** — 일봉을 거래대금 상위
+                        # N종목만 받아 두므로 전 종목 기준이 아니다. 안 적으면
+                        # "신고가 3종목" 을 전 종목 기준으로 읽는다.
+                        basis = (f"  <i>{_ohlcv_scope_note(len(rows))} · "
+                                 f"종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
                                  f"역사적=일봉 {first_day}~")
                         # `*` 를 쓴 줄이 하나라도 있으면 그 뜻을 여기서 밝힌다.
                         # 범례 없는 기호는 읽는 사람에게 오타로 보인다.
