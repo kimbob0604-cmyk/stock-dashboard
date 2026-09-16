@@ -19,6 +19,23 @@ db_backup.py — Render 재배포 대비 DB 백업/복원 (GitHub Gist)
   - stocks, ohlcv, chart_cache, flow_cache, financial, yinfo_cache (전부 재수집)
   - dart_corp_map (DART API로 매일 갱신)
   - alert_history (쿨다운 임시 데이터, 손실 무방)
+
+  ※ '재수집' 이 실제로 누구의 일인지 — 이 문장은 오래 거짓이었다.
+    - stocks    : _refresh_prices_from_naver (장중 30분 + 15:35 + 시간외 5분)
+    - ohlcv     : _fill_ohlcv_job — **평일 16:10 cron + 부팅 스레드**
+                  (ohlcv_autofill.py). 이 잡이 생기기 전에는 채우는 것이
+                  수동 CLI(ohlcv_5y_collector.py)뿐이라 **아무도 재수집하지
+                  않았다.** Render 는 영속 디스크가 없어 재시작마다 DB 가
+                  사라지므로 재시작 한 번에 ohlcv 가 영구히 비었고, 신고가
+                  섹션이 "일봉 거래일이 0일뿐" 으로 멎었다. 그 잡을 붙여
+                  이 문장이 비로소 참이 됐다.
+    - flow_cache: _refresh_flow_batch (15:40 배치 + 저녁 시황 직전)
+    - chart_cache: /api/chart 호출 시 채워짐 (요청 주도)
+
+  ohlcv 를 계속 백업에서 빼 두는 판단 자체는 유지한다 — 300종목 x 252행이면
+  Gist 에 넣기엔 크고 16:10 잡이 매일 다시 만든다. 다만 **그 잡이 멎으면
+  되돌릴 백업이 없다**는 뜻이므로, 실패는 삼키지 않는다: 한 종목도 못 받으면
+  로그에 error 가 찍히고 시황 메시지도 신고가 섹션에 사유를 적는다.
 """
 from __future__ import annotations
 import os
