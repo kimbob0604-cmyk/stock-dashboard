@@ -7520,8 +7520,14 @@ def _fill_ohlcv_job(force: bool = False) -> dict:
     결과를 로그로 남기는 얇은 껍데기다. 예외를 올리지 않는다(부르는 쪽이
     데몬 스레드와 스케줄러라 죽으면 침묵이 된다).
 
-    force=False 면 이미 충분히 채워져 있을 때 건너뛴다. 부팅이 잦은
-    Render 에서 재시작마다 5분을 다시 쓰지 않으려는 것이다.
+    force=False 면 **최근 거래일까지 이미 채워져 있을 때만** 건너뛴다. 부팅이
+    잦은 Render 에서 재시작마다 5분을 다시 쓰지 않으려는 것이다.
+
+    건너뛰는 기준을 '며칠 이내' 로 두면 안 된다 — 16:10 잡이 도는 시점에
+    테이블의 최신 날짜는 늘 전 거래일이라, 그런 기준이면 **매일 자기 자신을
+    건너뛰고 오늘 봉이 영영 안 들어온다.** 기준은 `_get_trading_date()` 가
+    말하는 최근 거래일이다. 주말·휴장에는 그 값이 금요일이므로 부팅 때
+    재수집이 도는 일도 없다.
     """
     try:
         import ohlcv_autofill as _oa
@@ -7531,17 +7537,20 @@ def _fill_ohlcv_job(force: bool = False) -> dict:
 
     if not force:
         st = _oa.status()
-        # 신고가 판정에 60거래일이 필요하다. 그만큼 있고 최신 날짜가 최근이면
-        # 다시 받지 않는다. '있다' 와 '쓸 만하다' 는 다르므로 둘 다 본다.
+        # 신고가 판정에 60거래일이 필요하다. 그만큼 있고 최근 거래일까지
+        # 들어와 있으면 다시 받지 않는다. '있다' 와 '쓸 만하다' 는 다르므로
+        # 행 수·종목 수·최신일을 모두 본다.
         if st["rows"] and st["codes"] >= 50 and st["last"]:
             try:
-                last = datetime.strptime(st["last"], "%Y-%m-%d").date()
-                if (now_kst().date() - last).days <= 4:
-                    log.info("[일봉 채움] 이미 최신 (%s행/%s종목, 최신 %s) — 건너뜀",
-                             f"{st['rows']:,}", st["codes"], st["last"])
+                td = _get_trading_date()                   # YYYYMMDD
+                latest_needed = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+                if st["last"] >= latest_needed:
+                    log.info("[일봉 채움] 이미 최근 거래일(%s)까지 있음 "
+                             "(%s행/%s종목) — 건너뜀",
+                             st["last"], f"{st['rows']:,}", st["codes"])
                     return {"skipped": True, "status": st}
-            except (ValueError, TypeError):
-                pass       # 날짜가 이상하면 그냥 받는다
+            except Exception:                              # noqa: BLE001
+                pass       # 거래일을 못 구하면 그냥 받는다
 
     try:
         return _oa.fill(load_universe=_load_naver_universe, now=now_kst())

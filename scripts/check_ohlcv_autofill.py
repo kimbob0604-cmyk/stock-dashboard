@@ -12,6 +12,7 @@ ohlcv_autofill 은 server.py 를 import 하지 않으므로 이 모듈은 **그�
   6. 시황에 실릴 범위 문구가 실제로 훑은 수를 말한다.
   7. server.py 쪽 배선 — 16:10 잡·부팅 스레드·시황 머리말이 제자리에 있다.
 """
+import re
 import sqlite3
 import sys
 import tempfile
@@ -197,6 +198,21 @@ want('종목 대상' in oa.coverage_note(300), f'범위 문구가 이상하다: 
 want('300' in oa.coverage_note(300), '범위 문구에 종목 수가 없다')
 
 
+# ── 6-b. 건너뛰기 기준 — 매일 자기 자신을 건너뛰면 안 된다 ────────────────
+# 16:10 잡이 도는 시점에 테이블 최신일은 늘 '전 거래일' 이다. 건너뛰기 기준을
+# '며칠 이내' 로 두면 매일 건너뛰고 오늘 봉이 영영 안 들어온다. 실제로 그렇게
+# 짰다가 고쳤다 — 회귀를 여기서 막는다.
+_skip_blk = re.search(r'def _fill_ohlcv_job.*?(?=\n@app\.route)', SRC, re.S)
+want(_skip_blk is not None, '_fill_ohlcv_job 을 못 찾았다')
+if _skip_blk:
+    blk = _skip_blk.group(0)
+    want('_get_trading_date()' in blk,
+         '건너뛰기 판정이 최근 거래일을 안 본다')
+    want('.days <= ' not in blk,
+         "건너뛰기 기준이 '며칠 이내' 다 — 16:10 잡이 매일 자기를 건너뛴다")
+    want('st["last"] >= ' in blk or "st['last'] >= " in blk,
+         '최신일 비교가 없다')
+
 # ── 7. server.py 배선 ────────────────────────────────────────────────────
 want('_fill_ohlcv_job' in SRC, 'server.py 에 채움 잡이 없다')
 want('id="ohlcv_autofill"' in SRC, '16:10 스케줄 잡이 등록되지 않았다')
@@ -205,7 +221,7 @@ want('_startup_ohlcv_fill' in SRC, '부팅 채움 함수가 없다')
 want('_ohlcv_scope_note' in SRC, '시황에 범위 문구가 안 붙는다')
 want('_ohlcv_fill_hint' in SRC, '일봉 부족 사유에 현황이 안 붙는다')
 # 16:10 < 19:00 — 시황보다 먼저 돌아야 한다
-import re  # noqa: E402
+
 m = re.search(r'id="ohlcv_autofill"', SRC)
 blk = SRC[max(0, m.start() - 400):m.start()] if m else ''
 want('hour=16' in blk and 'minute=10' in blk,
