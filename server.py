@@ -6818,6 +6818,10 @@ def _startup():
             # 밀린 장마감 시황을 뒤늦게라도 보낸다. Render 무료 플랜이 16:00 에
             # 자고 있었으면 cron 은 돌지 않는다 — 깨어 있는 30분마다 확인한다.
             # 하루 한 번 제한은 send_closing_market_summary 가 건다.
+            # 16:05 부터 20:35 까지 30분마다. 마지막 슬롯이
+            # _CLOSING_BRIEF_DEADLINE_HHMM(20:35)과 같아야 한다 — 그 시각에는
+            # 데이터가 덜 찼어도 보낸다. 창이 더 짧으면 재배포로 DB 가 날아간
+            # 날 시황이 통째로 안 온다.
             _scheduler.add_job(closing_brief_catchup, "cron",
                                day_of_week="mon-fri", hour="16-20", minute="5,35",
                                id="closing_brief_catchup", max_instances=1,
@@ -13536,7 +13540,48 @@ def _closing_brief_key() -> str:
     return "closing_brief_sent"
 
 
-def send_closing_market_summary(*, catchup: bool = False) -> bool:
+# 데이터가 준비되기를 기다려 주는 마지막 시각. 이 시각을 넘기면 준비가 덜 돼도
+# 보낸다 — 덜 찬 시황이라도 오는 편이, 아무 말 없이 하루가 지나는 것보다 낫다.
+# 각 섹션은 제 실패를 스스로 적으므로 덜 찬 채로 나가도 거짓말은 아니다.
+_CLOSING_BRIEF_DEADLINE_HHMM = (20, 35)
+
+
+def _brief_data_ready() -> tuple[bool, str]:
+    """시황을 보낼 만큼 데이터가 찼는지. (준비됨, 사유)
+
+    **2026-09-18 에 이걸 안 보고 보냈다가 그날 시황을 버렸다.** 배포가 나가면
+    Render 무료 플랜은 디스크가 비영속이라 db/dashboard.db 가 통째로 사라진다.
+    그 직후 부팅 캐치업이 깨어나 빈 DB 위에서 시황을 만들었고, 신고가 섹션이
+    '일봉 거래일이 0일뿐' 으로 비었다. 게다가 '오늘 보냈음' 표시까지 찍혀
+    데이터가 다 찬 뒤에도 다시 보낼 수 없었다.
+
+    그래서 보내기 전에 두 가지를 본다. 시황의 두 기둥이다.
+
+      일봉(ohlcv)  신고가 섹션의 입력. 재배포 후 부팅 스레드와 16:10 잡이 채운다
+      stocks       섹터·특징주·거래대금 섹션의 입력
+
+    준비가 덜 됐으면 보내지 않고 **표시도 찍지 않는다.** 30분 뒤 캐치업이 다시
+    본다. 마감 시각(_CLOSING_BRIEF_DEADLINE_HHMM)을 넘기면 그때는 보낸다.
+    """
+    try:
+        import ohlcv_autofill as _oa
+        st = _oa.status()
+        rows = int(st.get("rows") or 0)
+    except Exception as exc:                                  # noqa: BLE001
+        return False, f"일봉 현황을 못 읽었다: {type(exc).__name__}"
+    if rows <= 0:
+        return False, "일봉 테이블이 비어 있다 (재배포 직후면 채워지는 중)"
+    try:
+        health = _check_market_data_health()
+    except Exception as exc:                                  # noqa: BLE001
+        return False, f"건강도 점검 실패: {type(exc).__name__}"
+    if not health.get("stocks_kr"):
+        return False, "stocks 에 KR 종목이 없다 (가격 동기화 전)"
+    return True, f"일봉 {rows:,}행 · KR {health['stocks_kr']}종목"
+
+
+def send_closing_market_summary(*, catchup: bool = False,
+                                require_ready: bool = True) -> bool:
     """장마감 시황 텔레그램 발송 (평일 16:00 cron + 밀리면 캐치업).
 
     **하루 한 번만 나간다.** 발송한 날짜를 ops_state 에 적고, cron 과 캐치업이
@@ -13559,11 +13604,25 @@ def send_closing_market_summary(*, catchup: bool = False) -> bool:
     기다리지 않는 이유도 같다. 예전 코드는 당일 수급이 뜰 때까지 10분씩 세 번
     잤는데, 16:00 에는 30분을 기다려도 안 나온다. 기다림은 발송만 늦춘다.
     """
-    today_ymd = now_kst().strftime("%Y-%m-%d")
+    now = now_kst()
+    today_ymd = now.strftime("%Y-%m-%d")
     if str(_ops_get(_closing_brief_key(), "")) == today_ymd:
         log.info("[장마감시황] %s 는 이미 보냈다 — 건너뛴다 (catchup=%s)",
                  today_ymd, catchup)
         return False
+
+    # 데이터가 덜 찼으면 보내지 않고 표시도 찍지 않는다. 마감 시각 전까지는
+    # 30분마다 캐치업이 다시 본다 — 위 _brief_data_ready 설명 참고.
+    if require_ready:
+        ready, why = _brief_data_ready()
+        past_deadline = (now.hour, now.minute) >= _CLOSING_BRIEF_DEADLINE_HHMM
+        if not ready and not past_deadline:
+            log.warning("[장마감시황] 데이터 미완 — 보내지 않는다: %s", why)
+            return False
+        if not ready:
+            log.warning("[장마감시황] 마감 시각이라 미완인 채로 보낸다: %s", why)
+        else:
+            log.info("[장마감시황] 데이터 준비됨 — %s", why)
 
     # 1) 종가 가격 재갱신 (장 마감 확정값)
     try:
