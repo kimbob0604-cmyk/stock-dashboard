@@ -1,0 +1,68 @@
+name: 장마감 전 깨우기
+
+# Render 무료 플랜은 15분 유휴면 인스턴스를 재운다. 자는 동안은 프로세스가
+# 없으니 APScheduler 의 16:00 cron 도 돌지 않고, 그날 시황이 통째로 밀린다
+# (2026-09-18 에 19:00 예약분이 19:41 에 온 것이 그 형태였다).
+#
+# 서버 안에도 4분 간격 자가 핑(_self_keep_alive)이 있지만 **잠든 뒤에는
+# 스스로 못 깨운다** — 프로세스가 없으니 핑을 칠 주체가 없다. 밖에서 두드려야
+# 한다. 그 역할이다.
+#
+# 깨우기만 하면 끝이다. 나머지는 서버가 한다 — 부팅 직후 closing_brief_catchup
+# 이 밀린 발송을 잡고, 하루 한 번 제한은 ops_state 가 건다.
+#
+# **GitHub 크론은 정시를 보장하지 않는다.** 30~90분 늦는 일이 흔하고 통째로
+# 걸러지기도 한다. 그래서 한 번이 아니라 15:50~16:20 을 5분 간격으로 여러 번
+# 두드린다 — 하나만 닿아도 목적은 달성된다.
+
+on:
+  schedule:
+    # KST 15:50 · 15:55 (= UTC 06:50 · 06:55)
+    - cron: '50,55 6 * * 1-5'
+    # KST 16:00 ~ 16:20 (= UTC 07:00 ~ 07:20)
+    - cron: '0,5,10,15,20 7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wake
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 깨우기
+        env:
+          # 주소는 저장소 변수로 받는다(Settings → Secrets and variables →
+          # Actions → Variables 에 DASHBOARD_URL). 없으면 Render 기본 규칙을
+          # 따라가 보되, 그게 틀리면 아래에서 빨갛게 실패한다 — 조용히
+          # 엉뚱한 곳을 두드리느니 눈에 띄는 편이 낫다.
+          URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard.onrender.com' }}
+        run: |
+          set -u
+          echo "대상 $URL"
+          # 잠든 인스턴스는 깨어나는 데 1분 가까이 걸린다. 넉넉히 기다리고
+          # 몇 번 다시 두드린다 — 첫 요청이 타임아웃으로 끊겨도 그 요청이
+          # 기동을 시작시켰을 수 있다.
+          ok=0
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' \
+                        --max-time 90 "$URL/api/health" || echo 000)
+            echo "시도 $i — HTTP $code"
+            if [ "$code" = "200" ]; then
+              ok=1
+              head -c 400 /tmp/health.json || true
+              echo
+              break
+            fi
+            sleep 20
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::$URL 를 깨우지 못했습니다. 주소가 맞는지(저장소 변수 DASHBOARD_URL) 확인하세요."
+            exit 1
+          fi
+          echo "깨웠습니다 — 밀린 시황이 있으면 서버가 부팅 캐치업으로 보냅니다."
