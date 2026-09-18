@@ -187,38 +187,94 @@ _FETCHERS = {"naver": _fetch_naver, "pykrx": _fetch_pykrx}
 
 
 # ─────────────────────────── 종목 범위 ───────────────────────────
+def _rank_from_universe(uni, min_volume_mn):
+    """유니버스 dict 에서 (기준, [(점수, 코드)]) 를 뽑는다.
+
+    **거래대금이 있으면 거래대금, 없으면 시가총액.** 이 폴백이 없으면 Render
+    에서 조용히 0종목이 된다 — 2026-09-18 에 실제로 그랬다. 그 환경에서
+    `_load_naver_universe()` 가 돌려주는 것은 커밋된 시드
+    (`data/naver_universe_seed.json`)인데, 시드에는 `market_cap` 만 있고
+    `volume_mn` 이 없다(가격 폴링이 한 번 돌아야 채워진다). 거래대금만 보던
+    옛 코드는 그 상태에서 빈 리스트를 돌려줬고, `fill()` 은 "대상 종목이 없다"
+    한 줄만 남기고 끝났다. 신고가 섹션은 '일봉 거래일이 0일뿐' 으로 빈 채
+    시황이 나갔다.
+
+    시총 상위는 거래대금 상위의 대용이지 같은 것이 아니다. 그래서 **무엇으로
+    골랐는지를 같이 돌려준다** — 메시지의 범위 문구가 그 사실을 적는다.
+    """
+    stocks = (uni or {}).get("stocks") or {}
+    codes = [(code, s) for code, s in stocks.items()
+             if str(code).isdigit() and len(str(code)) == 6]
+    by_volume = [(s.get("volume_mn") or 0, code) for code, s in codes
+                 if (s.get("volume_mn") or 0) >= min_volume_mn]
+    if by_volume:
+        return "volume", by_volume
+    by_cap = [(s.get("market_cap") or 0, code) for code, s in codes
+              if (s.get("market_cap") or 0) > 0]
+    if by_cap:
+        return "market_cap", by_cap
+    return "none", []
+
+
+def select_universe(top_n: int = UNIVERSE_TOP_N,
+                    min_volume_mn: float = UNIVERSE_MIN_VOLUME_MN,
+                    load_universe=None,
+                    load_ranked=None) -> tuple[list[str], str]:
+    """일봉을 받을 종목코드와 **무슨 기준으로 골랐는지**.
+
+    셋을 순서대로 본다.
+
+      1. `load_ranked`  server.py 가 넣어 주는 `stocks` 테이블 실측 거래대금.
+                        재배포 직후에도 부팅 가격 갱신이 이 표를 채운다.
+      2. 유니버스 `volume_mn`   가격 폴링이 한 번이라도 돌았으면 있다.
+      3. 유니버스 `market_cap`  시드에도 있는 값. 마지막 보루.
+
+    기준 이름은 `"volume"` / `"market_cap"` / `"none"` 중 하나다.
+    """
+    if load_ranked is not None:
+        try:
+            basis, ranked = load_ranked()
+        except Exception as exc:                           # noqa: BLE001
+            log.warning("[일봉 채움] 실측 거래대금 조회 실패: %s — 유니버스로 넘어간다",
+                        exc)
+            basis, ranked = "none", []
+        if ranked:
+            ranked.sort(reverse=True)
+            return [c for _, c in ranked[:top_n]], basis
+
+    uni = (load_universe() if load_universe else None) or {}
+    basis, ranked = _rank_from_universe(uni, min_volume_mn)
+    ranked.sort(reverse=True)
+    return [c for _, c in ranked[:top_n]], basis
+
+
 def universe_codes(top_n: int = UNIVERSE_TOP_N,
                    min_volume_mn: float = UNIVERSE_MIN_VOLUME_MN,
-                   load_universe=None) -> list[str]:
-    """거래대금 상위 top_n 종목코드. 기존 신고가 화면과 같은 기준으로 고른다.
-
-    `load_universe` 는 server.py 의 `_load_naver_universe` 를 넣는 자리다
-    (이 모듈이 server.py 를 import 하면 순환이 된다).
-    """
-    uni = (load_universe() if load_universe else None) or {}
-    stocks = uni.get("stocks") or {}
-    eligible = [
-        (s.get("volume_mn") or 0, code)
-        for code, s in stocks.items()
-        if str(code).isdigit() and len(str(code)) == 6
-        and (s.get("volume_mn") or 0) >= min_volume_mn
-    ]
-    eligible.sort(reverse=True)
-    return [c for _, c in eligible[:top_n]]
+                   load_universe=None,
+                   load_ranked=None) -> list[str]:
+    """`select_universe` 의 종목코드만. 기준까지 필요하면 그쪽을 쓴다."""
+    return select_universe(top_n, min_volume_mn, load_universe, load_ranked)[0]
 
 
-def coverage_note(top_n: int = UNIVERSE_TOP_N) -> str:
+BASIS_LABEL = {"volume": "거래대금 상위", "market_cap": "시가총액 상위"}
+
+
+def coverage_note(top_n: int = UNIVERSE_TOP_N, basis: str = "volume") -> str:
     """시황 신고가 머리에 붙일 '무엇을 대상으로 했는가' 한 조각.
 
     전 종목이 아니라는 사실을 읽는 사람이 알아야 한다. 이 문장이 없으면
     상위 N 종목만 훑은 결과를 전 종목 기준으로 읽는다.
+
+    **무슨 기준으로 상위를 골랐는지도 같이 적는다.** 거래대금이 없어 시총으로
+    고른 날에 '거래대금 상위' 라고 쓰면 그건 틀린 말이다.
     """
-    return f"거래대금 상위 {top_n:,}종목 대상"
+    return f"{BASIS_LABEL.get(basis, '상위')} {top_n:,}종목 대상"
 
 
 # ─────────────────────────── 본체 ───────────────────────────
 def fill(codes: list[str] | None = None,
          load_universe=None,
+         load_ranked=None,
          lookback_days: int = LOOKBACK_CALENDAR_DAYS,
          source_order=SOURCE_ORDER,
          gap: float = REQUEST_GAP,
@@ -233,15 +289,21 @@ def fill(codes: list[str] | None = None,
     end = now.strftime("%Y%m%d")
     start = (now - timedelta(days=lookback_days)).strftime("%Y%m%d")
 
+    basis = "given"
     if codes is None:
-        codes = universe_codes(load_universe=load_universe)
+        codes, basis = select_universe(load_universe=load_universe,
+                                       load_ranked=load_ranked)
     res = {"codes": len(codes), "ok": 0, "failed": 0, "rows": 0,
            "by_source": {}, "errors": [], "elapsed": 0.0,
-           "start": start, "end": end}
+           "start": start, "end": end, "basis": basis}
     if not codes:
-        res["errors"].append("대상 종목이 없다 — 유니버스가 비었다")
-        log.warning("[일봉 채움] 대상 종목 0 — 유니버스가 비어 있다")
+        res["errors"].append(
+            "대상 종목이 없다 — 거래대금도 시가총액도 못 읽었다")
+        log.error("[일봉 채움] 대상 종목 0 — 유니버스에 거래대금도 시가총액도 "
+                  "없다. 신고가 섹션이 빈다")
         return res
+    log.info("[일봉 채움] %d종목 시작 (%s 기준)", len(codes),
+             BASIS_LABEL.get(basis, basis))
 
     try:
         conn = _get_db()

@@ -3276,10 +3276,17 @@ def _startup_naver_universe_sync():
 def _startup_ohlcv_fill():
     """부팅 직후 일봉(ohlcv) 채움. 별도 데몬 스레드에서 돈다.
 
-    **유니버스가 선다음이라야 한다** — 대상을 거래대금 상위로 고르는데 유니버스가
-    비어 있으면 0종목을 받고 끝난다. `_startup_naver_universe_sync` 는 오늘자
-    본체가 이미 있으면 일찍 return 하므로 그 함수 끝에 매달 수 없다. 그래서
-    여기서 유니버스가 찰 때까지 기다렸다가 시작한다.
+    **고를 종목이 생긴 다음이라야 한다** — 대상을 거래대금 상위로 고르는데
+    그 값이 아직 없으면 0종목을 받고 끝난다.
+
+    그래서 기다리는 조건이 '유니버스에 종목이 100개 넘게 있는가' 가 아니다.
+    그 조건은 **재배포 직후 늘 즉시 참이다** — `_load_naver_universe()` 가
+    커밋된 시드(4,063종목)로 떨어지기 때문이다. 그런데 시드에는 거래대금이
+    없어서, 조건을 통과하자마자 0종목을 받고 끝났다. 조건이 재는 것과 다음
+    단계가 필요로 하는 것이 달랐던 것이다.
+
+    지금은 `_ohlcv_ranked_codes()` 로 **실제로 고를 수 있는 종목이 섰는지**를
+    직접 본다(부팅 가격 갱신 `_boot_refresh_kr` 가 `stocks` 를 채우면 선다).
 
     기다림에 상한을 둔다. 못 차면 **그 사실을 로그로 남기고 물러난다** —
     빈 유니버스로 0종목을 받아 놓고 성공한 척하지 않는다. 다음 16:10 잡이
@@ -3288,14 +3295,16 @@ def _startup_ohlcv_fill():
     deadline = time.time() + 600                 # 최대 10분 기다린다
     while time.time() < deadline:
         try:
-            uni = _load_naver_universe() or {}
-            if len(uni.get("stocks") or {}) >= 100:
+            basis, ranked = _ohlcv_ranked_codes()
+            if len(ranked) >= 100:
+                log.info("[startup] 일봉 대상 %d종목 확보 (%s 기준) — 채움 시작",
+                         len(ranked), basis)
                 break
         except Exception:                        # noqa: BLE001
             pass
         time.sleep(15)
     else:
-        log.warning("[startup] 유니버스가 10분 안에 차지 않아 일봉 채움을 건너뛴다 "
+        log.warning("[startup] 일봉 대상 종목이 10분 안에 서지 않아 건너뛴다 "
                     "— 16:10 잡이 다시 시도한다")
         return
     try:
@@ -6722,12 +6731,6 @@ def _startup():
         threading.Thread(target=_startup_naver_universe_sync,
                          daemon=True, name="naver-startup").start()
 
-        # 일봉(ohlcv) 채움. Render 는 재시작마다 DB 가 사라지므로 부팅 때
-        # 한 번 받아 둬야 신고가가 산다. 유니버스가 선 뒤 스스로 시작한다.
-        # 데몬 스레드라 Flask 기동을 막지 않는다(약 5분 소요).
-        threading.Thread(target=_startup_ohlcv_fill,
-                         daemon=True, name="ohlcv-startup").start()
-
         # 텔레그램 양방향 봇 webhook 등록 (Render 공개 URL 있을 때만)
         if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
             threading.Thread(target=_telegram_setup_webhook,
@@ -6737,6 +6740,21 @@ def _startup():
         #   일 1회, ~180 초 소요. 사용자가 [🇺🇸 미국] 토글 누르기 전에 완료되도록.
         threading.Thread(target=_build_us_market_background,
                          daemon=True, name="us-market-build").start()
+
+    # ── 일봉(ohlcv) 부팅 채움 ── **분기 밖이어야 한다.**
+    #
+    # 2026-09-18 에 이 스레드가 `if DISABLE_AUTO_FETCH: ... else:` 의 else 쪽에
+    # 있었다. Render 는 `IS_RENDER` 가 참이라 늘 if 쪽으로 가므로 **정작 DB 가
+    # 사라지는 환경에서만 이 스레드가 한 번도 안 돌았다.** 그날 신고가 섹션이
+    # 하루 종일 '일봉 거래일이 0일뿐' 이었던 까닭이다.
+    #
+    # else 분기의 취지는 pykrx·yfinance 서브프로세스를 Render 에서 안 돌리는
+    # 것인데, 일봉 채움은 표준 라이브러리로 네이버 JSON 만 읽는다(ohlcv_autofill).
+    # 여기 걸릴 이유가 없었다.
+    #
+    # 데몬 스레드라 Flask 기동을 막지 않는다(300종목 약 5분).
+    threading.Thread(target=_startup_ohlcv_fill,
+                     daemon=True, name="ohlcv-startup").start()
 
     # APScheduler: 장중 자동 갱신 (Render에선 _scheduled_update 등록 안 함)
     if _SCHEDULER_OK:
@@ -7545,7 +7563,57 @@ def api_refresh_prices():
 
 
 # ── 일봉(ohlcv) 자동 채움 ──────────────────────────────────────────────────
+def _ohlcv_ranked_codes() -> tuple[str, list]:
+    """일봉을 받을 순서를 `stocks` 표에서 뽑는다. (기준, [(점수, 코드)])
+
+    ohlcv_autofill 은 server.py 를 import 할 수 없어(순환) 이 함수를 주입받는다.
+
+    **왜 유니버스가 아니라 이 표인가.** Render 무료 플랜은 cache/ 가 비영속이라
+    재배포하면 `_load_naver_universe()` 가 커밋된 시드로 떨어지는데, 시드에는
+    거래대금(volume_mn)이 없다. 반면 `stocks` 는 부팅 직후 가격 갱신
+    (`_boot_refresh_kr` → `_refresh_prices_from_naver`)이 거래대금까지 채운다.
+    2026-09-18 에 일봉이 계속 비었던 까닭이 이것이다.
+
+    거래대금이 아직 0이면 시가총액으로 고른다. 고른 기준을 같이 돌려주는 이유는
+    메시지가 '거래대금 상위' 라고 잘못 적지 않게 하려는 것이다.
+    """
+    if not (_SQLITE_OK and USE_SQLITE):
+        return "none", []
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT code, volume_mn, market_cap FROM stocks "
+            "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'").fetchall()
+    import ohlcv_autofill as _oa
+    by_volume = [(float(r["volume_mn"] or 0), r["code"]) for r in rows
+                 if (r["volume_mn"] or 0) >= _oa.UNIVERSE_MIN_VOLUME_MN]
+    if by_volume:
+        return "volume", by_volume
+    by_cap = [(float(r["market_cap"] or 0), r["code"]) for r in rows
+              if (r["market_cap"] or 0) > 0]
+    if by_cap:
+        return "market_cap", by_cap
+    return "none", []
+
+
+# 일봉 채움은 **한 번에 하나만** 돈다. 부르는 데가 넷이다 — 부팅 스레드,
+# 16:10 잡, 시황이 데이터 미완일 때, 수동 API. 둘이 겹치면 같은 300종목을
+# 동시에 네이버에 두 번 물어 차단을 부른다. 뒤엣것은 앞엣것이 끝날 때까지
+# 기다렸다가, 이미 찼으면 건너뛰기 판정에 걸려 곧바로 돌아간다.
+_OHLCV_FILL_LOCK = threading.Lock()
+
+
 def _fill_ohlcv_job(force: bool = False) -> dict:
+    """`_fill_ohlcv_job_inner` 를 한 번에 하나만 돌게 감싼다."""
+    if not _OHLCV_FILL_LOCK.acquire(timeout=900):
+        log.warning("[일봉 채움] 다른 채움이 15분 넘게 돌고 있다 — 이번은 건너뛴다")
+        return {"skipped": True, "reason": "다른 채움이 돌고 있다"}
+    try:
+        return _fill_ohlcv_job_inner(force)
+    finally:
+        _OHLCV_FILL_LOCK.release()
+
+
+def _fill_ohlcv_job_inner(force: bool = False) -> dict:
     """일봉을 받아 ohlcv 를 채운다. 스케줄러(16:10)와 부팅 스레드가 부른다.
 
     수집 자체는 ohlcv_autofill 모듈이 한다 — 여기는 유니버스를 넘겨 주고
@@ -7585,7 +7653,8 @@ def _fill_ohlcv_job(force: bool = False) -> dict:
                 pass       # 거래일을 못 구하면 그냥 받는다
 
     try:
-        return _oa.fill(load_universe=_load_naver_universe, now=now_kst())
+        return _oa.fill(load_universe=_load_naver_universe,
+                        load_ranked=_ohlcv_ranked_codes, now=now_kst())
     except Exception as exc:                               # noqa: BLE001
         log.exception("[일봉 채움] 실패")
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -7599,6 +7668,42 @@ def api_ops_ohlcv_fill():
                      daemon=True, name="ohlcv-fill").start()
     return jsonify({"ok": True, "message": "백그라운드 일봉 채움 시작",
                     "force": force})
+
+
+@app.route("/api/ops/brief/closing", methods=["POST"])
+def api_ops_brief_closing():
+    """장마감 시황을 지금 보낸다. `?force=1` 이면 오늘 이미 보냈어도 다시 보낸다.
+
+    **왜 있는가.** 시황은 하루 한 번 제한이 ops_state 에 걸려 있다. 그 제한은
+    옳지만, 덜 찬 시황이 나가 버린 날(2026-09-18 처럼 일봉이 비어 신고가가
+    '데이터 수집 실패' 로 나간 날)에는 사람이 손으로 다시 보낼 길이 있어야
+    한다. 그 길이다 — 자동 경로는 건드리지 않는다.
+
+    데이터가 덜 찼으면 `send_closing_market_summary` 가 먼저 일봉을 채우고
+    다시 본다(300종목 약 5분). 그래서 **백그라운드 스레드로 돌리고 즉시
+    돌아온다** — HTTP 가 그동안 매달려 있으면 프록시가 먼저 끊는다.
+    진행 상황은 `/api/ops/ohlcv/status` 로 본다.
+    """
+    force = (request.args.get("force") or "").strip() in ("1", "true", "yes")
+    if force:
+        _ops_set(_closing_brief_key(), "")
+
+    def _run():
+        try:
+            sent = send_closing_market_summary(catchup=True)
+            log.info("[장마감시황] 수동 발송 결과: %s", sent)
+        except Exception:                                  # noqa: BLE001
+            log.exception("[장마감시황] 수동 발송 실패")
+
+    threading.Thread(target=_run, daemon=True, name="brief-manual").start()
+    try:
+        import ohlcv_autofill as _oa
+        st = _oa.status()
+    except Exception as exc:                               # noqa: BLE001
+        st = {"error": f"{type(exc).__name__}: {exc}"}
+    return jsonify({"ok": True, "force": force,
+                    "message": "백그라운드 발송 시작 — 일봉이 비었으면 먼저 채운다",
+                    "ohlcv": st})
 
 
 @app.route("/api/ops/ohlcv/status")
@@ -13704,9 +13809,24 @@ def send_closing_market_summary(*, catchup: bool = False,
     # 30분마다 캐치업이 다시 본다 — 위 _brief_data_ready 설명 참고.
     if require_ready:
         ready, why = _brief_data_ready()
-        past_deadline = (now.hour, now.minute) >= _CLOSING_BRIEF_DEADLINE_HHMM
+        if not ready:
+            # **기다리기만 하지 않는다.** 재배포로 DB 가 날아간 상태에서
+            # 30분마다 "아직 안 찼다" 만 적고 물러나면, 채우는 주체가 그동안
+            # 한 번도 안 깨어 있었을 때 하루가 그대로 지나간다 (2026-09-18).
+            # 빠진 것이 일봉이면 여기서 직접 채운다 — 300종목 약 5분이고,
+            # 이 잡은 max_instances=1 · misfire_grace 1800 이라 막아도 된다.
+            log.warning("[장마감시황] 데이터 미완 — 직접 채우고 다시 본다: %s", why)
+            try:
+                r = _fill_ohlcv_job()
+                log.info("[장마감시황] 일봉 채움 결과: %s",
+                         {k: r.get(k) for k in ("ok", "codes", "rows", "basis",
+                                                "skipped", "error")})
+            except Exception as exc:                          # noqa: BLE001
+                log.warning("[장마감시황] 일봉 채움 실패: %s", exc)
+            ready, why = _brief_data_ready()
+        past_deadline = (now_kst().hour, now_kst().minute) >= _CLOSING_BRIEF_DEADLINE_HHMM
         if not ready and not past_deadline:
-            log.warning("[장마감시황] 데이터 미완 — 보내지 않는다: %s", why)
+            log.warning("[장마감시황] 채운 뒤에도 미완 — 보내지 않는다: %s", why)
             return False
         if not ready:
             log.warning("[장마감시황] 마감 시각이라 미완인 채로 보낸다: %s", why)
@@ -13730,6 +13850,19 @@ def send_closing_market_summary(*, catchup: bool = False,
     head = "🌙 장마감 시황" + (" (지연 발송)" if catchup else "")
     send_market_summary_telegram(header=head)
     _ops_set(_closing_brief_key(), today_ymd)
+    # **표시를 즉시 밖으로 내보낸다.** 이 표시는 ops_state 에 있고 ops_state 는
+    # 재배포로 사라지는 db/dashboard.db 안에 산다. Gist 백업은 매시 30분이라,
+    # 보낸 뒤 그 정각 전에 배포가 나가면 표시만 사라지고 캐치업이 같은 시황을
+    # 또 보낸다 — 2026-09-18 20:04 발송분이 20:22 배포 뒤 20:42 에 한 번 더
+    # 나간 경로가 이것이다. 여기서 한 번 백업하면 그 창이 닫힌다.
+    try:
+        from db_backup import backup_db as _bk
+        r = _bk()
+        log.info("[장마감시황] 발송 표시 백업: %s",
+                 "ok" if r.get("ok") else r.get("reason"))
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("[장마감시황] 발송 표시 백업 실패: %s — 재배포 시 중복 발송 가능",
+                    exc)
     log.info("[장마감시황] %s 발송 완료 (catchup=%s)", today_ymd, catchup)
     return True
 
