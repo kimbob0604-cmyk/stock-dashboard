@@ -3,8 +3,8 @@
 server.py 는 Flask 앱이라 import 하지 않는다(check_brief_sections.py 와 같은 이유).
 고친 함수의 **본문을 소스에서 그대로 떼어** 같은 입력에 태우고, 규칙만 못 박는다.
 
-  1. 역사적·52주는 '외 N종목' 으로 접지 않는다 (전 종목).
-  2. 60일은 접는다 — 접은 수를 반드시 적는다.
+  1. 세 등급 모두 '외 N종목' 으로 접지 않는다 (전 종목).
+  2. 접기 코드 자체는 살아 있다 — 상한을 넣으면 접히고 접은 수를 적는다.
   3. 시총은 언제 것인지 모르거나 묵었으면 `*` 가 붙는다.
   4. 본문이 길어지면 **줄 경계에서** 나뉜다. 종목 줄은 잘리지도 사라지지도 않는다.
 """
@@ -86,7 +86,11 @@ def build_items(key, n):
     return got, items
 
 
-for key, label in (('hist', '역사적'), ('w52', '52주')):
+# 세 등급 모두 전 종목이다. 60일은 2026-09-18 에 접기를 풀었다 — 접힌 이름은
+# 메시지 어디에서도 볼 수 없었고, 길이는 줄 경계 분할이 이미 감당한다.
+for key, label in (('hist', '역사적'), ('w52', '52주'), ('d60', '60일')):
+    want(_NH_LIST_MAX.get(key) is None,
+         f'{label}: 상한이 {_NH_LIST_MAX.get(key)} 다 — 전 종목이어야 한다')
     got, items = build_items(key, 37)
     want(len(items) == 37, f'{label}: 37종목인데 {len(items)}줄만 나왔다')
     want(not any('외 ' in it and '종목' in it for it in items),
@@ -94,16 +98,19 @@ for key, label in (('hist', '역사적'), ('w52', '52주')):
     want(all(f'종목{i:03d}' in '\n'.join(items) for i in range(37)),
          f'{label}: 빠진 종목이 있다')
 
-got, items = build_items('d60', 30)
-want(len(items) == _NH_LIST_MAX['d60'] + 1,
-     f"60일: {_NH_LIST_MAX['d60']}종목 + 요약 1줄이어야 하는데 {len(items)}줄")
-want(items[-1] == f"  … 외 {30 - _NH_LIST_MAX['d60']}종목",
-     f'60일: 접은 수를 안 적었다 — {items[-1]!r}')
-
-# 접을 것이 없으면 요약 줄도 없다
-_, few = build_items('d60', 3)
-want(len(few) == 3 and not any('외 ' in it for it in few),
-     '60일: 3종목뿐인데 요약 줄이 붙었다')
+# 접기 코드는 지웠지 않고 쉬고 있다. 상한을 다시 넣으면 접히고 접은 수를 적어야
+# 한다 — 안 그러면 '다시 접으면 된다' 는 주석이 거짓말이 된다.
+_saved = _NH_LIST_MAX.get('d60')
+_NH_LIST_MAX['d60'] = 5
+try:
+    got, items = build_items('d60', 30)
+    want(len(items) == 6, f'상한 5를 넣었는데 {len(items)}줄이다')
+    want(items[-1] == '  … 외 25종목', f'접은 수를 안 적었다 — {items[-1]!r}')
+    _, few = build_items('d60', 3)
+    want(len(few) == 3 and not any('외 ' in it for it in few),
+         '3종목뿐인데 요약 줄이 붙었다')
+finally:
+    _NH_LIST_MAX['d60'] = _saved
 
 # ── 3. 시총 신선도 ───────────────────────────────────────────────────────
 fresh = TODAY_STR
