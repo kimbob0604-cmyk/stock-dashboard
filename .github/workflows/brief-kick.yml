@@ -31,7 +31,7 @@ concurrency:
 jobs:
   kick:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: 깨우고 보내고 지켜본다
         env:
@@ -42,16 +42,20 @@ jobs:
           echo "대상 $URL"
 
           # ── 1) 깨우기 ──
+          # **재배포 중이면 Render 가 503 을 준다.** 이걸 못 기다리고 포기한
+          # 것이 이 워크플로의 첫 실패였다(2026-09-18 11:59, 503 다섯 번).
+          # 이 워크플로를 손으로 돌리는 때는 대개 방금 머지한 직후라
+          # 재배포와 겹친다 — 그러니 넉넉히 기다린다. 12분.
           awake=0
-          for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
+          for i in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
                         "$URL/api/health" || echo 000)
             echo "깨우기 $i — HTTP $code"
             [ "$code" = "200" ] && { awake=1; break; }
-            sleep 20
+            sleep 30
           done
           if [ "$awake" != "1" ]; then
-            echo "::error::$URL 를 깨우지 못했습니다 (저장소 변수 DASHBOARD_URL 확인)."
+            echo "::error::$URL 가 12분 동안 200 을 주지 않았습니다. 마지막 HTTP $code — 503 이면 재배포가 아직 안 끝났고, 000 이면 주소(저장소 변수 DASHBOARD_URL)를 보세요."
             exit 1
           fi
 

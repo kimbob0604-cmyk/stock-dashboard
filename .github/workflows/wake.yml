@@ -33,7 +33,7 @@ concurrency:
 jobs:
   wake:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: 깨우기
         env:
@@ -48,10 +48,13 @@ jobs:
           # 잠든 인스턴스는 깨어나는 데 1분 가까이 걸린다. 넉넉히 기다리고
           # 몇 번 다시 두드린다 — 첫 요청이 타임아웃으로 끊겨도 그 요청이
           # 기동을 시작시켰을 수 있다.
+          # 503 은 '재배포 중' 이다 — 실패가 아니라 기다릴 일이다. 그래서
+          # 다섯 번에 끝내지 않고 8분을 본다(2026-09-18 에 503 다섯 번 받고
+          # 포기한 적이 있다).
           ok=0
-          for i in 1 2 3 4 5; do
+          for i in $(seq 1 16); do
             code=$(curl -s -o /tmp/health.json -w '%{http_code}' \
-                        --max-time 90 "$URL/api/health" || echo 000)
+                        --max-time 60 "$URL/api/health" || echo 000)
             echo "시도 $i — HTTP $code"
             if [ "$code" = "200" ]; then
               ok=1
@@ -59,10 +62,10 @@ jobs:
               echo
               break
             fi
-            sleep 20
+            sleep 30
           done
           if [ "$ok" != "1" ]; then
-            echo "::error::$URL 를 깨우지 못했습니다. 주소가 맞는지(저장소 변수 DASHBOARD_URL) 확인하세요."
+            echo "::error::$URL 가 8분 동안 200 을 주지 않았습니다. 마지막 HTTP $code — 503 이면 재배포 중이고, 000 이면 주소(저장소 변수 DASHBOARD_URL)를 보세요."
             exit 1
           fi
           echo "깨웠습니다 — 밀린 시황이 있으면 서버가 부팅 캐치업으로 보냅니다."
