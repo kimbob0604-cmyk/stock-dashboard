@@ -31,7 +31,7 @@ concurrency:
 jobs:
   kick:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: 깨우고 보내고 지켜본다
         env:
@@ -42,16 +42,41 @@ jobs:
           echo "대상 $URL"
 
           # ── 1) 깨우기 ──
+          # **재배포 중이면 Render 가 503 을 준다.** 이걸 못 기다리고 포기한
+          # 것이 이 워크플로의 첫 실패였다(2026-09-18 11:59, 503 다섯 번).
+          # 이 워크플로를 손으로 돌리는 때는 대개 방금 머지한 직후라
+          # 재배포와 겹친다 — 그러니 넉넉히 기다린다. 12분.
+          # 503 이 계속 나오면 그 이유를 헤더가 말해 준다 — Render 는
+          # x-render-routing 에 적는다(no-server = 그 주소에 서비스가 없다,
+          # dynamic = 있고 기동 중). 몇 번에 한 번씩 찍어 둔다: 실패했을 때
+          # "503 이었다" 만 남으면 배포 중인지 주소가 틀린지 구분이 안 된다.
           awake=0
-          for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
+          for i in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
                         "$URL/api/health" || echo 000)
             echo "깨우기 $i — HTTP $code"
             [ "$code" = "200" ] && { awake=1; break; }
-            sleep 20
+            if [ "$i" = "1" ] || [ "$i" = "6" ] || [ "$i" = "24" ]; then
+            # **정지된 서비스는 기다려도 안 깨어난다.** Render 가 헤더로
+            # 그렇게 말해 준다(x-render-routing: suspend-by-user). 이걸 못
+            # 알아보고 12분을 기다린 적이 있다(2026-09-18). 사람이 Render
+            # 대시보드에서 Resume 을 눌러야 하는 일이라, 알아보는 즉시 멈추고
+            # 그 사실을 말한다.
+            hdr=$(curl -sS -o /tmp/body.txt -D - --max-time 60 "$URL/api/health" \
+                  | grep -iE '^(HTTP/|x-render|retry-after|server|content-type)' || true)
+            printf '%s\n' "$hdr"
+            if printf '%s' "$hdr" | grep -qi 'x-render-routing: *suspend'; then
+              echo "::error::Render 서비스가 **정지(suspended)** 상태입니다. 깨우기로는 못 살립니다 — Render 대시보드에서 해당 서비스를 Resume 하세요 (무료 플랜 사용 시간 소진이나 결제 문제면 그 쪽부터)."
+              exit 1
+            fi
+            echo "--- 본문 200자 ---"
+            head -c 200 /tmp/body.txt || true
+            echo
+            fi
+            sleep 30
           done
           if [ "$awake" != "1" ]; then
-            echo "::error::$URL 를 깨우지 못했습니다 (저장소 변수 DASHBOARD_URL 확인)."
+            echo "::error::$URL 가 12분 동안 200 을 주지 않았습니다. 마지막 HTTP $code — 503 이면 재배포가 아직 안 끝났고, 000 이면 주소(저장소 변수 DASHBOARD_URL)를 보세요."
             exit 1
           fi
 

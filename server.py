@@ -13774,8 +13774,27 @@ def _brief_data_ready() -> tuple[bool, str]:
     return True, f"일봉 {rows:,}행 · KR {health['stocks_kr']}종목"
 
 
+# 시황 발송은 **한 번에 하나만** 돈다. '오늘 보냈나' 를 보고 → 보내고 →
+# 표시를 찍기까지가 한 덩어리여야 한다. 지금 부르는 데가 넷이다 — 16:00 cron,
+# 30분 캐치업 cron, 부팅 캐치업 스레드, 수동 API. 둘이 겹치면 둘 다 '아직 안
+# 보냈다' 를 보고 둘 다 보낸다. 게다가 데이터가 덜 찼을 때 일봉을 채우느라
+# 몇 분을 쓰므로 겹칠 창이 그만큼 넓다.
+_CLOSING_BRIEF_LOCK = threading.Lock()
+
+
 def send_closing_market_summary(*, catchup: bool = False,
                                 require_ready: bool = True) -> bool:
+    """`_send_closing_market_summary` 를 한 번에 하나만 돌게 감싼다.
+
+    이미 누가 보내는 중이면 기다렸다가, 하루 한 번 제한에 걸려 조용히 돌아간다.
+    """
+    with _CLOSING_BRIEF_LOCK:
+        return _send_closing_market_summary(catchup=catchup,
+                                            require_ready=require_ready)
+
+
+def _send_closing_market_summary(*, catchup: bool = False,
+                                 require_ready: bool = True) -> bool:
     """장마감 시황 텔레그램 발송 (평일 16:00 cron + 밀리면 캐치업).
 
     **하루 한 번만 나간다.** 발송한 날짜를 ops_state 에 적고, cron 과 캐치업이
