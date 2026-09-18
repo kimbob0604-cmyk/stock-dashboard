@@ -128,6 +128,67 @@ send_closing_market_summary()
 NOW[0] = datetime(2026, 9, 21, 16, 5, tzinfo=KST)        # 다음 월요일
 want(closing_brief_catchup() is True, '다음 영업일에 안 보냈다')
 
+# ── 6. 데이터가 덜 찼으면 안 보내고 표시도 안 찍는다 ────────────────────
+# 2026-09-18: 배포 직후 빈 DB 위에서 부팅 캐치업이 시황을 보내고 '보냈음' 까지
+# 찍어, 데이터가 다 찬 뒤에도 다시 못 보냈다. 그 회귀를 여기서 막는다.
+want('def _brief_data_ready' in SRC, '_brief_data_ready 가 없다')
+want('_CLOSING_BRIEF_DEADLINE_HHMM' in SRC, '마감 시각 상수가 없다')
+want(re.search(r'if not ready and not past_deadline:\s*\n\s*log\.warning', SRC),
+     '데이터 미완일 때 보내지 않고 돌아가는 분기가 없다')
+dl = grab(r'_CLOSING_BRIEF_DEADLINE_HHMM = \((\d+), (\d+)\)', '마감 시각')
+DH, DM = int(dl.group(1)), int(dl.group(2))
+print(f'_CLOSING_BRIEF_DEADLINE_HHMM = ({DH}, {DM})')
+want((DH, DM) > (H, M), '마감 시각이 발송 시각보다 빠르거나 같다')
+cat = grab(r'_scheduler\.add_job\(closing_brief_catchup.*?\)\n', '캐치업 cron')
+want(f'hour="16-{DH}"' in cat.group(0),
+     f'캐치업 창이 마감 시각({DH}시)까지 안 간다 — {cat.group(0)!r}')
+want(f'minute="5,{DM}"' in cat.group(0),
+     f'캐치업 마지막 슬롯이 마감 분({DM})과 다르다 — {cat.group(0)!r}')
+
+# 준비 안 된 상태를 흉내 내 동작을 본다
+READY = [False]
+
+
+def _brief_data_ready():
+    return (True, '준비됨') if READY[0] else (False, '일봉 테이블이 비어 있다')
+
+
+_CLOSING_BRIEF_DEADLINE_HHMM = (DH, DM)
+
+
+def send_gated(*, catchup=False):
+    """server.py 의 게이트 부분만 떼어 온 것."""
+    now = now_kst()
+    today = now.strftime('%Y-%m-%d')
+    if str(_ops_get('closing_brief_sent', '')) == today:
+        return False
+    ready, _why = _brief_data_ready()
+    past = (now.hour, now.minute) >= _CLOSING_BRIEF_DEADLINE_HHMM
+    if not ready and not past:
+        return False                      # 보내지도, 표시하지도 않는다
+    SENT.append((today, catchup, ready))
+    _ops_set('closing_brief_sent', today)
+    return True
+
+
+STATE.clear(); SENT.clear()
+READY[0] = False
+NOW[0] = datetime(2026, 9, 18, 16, 0, tzinfo=KST)
+want(send_gated() is False, '데이터가 비었는데 보냈다')
+want(STATE.get('closing_brief_sent') is None,
+     "안 보냈는데 '보냈음' 표시를 찍었다 — 그러면 다 찬 뒤에도 못 보낸다")
+NOW[0] = datetime(2026, 9, 18, 18, 0, tzinfo=KST)
+READY[0] = True
+want(send_gated(catchup=True) is True, '데이터가 찬 뒤에도 안 보냈다')
+want(SENT == [('2026-09-18', True, True)], f'발송 기록이 이상하다 — {SENT}')
+
+# 마감 시각을 넘기면 덜 찼어도 보낸다 — 아무것도 안 오는 것보다 낫다
+STATE.clear(); SENT.clear()
+READY[0] = False
+NOW[0] = datetime(2026, 9, 18, DH, DM, tzinfo=KST)
+want(send_gated(catchup=True) is True, '마감 시각인데도 안 보냈다')
+want(SENT and SENT[0][2] is False, '마감 발송이 준비됨으로 기록됐다')
+
 # ── 옛 이름이 남아 있지 않은지 ───────────────────────────────────────────
 want('send_evening_market_summary' not in SRC,
      '옛 이름 send_evening_market_summary 가 남아 있다')
