@@ -6780,14 +6780,25 @@ def _startup():
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="flow_batch", max_instances=1,
                                misfire_grace_time=600)
-            # 저녁 확정 시황 (19:00 — 투자자별 순매매 확정치 반영).
-            # 15:50 직후엔 외국인/기관 당일 순매매가 미집계(KRX 확정 ~18:00,
-            # Naver 반영 ~18:30) → 수급이 전일 기준으로만 나오는 문제.
-            # 19:00 에 가격+수급을 발송 직전 재갱신 → 모든 수치 당일 확정값.
-            # (기존 15:50 발송은 사용자 요청으로 저녁 확정판으로 교체)
-            _scheduler.add_job(send_evening_market_summary, "cron",
-                               day_of_week="mon-fri", hour=19, minute=0,
-                               id="tg_evening_summary", max_instances=1)
+            # 장마감 시황 (16:00 — 사용자 요청). 정규장 마감 15:30 직후 확정
+            # 종가로 그날을 정리해 받는다.
+            #
+            # 19:00 이었던 것을 2026-09-18 에 앞당겼다. 19:00 을 고른 이유는
+            # 투자자별 수급 확정치(KRX ~18:00 · 네이버 ~18:30)를 기다리려는
+            # 것이었는데, 그 대가로 시황이 장 끝나고 세 시간 반 뒤에 왔다.
+            # 수급 한 줄 때문에 나머지 전부를 늦추는 건 맞는 거래가 아니다.
+            # 16:00 수급은 전일 값이지만 오늘 값인 척 나가지 않는다 —
+            # build_market_summary 가 수급 섹션에 실제 기준일을 적는다.
+            #
+            # **misfire_grace_time 을 넉넉히 준다.** 기본값은 1초라, 정각에
+            # 스케줄러가 바쁘거나 막 깨어났으면 그날 발송이 통째로 날아간다.
+            # 그래도 못 보낸 날은 closing_brief_catchup 이 뒤늦게 보낸다.
+            _scheduler.add_job(send_closing_market_summary, "cron",
+                               day_of_week="mon-fri",
+                               hour=_CLOSING_BRIEF_HHMM[0],
+                               minute=_CLOSING_BRIEF_HHMM[1],
+                               id="tg_closing_summary", max_instances=1,
+                               misfire_grace_time=1800)
             # 수급 심화 시그널 (19:30 — 저녁 확정 수급 분석 후)
             # 쌍끌이 매수/매도 · 외국인 연속 순매수/순매도 · 수급 반전 포착.
             _scheduler.add_job(alert_flow_signals, "cron",
@@ -6804,6 +6815,13 @@ def _startup():
                                day_of_week="mon-fri", hour="8-20", minute="0,30",
                                id="data_watchdog", max_instances=1,
                                misfire_grace_time=300)
+            # 밀린 장마감 시황을 뒤늦게라도 보낸다. Render 무료 플랜이 16:00 에
+            # 자고 있었으면 cron 은 돌지 않는다 — 깨어 있는 30분마다 확인한다.
+            # 하루 한 번 제한은 send_closing_market_summary 가 건다.
+            _scheduler.add_job(closing_brief_catchup, "cron",
+                               day_of_week="mon-fri", hour="16-20", minute="5,35",
+                               id="closing_brief_catchup", max_instances=1,
+                               misfire_grace_time=1800)
             # 미국 장마감 시황 (KST 06:10 — 미국 월~금 마감 = KST 화~토)
             _scheduler.add_job(send_us_market_summary_telegram, "cron",
                                day_of_week="tue-sat", hour=6, minute=10,
@@ -6828,7 +6846,17 @@ def _startup():
             _scheduler.add_job(_check_trailing_stops, "cron",
                                day_of_week="mon-fri", hour="9-15", minute="0,30",
                                id="tg_trailing", max_instances=1)
-            log.info("[텔레그램] 알림 스케줄 8개 등록")
+            # 부팅 직후에도 한 번 본다. Render 가 잠들었다 깨어나는 순간이
+            # 가장 확실한 기회다 — 그때 밀린 것이 있으면 바로 보낸다.
+            # 백그라운드로 돌린다: 발송이 가격·수급 갱신을 먼저 하므로
+            # 부팅 경로를 막으면 첫 요청이 그만큼 늦어진다.
+            try:
+                import threading as _th
+                _th.Thread(target=closing_brief_catchup, daemon=True,
+                           name="closing-brief-catchup").start()
+            except Exception as exc:                          # noqa: BLE001
+                log.debug("[장마감시황] 부팅 캐치업 기동 실패: %s", exc)
+            log.info("[텔레그램] 알림 스케줄 등록 완료")
         else:
             log.info("[텔레그램] 토큰 미설정 — 알림 비활성화")
 
@@ -13503,56 +13531,95 @@ def send_market_summary_telegram(header: str | None = None):
     send_telegram_long(msg)
 
 
-def send_evening_market_summary():
-    """저녁 확정 시황 텔레그램 발송 (평일 19:00 cron).
+def _closing_brief_key() -> str:
+    """오늘 장마감 시황을 보냈는지 적어 두는 ops_state 키의 값(= 발송일)."""
+    return "closing_brief_sent"
 
-    15:50 장마감 직후엔 투자자별(외국인/기관) 순매매가 미집계 → KRX 확정치는
-    통상 18:00 전후 공개되어 Naver frgn 에 ~18:30 반영. 19:00 에 가격·수급을
-    발송 직전 재갱신하면 수급까지 당일 확정값으로 채워진다.
 
-    수급 확정 데이터 미반영 방지: 수급 최신일이 오늘이 아니면 최대 3회
-    (10분 간격) 재시도 후, 그래도 미공개면 build_market_summary 의 날짜
-    라벨 로직이 실제 기준일을 정확히 표기하므로 오인 없이 발송된다.
+def send_closing_market_summary(*, catchup: bool = False) -> bool:
+    """장마감 시황 텔레그램 발송 (평일 16:00 cron + 밀리면 캐치업).
+
+    **하루 한 번만 나간다.** 발송한 날짜를 ops_state 에 적고, cron 과 캐치업이
+    같은 날 두 번 부르면 뒤엣것은 조용히 돌아간다. 프로세스 메모리에 두면
+    Render 가 재배포·재시작할 때마다 잊어버려 같은 시황이 또 나간다.
+
+    ## 왜 16:00 인가
+
+    사용자 요청이다. 정규장 마감(15:30) 직후 확정 종가로 그날을 정리해 받는다.
+
+    **대신 투자자별 수급은 당일 확정치가 아니다.** KRX 확정은 통상 18:00 전후,
+    네이버 반영은 ~18:30 이라 16:00 에는 전일 값밖에 없다. 예전에 이걸 이유로
+    19:00 으로 미뤄 뒀었는데, 그 대가로 시황이 장 끝나고 세 시간 반 뒤에 왔다.
+    수급 한 줄 때문에 나머지 전부를 늦추는 것이 맞는 거래가 아니다.
+
+    조용히 전일 값을 오늘 값인 척 내보내지는 않는다 — `build_market_summary` 가
+    수급 최신일이 오늘이 아니면 섹션에 그 날짜를 적는다(12930행 근처).
+    수급 확정치를 보려면 `/시황` 을 저녁에 한 번 더 부르면 된다.
+
+    기다리지 않는 이유도 같다. 예전 코드는 당일 수급이 뜰 때까지 10분씩 세 번
+    잤는데, 16:00 에는 30분을 기다려도 안 나온다. 기다림은 발송만 늦춘다.
     """
+    today_ymd = now_kst().strftime("%Y-%m-%d")
+    if str(_ops_get(_closing_brief_key(), "")) == today_ymd:
+        log.info("[장마감시황] %s 는 이미 보냈다 — 건너뛴다 (catchup=%s)",
+                 today_ymd, catchup)
+        return False
+
     # 1) 종가 가격 재갱신 (장 마감 확정값)
     try:
         n = _refresh_prices_from_naver()
-        log.info("[저녁시황] 가격 갱신 %d종목", n)
-    except Exception as exc:
-        log.warning("[저녁시황] 가격 갱신 실패: %s", exc)
+        log.info("[장마감시황] 가격 갱신 %d종목", n)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("[장마감시황] 가격 갱신 실패: %s", exc)
 
-    # 2) 수급 재갱신 — 당일 확정치 공개 대기 (최대 3회 재시도)
-    today_ymd = now_kst().strftime("%Y-%m-%d")
-    for attempt in range(1, 4):
-        try:
-            r = _refresh_flow_batch(top_n=200)
-            log.info("[저녁시황] 수급 갱신 시도 %d: %s", attempt, r)
-        except Exception as exc:
-            log.warning("[저녁시황] 수급 갱신 실패 (시도 %d): %s", attempt, exc)
+    # 2) 수급 갱신 한 번. 당일치가 없으면 없는 대로 간다 — 위 설명 참고.
+    try:
+        r = _refresh_flow_batch(top_n=200)
+        log.info("[장마감시황] 수급 갱신: %s", r)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("[장마감시황] 수급 갱신 실패: %s", exc)
 
-        # 삼성전자(005930) 기준 최신 수급일이 오늘이면 확정 공개됨
-        latest = None
-        if _SQLITE_OK and USE_SQLITE:
-            try:
-                with _get_db() as conn:
-                    row = conn.execute(
-                        "SELECT dates_json FROM flow_cache WHERE code='005930'"
-                    ).fetchone()
-                if row and row["dates_json"]:
-                    dts = _parse_json_list(row["dates_json"])
-                    latest = dts[-1] if dts else None
-            except Exception as exc:
-                log.debug("[저녁시황] 수급 최신일 확인 실패: %s", exc)
+    head = "🌙 장마감 시황" + (" (지연 발송)" if catchup else "")
+    send_market_summary_telegram(header=head)
+    _ops_set(_closing_brief_key(), today_ymd)
+    log.info("[장마감시황] %s 발송 완료 (catchup=%s)", today_ymd, catchup)
+    return True
 
-        if latest == today_ymd:
-            log.info("[저녁시황] 당일 수급 확정 공개 확인 (%s)", latest)
-            break
-        if attempt < 3:
-            log.info("[저녁시황] 당일 수급 미공개 (최신=%s) — 10분 후 재시도", latest)
-            time.sleep(600)
 
-    # 3) 발송 (모든 수치 당일 확정 — 수급 라벨은 실제 기준일 자동 표기)
-    send_market_summary_telegram(header="🌙 장마감 확정 시황")
+# 장마감 시황을 보냈어야 하는 시각. cron 도 캐치업도 이 값을 본다 —
+# 한 곳만 고치면 둘 다 따라온다.
+_CLOSING_BRIEF_HHMM = (16, 0)
+
+
+def closing_brief_catchup() -> bool:
+    """밀린 장마감 시황을 뒤늦게라도 보낸다.
+
+    **이게 없으면 시황은 안 오는 날이 생긴다.** Render 무료 플랜은 15분 유휴면
+    인스턴스를 재운다. 잠든 동안에는 프로세스가 아예 없으니 APScheduler 의
+    16:00 cron 도 돌지 않고, 깨어난 뒤에는 그 시각이 지나 버려 다음 평일까지
+    아무 일도 일어나지 않는다. 2026-09-18 에 19:00 예약분이 19:41 에 온 것이
+    그 형태였다.
+
+    그래서 '시각에 맞춰 깨어 있기' 에 기대지 않고 **깨어날 때마다 밀린 것이
+    있는지 본다.** 부팅 직후와 워치독(평일 08~20시 30분 간격)이 부른다.
+    하루 한 번 제한은 `send_closing_market_summary` 가 건다.
+
+    주말·공휴일은 보내지 않는다. 휴장일 판정은 '오늘 시세가 갱신됐는가' 가
+    아니라 요일로 한다 — 공휴일에 안 보내는 것보다 평일에 빠뜨리는 쪽이 나쁘다.
+    """
+    now = now_kst()
+    if now.weekday() >= 5:
+        return False
+    if (now.hour, now.minute) < _CLOSING_BRIEF_HHMM:
+        return False
+    if str(_ops_get(_closing_brief_key(), "")) == now.strftime("%Y-%m-%d"):
+        return False
+    log.info("[장마감시황] 밀린 발송을 지금 보낸다 (%s)", now.strftime("%H:%M"))
+    try:
+        return send_closing_market_summary(catchup=True)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("[장마감시황] 캐치업 실패: %s", exc)
+        return False
 
 
 # ── 데이터 정합성 워치독 + 자가복구 ────────────────────────────────────────
