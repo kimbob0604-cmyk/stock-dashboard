@@ -46,12 +46,23 @@ jobs:
           # 것이 이 워크플로의 첫 실패였다(2026-09-18 11:59, 503 다섯 번).
           # 이 워크플로를 손으로 돌리는 때는 대개 방금 머지한 직후라
           # 재배포와 겹친다 — 그러니 넉넉히 기다린다. 12분.
+          # 503 이 계속 나오면 그 이유를 헤더가 말해 준다 — Render 는
+          # x-render-routing 에 적는다(no-server = 그 주소에 서비스가 없다,
+          # dynamic = 있고 기동 중). 몇 번에 한 번씩 찍어 둔다: 실패했을 때
+          # "503 이었다" 만 남으면 배포 중인지 주소가 틀린지 구분이 안 된다.
           awake=0
           for i in $(seq 1 24); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
                         "$URL/api/health" || echo 000)
             echo "깨우기 $i — HTTP $code"
             [ "$code" = "200" ] && { awake=1; break; }
+            if [ "$i" = "1" ] || [ "$i" = "6" ] || [ "$i" = "24" ]; then
+              curl -sS -o /tmp/body.txt -D - --max-time 60 "$URL/api/health" \
+                | grep -iE '^(HTTP/|x-render|retry-after|server|content-type)' || true
+              echo "--- 본문 200자 ---"
+              head -c 200 /tmp/body.txt || true
+              echo
+            fi
             sleep 30
           done
           if [ "$awake" != "1" ]; then
