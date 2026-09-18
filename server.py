@@ -12376,6 +12376,70 @@ _CAP_STALE_DAYS = 7
 _NH_LIST_MAX = {"hist": None, "w52": None, "d60": None}
 
 
+# 신고가 등급별로 **상위 몇 종목에 수급을 붙이는가.** 0 = 안 붙인다.
+#
+# 52주만 5종목이다. 사용자가 보는 자리가 거기다 — 역사적은 하루 한두 종목이라
+# 따로 셀 것이 없고, 60일은 수십~수백 종목이라 다 붙이면 줄이 두 배가 된다.
+# 다른 등급도 켜고 싶으면 숫자만 올리면 된다.
+#
+# '상위' 는 목록과 같은 기준, 즉 거래대금 순이다. 다른 기준으로 자르면 화면의
+# 1~5번째 줄과 수급이 붙은 줄이 어긋난다.
+_NH_FLOW_MAX = {"hist": 0, "w52": 5, "d60": 0}
+
+
+def _newhigh_flow(conn, codes: list) -> tuple[dict, str | None]:
+    """신고가 종목의 외국인·기관 순매수. ({코드: (외인억, 기관억)}, 최신거래일)
+
+    flow_cache 는 종목별로 날짜·값 배열을 들고 있다. 마지막 칸이 가장 최근이다.
+    **날짜를 함께 돌려준다** — 당일 확정치는 장마감 후 한참 뒤에 나오므로
+    16:00 시황에서는 대개 전일 값이고, 그걸 오늘 값인 척 적으면 안 된다.
+
+    값이 없는 종목은 딕셔너리에 넣지 않는다. 0 을 넣으면 '순매수가 0 이었다' 와
+    '못 받았다' 가 같은 얼굴이 된다.
+    """
+    if not codes:
+        return {}, None
+    out, latest = {}, None
+    qs = ",".join("?" * len(codes))
+    try:
+        rows = conn.execute(
+            f"SELECT code, dates_json, foreign_value_json, inst_value_json "
+            f"FROM flow_cache WHERE code IN ({qs})", list(codes)).fetchall()
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("[신고가 수급] 조회 실패: %s", exc)
+        return {}, None
+    for r in rows:
+        dts = _parse_json_list(r["dates_json"])
+        fv = _parse_json_list(r["foreign_value_json"])
+        iv = _parse_json_list(r["inst_value_json"])
+        if not dts:
+            continue
+        d_last = dts[-1]
+        if latest is None or d_last > latest:
+            latest = d_last
+        f_eok = fv[-1] / 1e8 if fv else None
+        i_eok = iv[-1] / 1e8 if iv else None
+        if f_eok is None and i_eok is None:
+            continue
+        out[r["code"]] = (f_eok, i_eok, d_last)
+    return out, latest
+
+
+def _fmt_nh_flow(entry, latest: str | None) -> str:
+    """신고가 줄 뒤에 붙일 수급 한 토막. 못 받았으면 그렇게 적는다."""
+    if entry is None:
+        return " · <i>수급 없음</i>"
+    f_eok, i_eok, d_last = entry
+    def one(v):
+        return "—" if v is None else f"{v:+,.0f}억"
+    tail = f" · 외인 {one(f_eok)} 기관 {one(i_eok)}"
+    # 이 종목만 날짜가 다르면 그 자리에 적는다. 섹션 머리말의 날짜는 최신일
+    # 하나뿐이라, 종목마다 다를 때 줄과 머리말이 어긋난다.
+    if latest and d_last != latest:
+        tail += f" <i>({d_last[5:].replace('-', '/')})</i>"
+    return tail
+
+
 def _ohlcv_scope_note(scanned: int) -> str:
     """신고가가 **무엇을 모집단으로 한 결과인지** 한 조각.
 
@@ -12855,6 +12919,9 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         elif r["h60"] and c >= r["h60"]:
                             buckets["d60"].append(r)
 
+                    # 수급을 붙인 줄들의 기준일. 오늘이 아니면 섹션 머리말이
+                    # 그 사실을 적는다 — 16:00 시황에서는 대개 전일 값이다.
+                    nh_flow_dates: set = set()
                     for key, label, icon in (("hist", "역사적", "🏔"),
                                              ("w52", "52주", "📈"),
                                              ("d60", "60일", "📊")):
@@ -12864,12 +12931,25 @@ def build_market_summary(dry_run: bool = False) -> dict:
                             continue
                         cap_n = _NH_LIST_MAX.get(key)
                         shown = got if cap_n is None else got[:cap_n]
-                        items = [
-                            f"  {g['name']} {(g['change_pct'] or 0):+.1f}%"
-                            f"{_fmt_cap(g['market_cap'], g['market_cap_updated'])}"
-                            f" — {g['sector'] or '?'}"
-                            for g in shown
-                        ]
+                        # 상위 몇 종목에는 수급을 붙인다(_NH_FLOW_MAX).
+                        # 목록과 같은 거래대금 순이라 화면의 1~N번째 줄과 정확히
+                        # 겹친다 — 다른 기준으로 자르면 둘이 어긋난다.
+                        n_flow = _NH_FLOW_MAX.get(key) or 0
+                        flow_map, flow_latest = ({}, None)
+                        if n_flow:
+                            flow_map, flow_latest = _newhigh_flow(
+                                conn, [g["code"] for g in shown[:n_flow]])
+                            if flow_latest:
+                                nh_flow_dates.add(flow_latest)
+                        items = []
+                        for i, g in enumerate(shown):
+                            line = (f"  {g['name']} {(g['change_pct'] or 0):+.1f}%"
+                                    f"{_fmt_cap(g['market_cap'], g['market_cap_updated'])}"
+                                    f" — {g['sector'] or '?'}")
+                            if i < n_flow:
+                                line += _fmt_nh_flow(flow_map.get(g["code"]),
+                                                     flow_latest)
+                            items.append(line)
                         if len(got) > len(shown):
                             items.append(f"  … 외 {len(got) - len(shown)}종목")
                         nh_section["subsections"].append(
@@ -12890,6 +12970,15 @@ def build_market_summary(dry_run: bool = False) -> dict:
                                for it in sub["items"]):
                             basis += (f" · 시총 <b>*</b> 는 {_CAP_STALE_DAYS}일 넘게 "
                                       f"갱신되지 않은 값")
+                        # 수급이 오늘 것이 아니면 반드시 적는다. 당일 확정치는
+                        # 장마감 후 한참 뒤에 나오므로 16:00 시황에서는 대개
+                        # 전일 값이다 — 그걸 오늘 값인 척 두면 안 된다.
+                        _today_ymd = now_kst().strftime("%Y-%m-%d")
+                        _stale_flow = sorted(d for d in nh_flow_dates
+                                             if d != _today_ymd)
+                        if _stale_flow:
+                            _d = _stale_flow[-1][5:].replace("-", "/")
+                            basis += f" · 수급은 {_d} 기준(당일 확정 전)"
                         nh_section["items"] = [basis + "</i>"]
                     else:
                         nh_section["error"] = (
