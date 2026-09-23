@@ -2,6 +2,10 @@
 
 server.py 는 Flask 앱이라 여기서 import 하지 않는다. 대신 같은 스키마에
 같은 쿼리를 던져 '무엇이 어느 줄에 담기는가' 만 못 박는다.
+
+모집단은 ETF 를 뺀 **시총 1,000억 이상**이다(ohlcv_autofill.MIN_MARKET_CAP_WON,
+원 단위). 쿼리가 그 하한을 네 번째 인자로 받고, 모집단 수(universe_n)를 같은
+조건으로 따로 센다 — 일봉이 없어 못 본 종목 수를 머리말에 적기 위해서다.
 """
 import sqlite3, datetime as dt, re, sys
 
@@ -9,6 +13,16 @@ SRC = open('/home/user/stock-dashboard/server.py', encoding='utf-8').read()
 m = re.search(r'rows = conn\.execute\("""\s*(SELECT s\.code AS code.*?)"""', SRC, re.S)
 assert m, '신고가 창(60·252일) 쿼리를 server.py 에서 못 찾았다'
 QUERY = m.group(1)
+assert 'COALESCE(s.market_cap, 0) >= ?' in QUERY, '신고가 쿼리에 시총 하한이 없다'
+
+m3 = re.search(r'universe_n = conn\.execute\("""\s*(SELECT COUNT\(\*\) FROM stocks s.*?)"""', SRC, re.S)
+assert m3, '모집단 수 쿼리를 server.py 에서 못 찾았다'
+UNIV_QUERY = m3.group(1)
+
+sys.path.insert(0, '/home/user/stock-dashboard')
+import ohlcv_autofill as oa                                      # noqa: E402
+MIN_CAP = oa.MIN_MARKET_CAP_WON
+assert MIN_CAP == 100_000_000_000, f'시총 하한이 1,000억(원)이 아니다: {MIN_CAP}'
 
 m2 = re.search(r'f"""(SELECT code, MAX\(close\) FROM ohlcv.*?)"""', SRC, re.S)
 assert m2, '전 구간 최고 종가 쿼리를 server.py 에서 못 찾았다'
@@ -35,12 +49,12 @@ TODAY = '2026-09-15'
 days = [(dt.date(2026, 9, 15) - dt.timedelta(days=i)).isoformat() for i in range(1, 400)]
 days.reverse()                      # 오래된 → 최근 (전부 '거래일' 로 취급)
 
-def add(code, name, close, highs):
+def add(code, name, close, highs, cap=1e12, is_etf=0):
     conn.execute(
         "INSERT INTO stocks (code, name, market, sector, market_cap, close, "
         " change_pct, volume_mn, is_etf, market_cap_updated) "
-        "VALUES (?,?,'KOSPI','테스트',1e12,?,1.0,100,0,'20260915')",
-        (code, name, close))
+        "VALUES (?,?,'KOSPI','테스트',?,?,1.0,100,?,'20260915')",
+        (code, name, cap, close, is_etf))
     for d, h in zip(days, highs):
         conn.execute("INSERT INTO ohlcv VALUES (?,?,?,?,?,?,?)", (code, d, h, h, h, h, 1))
 
@@ -61,12 +75,24 @@ conn.execute(
 for d in days:
     conn.execute("INSERT INTO ohlcv VALUES ('000005',?,20000,20000,20000,20000,1)", (d,))
 conn.execute("INSERT INTO ohlcv VALUES ('000005',?,5000,5000,5000,5000,1)", (TODAY,))
+# 시총 999억 — 뚫었어도 모집단 밖이다
+add('000007', '작은회사', 9500, [9000] * n, cap=99_900_000_000)
+# 시총 1,000억 딱 — 경계는 포함
+add('000008', '경계회사', 9500, [20000] * (n - 60) + [9000] * 60, cap=100_000_000_000)
+# ETF — 시총이 커도 빠진다
+add('000009', 'KODEX 200', 9500, [9000] * n, cap=5e12, is_etf=1)
+# 모집단 안인데 일봉이 없다(채우는 중·신규 상장) — 판정은 못 하고 수로만 센다
+conn.execute(
+    "INSERT INTO stocks (code, name, market, sector, market_cap, close, "
+    " change_pct, volume_mn, is_etf, market_cap_updated) "
+    "VALUES ('000010','일봉없음','KOSPI','테스트',2e11,9500,1.0,100,0,'20260915')")
 
 trading = [r[0] for r in conn.execute(
     "SELECT DISTINCT date FROM ohlcv WHERE date < ? ORDER BY date DESC LIMIT 252",
     (TODAY,)).fetchall()]
 cut60, cut252 = trading[59], trading[-1]
-rows = conn.execute(QUERY, (cut60, cut252, TODAY)).fetchall()
+rows = conn.execute(QUERY, (cut60, cut252, TODAY, MIN_CAP)).fetchall()
+universe_n = conn.execute(UNIV_QUERY, (MIN_CAP,)).fetchone()[0]
 
 # server.py 와 같은 2단계: 52주를 뚫은 종목에만 전 구간 최고가를 묻는다.
 over52 = [r for r in rows if r['close'] and r['h252'] and r['close'] >= r['h252']]
@@ -95,7 +121,7 @@ for r in rows:
 add('000006', '장중만뚫음', 8000, [9000] * (n - 1) + [9000])
 conn.execute("UPDATE ohlcv SET high = 12000 WHERE code = '000006' AND date = ?",
              (days[-1],))
-rows2 = conn.execute(QUERY, (cut60, cut252, TODAY)).fetchall()
+rows2 = conn.execute(QUERY, (cut60, cut252, TODAY, MIN_CAP)).fetchall()
 intra = [r for r in rows2 if r['code'] == '000006']
 assert intra and not (intra[0]['close'] >= (intra[0]['h252'] or 0)), \
     '장중 고가로만 뚫은 종목이 신고가로 잡힌다'
@@ -113,7 +139,18 @@ def want(cond, msg):
 
 want(buckets['hist'] == ['역사적'], f"역사적 줄이 {buckets['hist']}")
 want(buckets['w52'] == ['오십이주'], f"52주 줄이 {buckets['w52']}")
-want(buckets['d60'] == ['육십일'], f"60일 줄이 {buckets['d60']}")
+want(buckets['d60'] == ['육십일', '경계회사'], f"60일 줄이 {buckets['d60']}")
+want('작은회사' not in sum(buckets.values(), []),
+     '시총 1,000억 미만이 신고가에 들어갔다')
+want('KODEX 200' not in sum(buckets.values(), []), 'ETF 가 신고가에 들어갔다')
+# 모집단 = 1,000억 이상·ETF 아님·오늘 거래 — 일봉 없는 종목까지 센다.
+# 000001~000005, 000008, 000010 → 7. 판정한 수는 일봉이 있는 6.
+want(universe_n == 7, f'모집단 수가 {universe_n} 이다 (기대 7)')
+want(len(rows) == 6, f'판정한 수가 {len(rows)} 이다 (기대 6)')
+note = oa.coverage_note(len(rows), universe_n)
+print('범위 문구:', note)
+want(note == '시총 1,000억 이상 7종목 중 6종목 대상 · 일봉 미수집 1종목',
+     f'범위 문구가 모자란 수를 안 밝힌다: {note}')
 want('평범' not in sum(buckets.values(), []), '못 뚫은 종목이 들어갔다')
 want('오늘행' not in sum(buckets.values(), []),
      '오늘 자기 행을 최고가에 넣어 제 고가와 비겼다')

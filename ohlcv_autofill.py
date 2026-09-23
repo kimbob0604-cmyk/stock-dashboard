@@ -28,10 +28,22 @@ ohlcv_autofill.py — 일봉(ohlcv) 자동 채움. 신고가 판정의 입력을
 
 ■ 무엇을 받는가
 
-종목 범위는 `universe_codes()` 가 정한다(기본: 거래대금 상위 N). 전 종목이
-아니므로 **시황 메시지가 그 범위를 밝혀야 한다** — 200종목만 훑고 "신고가
-3종목" 이라고 쓰면 읽는 사람은 전 종목 기준으로 읽는다. `coverage_note()` 가
-그 문장을 만들고 server.py 의 신고가 섹션이 머리에 싣는다.
+종목 범위는 `select_universe()` 가 정한다 — **ETF/ETN 을 뺀 시가총액 1,000억원
+이상 전 종목**(시드 기준 1,394종목, 2026-06-02). 예전에는 거래대금 상위 300
+이었는데, 그 300 가운데 상당수가 ETF 라(판정에서는 빠진다) 실제로 판정에
+남은 주식은 222종목이었고 시황은 "222종목 대상" 이라고 적었다. 시총 1,000억
+이상인데 그날 거래대금 순위 밖이라 아예 안 본 종목이 천 개가 넘었다는 뜻이다.
+
+종목이 네다섯 배로 늘어도 버티게 하는 장치는 둘이다.
+  - **증분** — 이미 받아 둔 종목은 그 종목의 마지막 날부터만 받는다. 최근
+    거래일까지 있으면 아예 묻지 않는다. 전 구간(1년+)은 처음 보는 종목만.
+  - **소수 동시 요청** — `FILL_WORKERS` 개만 동시에, 배치로 끊어 저장한다.
+    받은 행을 배치마다 DB 에 넣고 버려 메모리가 배치 크기를 넘지 않는다.
+
+그래도 모집단 전부가 늘 차 있다고 말할 수는 없다(재배포 직후 채우는 중이거나
+일부가 실패한 날). 그래서 시황은 **실제로 판정한 수와 모집단 수를 같이**
+적는다 — `coverage_note()` 가 그 문장을 만들고 server.py 의 신고가 섹션이
+머리에 싣는다.
 """
 from __future__ import annotations
 
@@ -40,6 +52,7 @@ import logging
 import sqlite3
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -55,26 +68,50 @@ DB_PATH = BASE_DIR / "db" / "dashboard.db"
 LOOKBACK_TRADING_DAYS = 252
 LOOKBACK_CALENDAR_DAYS = int((LOOKBACK_TRADING_DAYS + 30) * 1.5)
 
-# 몇 종목을 받을 것인가.
+# 신고가 판정의 모집단 — **ETF/ETN 을 뺀 시가총액 1,000억원 이상 전 종목.**
 #
-# 전 종목(약 4,000)은 종목당 0.2~0.4초만 잡아도 20분이 넘는다. Render 무료
-# 인스턴스에서 부팅마다 그걸 돌릴 수는 없다. 그래서 **거래대금 상위 N**으로
-# 자른다 — 이 저장소가 이미 `_kr_new_highs_from_charts(top_by_volume=200)` 에서
-# 쓰는 것과 같은 기준이라 두 화면이 같은 모집단을 본다.
+# 단위는 **원**이다. stocks.market_cap 과 시드(data/naver_universe_seed.json)의
+# market_cap 이 모두 네이버 marketValueFullRaw(원)다 — 삼성전자가 2.1e15.
+# 억 단위로 착각해 1000 을 넣으면 사실상 전 종목이 되고, 1e11 을 억으로 읽으면
+# 한 종목도 안 남는다. 문구에 쓰는 이름표(`MIN_MARKET_CAP_LABEL`)도 여기 같이 둔다.
 #
-# 300 으로 잡은 이유: 200 은 기존 신고가 화면의 값인데, 시황의 신고가는 그보다
-# 넓게 보는 편이 낫다(거래대금 200위 밖에서 신고가가 서는 날이 있다).
+# 시드로 잰 규모 (2026-06-02 시총, ETF 패턴 제외): 1,000억 이상 1,394종목.
+MIN_MARKET_CAP_WON = 100_000_000_000
+MIN_MARKET_CAP_LABEL = "1,000억"
+
+# 일봉은 판정 기준보다 **조금 넓게**(80%, 800억 이상 — 시드 기준 1,556종목)
+# 받아 둔다. 시총은 매일 움직이는데 일봉 1년치는 하루 만에 못 채운다(16:10
+# 잡이 다음 날 16:00 시황보다 먼저 돌아도, 그 사이 1,000억을 넘어선 종목은
+# 전날 대상이 아니었다). 경계 근처 종목을 미리 받아 두면 그런 종목이 '일봉
+# 미수집' 으로 모집단에서 빠지는 일이 드물어진다. 판정은 1,000억으로 한다.
+FILL_CAP_BUFFER = 0.8
+FILL_MIN_CAP_WON = int(MIN_MARKET_CAP_WON * FILL_CAP_BUFFER)
+
+# 동시에 몇 종목을 물을 것인가 · 몇 종목마다 저장할 것인가.
 #
 # 실측 (2026-09-16, ohlcv-probe.yml 러너 · 252거래일 구간 · REQUEST_GAP 포함):
 #   처리량 측정  20종목 20.7초 → 종목당 1.04초
 #   실제 수집    15종목 13.3초 → 종목당 0.89초 (4,260행, 15/15 성공)
-# 넉넉히 1.0초로 잡으면 200종목 ≈ 3.3분 · 300종목 ≈ 5분 · 500종목 ≈ 8.3분.
-# 300 이면 5분 남짓이라 부팅(데몬 스레드라 Flask 를 막지 않는다)과 장마감 후
-# 실행에 무리가 없고, 16:10 에 시작해도 19:00 시황까지 두 시간 반 넘게 남는다.
-# 늘리려면 여기만 고친다. 늘린 만큼 메시지의 범위 문구도 자동으로 바뀐다.
-UNIVERSE_TOP_N = 300
-# 거래대금(백만원) 하한. 이보다 적게 거래된 종목은 신고가가 서도 못 산다.
-UNIVERSE_MIN_VOLUME_MN = 50
+# 한 줄로 받으면 1,556종목 ≈ 26분이다. 대부분이 응답 대기라 동시 4개면
+# 이론상 ≈ 6.5분(Render 에서 잰 값이 아니다 — 러너 실측에서 나눈 추정).
+# 네이버에 초당 4~5건 남짓이라 이 저장소가 이미 쓰는 가격 폴링(100종목씩
+# 연달아)보다 무겁지 않다. 막히면 `_BREAKER_MIN` 이 멈춘다.
+#
+# 배치 크기는 메모리 상한이다. 받은 행은 배치마다 저장하고 버린다 —
+# 1년치 1,556종목을 한꺼번에 들고 있으면 파이썬 튜플로 100MB 가 넘어
+# 512MB 인스턴스에 부담이 된다. 40종목이면 ~3MB 다.
+FILL_WORKERS = 4
+FILL_BATCH = 40
+
+# 한 배치가 이만큼 이상인데 **한 종목도** 못 받았으면 소스가 막힌 것으로 보고
+# 멈춘다. 막힌 채 1,500종목을 두 소스 × 타임아웃 20초로 두드리면 한 시간이
+# 넘게 락을 쥐고 시황까지 붙잡는다. 멈춘 사실은 결과와 로그에 남긴다.
+_BREAKER_MIN = 10
+
+# 오늘 봉은 이 시각(KST) 뒤에만 받는다. 장중에 받은 봉은 미확정 종가다.
+# 그걸 저장하면 '최근 거래일까지 있다' 로 보여 16:10 잡이 건너뛰고, 다음 날
+# 시황이 그 미확정 종가를 '전일 종가' 로 쓴다. 정규장 종가는 15:30 에 선다.
+CLOSE_FINAL_HHMM = (15, 40)
 
 # 소스 우선순위. 앞의 것이 실패하면 뒤로 넘어간다.
 #
@@ -187,123 +224,228 @@ _FETCHERS = {"naver": _fetch_naver, "pykrx": _fetch_pykrx}
 
 
 # ─────────────────────────── 종목 범위 ───────────────────────────
-def _rank_from_universe(uni, min_volume_mn):
-    """유니버스 dict 에서 (기준, [(점수, 코드)]) 를 뽑는다.
+def _rank_from_universe(uni, min_cap, is_etf=None):
+    """유니버스 dict 에서 (기준, [(시총, 코드)]) 를 뽑는다. 시총 하한·ETF 제외.
 
-    **거래대금이 있으면 거래대금, 없으면 시가총액.** 이 폴백이 없으면 Render
-    에서 조용히 0종목이 된다 — 2026-09-18 에 실제로 그랬다. 그 환경에서
+    Render 재배포 직후 `stocks` 표가 아직 비었을 때의 폴백이다. 그 환경에서
     `_load_naver_universe()` 가 돌려주는 것은 커밋된 시드
-    (`data/naver_universe_seed.json`)인데, 시드에는 `market_cap` 만 있고
-    `volume_mn` 이 없다(가격 폴링이 한 번 돌아야 채워진다). 거래대금만 보던
-    옛 코드는 그 상태에서 빈 리스트를 돌려줬고, `fill()` 은 "대상 종목이 없다"
-    한 줄만 남기고 끝났다. 신고가 섹션은 '일봉 거래일이 0일뿐' 으로 빈 채
-    시황이 나갔다.
+    (`data/naver_universe_seed.json`)인데, 시드에는 `market_cap`(원)이 있다.
+    거래대금만 보던 옛 코드는 시드에서 0종목을 돌려줬다(2026-09-18) — 시총으로
+    고르는 지금은 그 문제가 없지만, 시총도 없으면 **지어내지 않고** 빈손을 돌려준다.
 
-    시총 상위는 거래대금 상위의 대용이지 같은 것이 아니다. 그래서 **무엇으로
-    골랐는지를 같이 돌려준다** — 메시지의 범위 문구가 그 사실을 적는다.
+    `is_etf(name)` 을 주면 이름으로 ETF/ETN 을 거른다. 시드에는 is_etf 표식이
+    없어서다 — 안 거르면 KODEX 200 같은 대형 ETF 수백 개를 헛되이 받는다.
     """
     stocks = (uni or {}).get("stocks") or {}
-    codes = [(code, s) for code, s in stocks.items()
-             if str(code).isdigit() and len(str(code)) == 6]
-    by_volume = [(s.get("volume_mn") or 0, code) for code, s in codes
-                 if (s.get("volume_mn") or 0) >= min_volume_mn]
-    if by_volume:
-        return "volume", by_volume
-    by_cap = [(s.get("market_cap") or 0, code) for code, s in codes
-              if (s.get("market_cap") or 0) > 0]
-    if by_cap:
-        return "market_cap", by_cap
-    return "none", []
+    out = []
+    for code, s in stocks.items():
+        if not (str(code).isdigit() and len(str(code)) == 6):
+            continue
+        cap = (s or {}).get("market_cap") or 0
+        if cap < min_cap or cap <= 0:
+            continue
+        if is_etf is not None and is_etf((s or {}).get("name") or ""):
+            continue
+        out.append((cap, code))
+    return ("market_cap" if out else "none"), out
 
 
-def select_universe(top_n: int = UNIVERSE_TOP_N,
-                    min_volume_mn: float = UNIVERSE_MIN_VOLUME_MN,
+def select_universe(min_cap: float = FILL_MIN_CAP_WON,
                     load_universe=None,
-                    load_ranked=None) -> tuple[list[str], str]:
-    """일봉을 받을 종목코드와 **무슨 기준으로 골랐는지**.
+                    load_ranked=None,
+                    is_etf=None) -> tuple[list[str], str]:
+    """일봉을 받을 종목코드(시총 큰 순)와 **무슨 기준으로 골랐는지**.
 
-    셋을 순서대로 본다.
+    규칙은 하나다 — **ETF/ETN 이 아니고 시총이 `min_cap`(원) 이상인 전 종목.**
+    상위 N 으로 자르지 않는다. 시총 큰 순으로 세우는 것은 채우다 끊겼을 때
+    큰 종목부터 차 있게 하려는 것뿐이다.
 
-      1. `load_ranked`  server.py 가 넣어 주는 `stocks` 테이블 실측 거래대금.
-                        재배포 직후에도 부팅 가격 갱신이 이 표를 채운다.
-      2. 유니버스 `volume_mn`   가격 폴링이 한 번이라도 돌았으면 있다.
-      3. 유니버스 `market_cap`  시드에도 있는 값. 마지막 보루.
+    값을 어디서 읽느냐만 둘이다.
 
-    기준 이름은 `"volume"` / `"market_cap"` / `"none"` 중 하나다.
+      1. `load_ranked`  server.py 가 넣어 주는 `stocks` 표의 [(시총, 코드)].
+                        ETF 는 server 쪽이 is_etf 표식으로 이미 뺐다. 부팅 가격
+                        갱신이 이 표를 채우고 시총도 폴링 값으로 바꾼다.
+      2. 유니버스(시드)  위가 비었거나 터졌을 때. ETF 는 `is_etf(name)` 로 뺀다.
+
+    기준 이름은 `"market_cap"` / `"none"` 둘 중 하나다.
     """
     if load_ranked is not None:
         try:
             basis, ranked = load_ranked()
         except Exception as exc:                           # noqa: BLE001
-            log.warning("[일봉 채움] 실측 거래대금 조회 실패: %s — 유니버스로 넘어간다",
+            log.warning("[일봉 채움] stocks 시총 조회 실패: %s — 유니버스로 넘어간다",
                         exc)
             basis, ranked = "none", []
+        ranked = [(cap, c) for cap, c in (ranked or [])
+                  if (cap or 0) >= min_cap and (cap or 0) > 0]
         if ranked:
             ranked.sort(reverse=True)
-            return [c for _, c in ranked[:top_n]], basis
+            return [c for _, c in ranked], "market_cap"
 
     uni = (load_universe() if load_universe else None) or {}
-    basis, ranked = _rank_from_universe(uni, min_volume_mn)
+    basis, ranked = _rank_from_universe(uni, min_cap, is_etf)
     ranked.sort(reverse=True)
-    return [c for _, c in ranked[:top_n]], basis
+    return [c for _, c in ranked], basis
 
 
-def universe_codes(top_n: int = UNIVERSE_TOP_N,
-                   min_volume_mn: float = UNIVERSE_MIN_VOLUME_MN,
+def universe_codes(min_cap: float = FILL_MIN_CAP_WON,
                    load_universe=None,
-                   load_ranked=None) -> list[str]:
+                   load_ranked=None,
+                   is_etf=None) -> list[str]:
     """`select_universe` 의 종목코드만. 기준까지 필요하면 그쪽을 쓴다."""
-    return select_universe(top_n, min_volume_mn, load_universe, load_ranked)[0]
+    return select_universe(min_cap, load_universe, load_ranked, is_etf)[0]
 
 
-BASIS_LABEL = {"volume": "거래대금 상위", "market_cap": "시가총액 상위"}
-
-
-def coverage_note(top_n: int = UNIVERSE_TOP_N, basis: str = "volume") -> str:
+def coverage_note(scanned: int, universe: int | None = None) -> str:
     """시황 신고가 머리에 붙일 '무엇을 대상으로 했는가' 한 조각.
 
-    전 종목이 아니라는 사실을 읽는 사람이 알아야 한다. 이 문장이 없으면
-    상위 N 종목만 훑은 결과를 전 종목 기준으로 읽는다.
+    `scanned`  실제로 판정한 종목 수(일봉이 있는 종목). 설정값이 아니라 결과다.
+    `universe` 모집단 — 시총 1,000억 이상·ETF 아님·오늘 거래된 종목 수.
+               None 이면 모집단을 모르는 것이므로 판정 수만 적는다.
 
-    **무슨 기준으로 상위를 골랐는지도 같이 적는다.** 거래대금이 없어 시총으로
-    고른 날에 '거래대금 상위' 라고 쓰면 그건 틀린 말이다.
+    **모집단을 다 못 훑었으면 그 사실과 빠진 수를 적는다.** 재배포 직후 일봉을
+    채우는 중에 "시총 1,000억 이상 대상" 이라고만 쓰면, 600종목만 본 결과를
+    1,400종목 기준으로 읽는다. 다 훑었을 때도 '전체' 라고 쓰지 않는다 —
+    모집단을 밝히는 것으로 충분하고, 더 센 말은 틀릴 여지만 늘린다.
     """
-    return f"{BASIS_LABEL.get(basis, '상위')} {top_n:,}종목 대상"
+    if universe is None:
+        return f"{scanned:,}종목 대상"
+    head = f"시총 {MIN_MARKET_CAP_LABEL} 이상"
+    if scanned >= universe:
+        return f"{head} {scanned:,}종목 대상"
+    return (f"{head} {universe:,}종목 중 {scanned:,}종목 대상 · "
+            f"일봉 미수집 {universe - scanned:,}종목")
 
 
 # ─────────────────────────── 본체 ───────────────────────────
+def _ymd(d: str) -> str:
+    """'YYYY-MM-DD' / 'YYYYMMDD' → 'YYYYMMDD'."""
+    return str(d).replace("-", "")[:8]
+
+
+def _last_dates(conn, codes) -> dict:
+    """{코드: 그 종목이 ohlcv 에 가진 마지막 날('YYYY-MM-DD')}. 없는 종목은 빠진다.
+
+    SQLite 의 바인딩 변수 상한(옛 빌드 999)을 넘지 않게 끊어 묻는다.
+    """
+    out = {}
+    codes = list(codes)
+    for i in range(0, len(codes), 500):
+        part = codes[i:i + 500]
+        qs = ",".join("?" * len(part))
+        for code, last in conn.execute(
+                f"SELECT code, MAX(date) FROM ohlcv WHERE code IN ({qs}) "
+                f"GROUP BY code", part).fetchall():
+            if last:
+                out[code] = last
+    return out
+
+
+def plan(codes, last_by_code: dict, full_start: str, up_to: str | None,
+         full: bool = False):
+    """종목마다 **어디서부터 받을지** 정한다. 반환 ([(코드, 시작 YYYYMMDD)], 건너뜀 수).
+
+      - 일봉이 없는 종목        → `full_start` 부터 전 구간 (신규 상장이면
+                                  소스가 상장일부터만 준다 — 그대로 둔다)
+      - 마지막 날 ≥ `up_to`     → 묻지 않는다 (이미 최근 거래일까지 있다)
+      - 그 밖                   → **자기 마지막 날부터** (그날도 다시 받는다 —
+                                  덮어써도 PK 라 중복이 안 생기고, 혹시 남은
+                                  미확정 봉이 확정 종가로 바뀐다)
+
+    건너뛰는 기준이 '며칠 이내' 가 아니라 `up_to`(최근 거래일)인 이유는
+    server.py `_fill_ohlcv_job_inner` 주석에 있다 — 16:10 잡이 매일 자기
+    자신을 건너뛰지 않게 하려는 것이다. `full=True` 면 가진 것을 무시하고
+    전부 전 구간으로 받는다(수동 `?force=1`).
+    """
+    todo, skipped = [], 0
+    up = _ymd(up_to) if up_to else None
+    for code in codes:
+        last = None if full else last_by_code.get(code)
+        if last is None:
+            todo.append((code, full_start))
+        elif up and _ymd(last) >= up:
+            skipped += 1
+        else:
+            todo.append((code, _ymd(last)))
+    return todo, skipped
+
+
+def _fetch_one(code, start, end, source_order, gap):
+    """한 종목. (코드, 소스|None, 행들, 오류들). 예외를 올리지 않는다."""
+    errs = []
+    got_src, got_rows = None, []
+    for src in source_order:
+        fn = _FETCHERS.get(src)
+        if fn is None:
+            continue
+        try:
+            rows = fn(code, start, end)
+        except Exception as exc:                           # noqa: BLE001
+            errs.append(f"{code} {src}: {type(exc).__name__}: {str(exc)[:80]}")
+            continue
+        # 요청한 끝날보다 뒤의 봉은 버린다 — 장중이면 끝날을 어제로 잡는데,
+        # 소스가 그래도 오늘 미확정 봉을 끼워 주면 그걸 저장하지 않는다.
+        end_iso = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+        rows = [r for r in rows if r[1] <= end_iso]
+        if rows:
+            got_src, got_rows = src, rows
+            break
+    if gap:
+        time.sleep(gap)
+    return code, got_src, got_rows, errs
+
+
 def fill(codes: list[str] | None = None,
          load_universe=None,
          load_ranked=None,
+         is_etf=None,
          lookback_days: int = LOOKBACK_CALENDAR_DAYS,
          source_order=SOURCE_ORDER,
          gap: float = REQUEST_GAP,
+         workers: int = FILL_WORKERS,
+         batch: int = FILL_BATCH,
+         up_to: str | None = None,
+         full: bool = False,
          now=None) -> dict:
     """일봉을 받아 ohlcv 에 넣는다. 반환: 무슨 일이 있었는지 담은 dict.
+
+    **증분이다** — `plan()` 이 종목마다 시작일을 정한다. 이미 최근 거래일
+    (`up_to`)까지 있는 종목은 묻지도 않는다. 그래서 여러 번 불러도 싸고,
+    중간에 끊겨도(재시작) 다음 호출이 남은 종목만 이어 받는다.
 
     예외를 올리지 않는다 — 부팅 스레드와 스케줄러 잡이 부르는 자리라 죽으면
     그대로 침묵이 된다. 대신 실패는 반환값과 로그에 남는다.
     """
     t0 = time.time()
     now = now or datetime.now()
-    end = now.strftime("%Y%m%d")
+    # 장 마감 전이면 끝날을 어제로 — 오늘 미확정 봉을 저장하지 않는다
+    # (CLOSE_FINAL_HHMM 설명). 날짜만 넘기므로 주말·휴장이 끼어도 소스가
+    # 있는 거래일만 돌려준다.
+    end_dt = now if (now.hour, now.minute) >= CLOSE_FINAL_HHMM \
+        else now - timedelta(days=1)
+    # 주말이면 금요일로 — 그래야 금요일까지 찬 종목을 '모자라다' 로 안 본다.
+    while end_dt.weekday() >= 5:
+        end_dt -= timedelta(days=1)
+    end = end_dt.strftime("%Y%m%d")
     start = (now - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    # 최근 거래일이 오늘이어도 아직 오늘 봉을 받을 수 없으면, 그걸 기준으로
+    # '모자라다' 고 볼 수 없다. 받을 수 있는 끝날로 누른다.
+    if up_to and _ymd(up_to) > end:
+        up_to = end
 
     basis = "given"
     if codes is None:
         codes, basis = select_universe(load_universe=load_universe,
-                                       load_ranked=load_ranked)
+                                       load_ranked=load_ranked, is_etf=is_etf)
     res = {"codes": len(codes), "ok": 0, "failed": 0, "rows": 0,
+           "skipped": 0, "full": 0, "incremental": 0, "stopped": None,
            "by_source": {}, "errors": [], "elapsed": 0.0,
            "start": start, "end": end, "basis": basis}
     if not codes:
-        res["errors"].append(
-            "대상 종목이 없다 — 거래대금도 시가총액도 못 읽었다")
-        log.error("[일봉 채움] 대상 종목 0 — 유니버스에 거래대금도 시가총액도 "
-                  "없다. 신고가 섹션이 빈다")
+        res["errors"].append("대상 종목이 없다 — 시가총액을 못 읽었다")
+        log.error("[일봉 채움] 대상 종목 0 — stocks 표에도 유니버스에도 "
+                  "시가총액이 없다. 신고가 섹션이 빈다")
         return res
-    log.info("[일봉 채움] %d종목 시작 (%s 기준)", len(codes),
-             BASIS_LABEL.get(basis, basis))
 
     try:
         conn = _get_db()
@@ -313,34 +455,53 @@ def fill(codes: list[str] | None = None,
         return res
 
     try:
-        for i, code in enumerate(codes, 1):
-            got = None
-            for src in source_order:
-                fn = _FETCHERS.get(src)
-                if fn is None:
-                    continue
-                try:
-                    rows = fn(code, start, end)
-                except Exception as exc:                   # noqa: BLE001
-                    if len(res["errors"]) < 5:
-                        res["errors"].append(
-                            f"{code} {src}: {type(exc).__name__}: {str(exc)[:80]}")
-                    continue
-                if rows:
-                    got = (src, rows)
-                    break
-            if got is None:
-                res["failed"] += 1
-            else:
-                src, rows = got
-                res["rows"] += _save(conn, rows)
-                res["ok"] += 1
-                res["by_source"][src] = res["by_source"].get(src, 0) + 1
-            if i % 50 == 0:
+        try:
+            last_by_code = {} if full else _last_dates(conn, codes)
+        except sqlite3.Error as exc:
+            # 표가 아직 없으면 전부 처음 받는 것으로 본다.
+            log.warning("[일봉 채움] 종목별 최신일 조회 실패: %s — 전 구간으로", exc)
+            last_by_code = {}
+        todo, res["skipped"] = plan(codes, last_by_code, start, up_to, full)
+        res["full"] = sum(1 for _, st in todo if st == start)
+        res["incremental"] = len(todo) - res["full"]
+        log.info("[일봉 채움] 대상 %d종목 (시총 %s원 이상, ETF 제외) — "
+                 "전 구간 %d · 증분 %d · 이미 최신 %d · 동시 %d",
+                 len(codes), f"{FILL_MIN_CAP_WON:,}" if basis != "given" else "-",
+                 res["full"], res["incremental"], res["skipped"], workers)
+
+        with ThreadPoolExecutor(max_workers=max(1, workers),
+                                thread_name_prefix="ohlcv") as pool:
+            for i in range(0, len(todo), max(1, batch)):
+                part = todo[i:i + batch]
+                results = list(pool.map(
+                    lambda cs: _fetch_one(cs[0], cs[1], end, source_order, gap),
+                    part))
+                # 저장은 이 스레드 하나만 한다 — SQLite 연결을 스레드끼리
+                # 나눠 쓰지 않는다.
+                got_any = False
+                for code, src, rows, errs in results:
+                    for e in errs:
+                        if len(res["errors"]) < 5:
+                            res["errors"].append(e)
+                    if src is None:
+                        res["failed"] += 1
+                        continue
+                    got_any = True
+                    res["rows"] += _save(conn, rows)
+                    res["ok"] += 1
+                    res["by_source"][src] = res["by_source"].get(src, 0) + 1
                 conn.commit()
-            if gap:
-                time.sleep(gap)
-        conn.commit()
+                del results                    # 배치 행을 들고 있지 않는다
+                if not got_any and len(part) >= _BREAKER_MIN:
+                    left = len(todo) - (i + len(part))
+                    res["stopped"] = (f"{len(part)}종목 배치에서 한 종목도 못 받아 "
+                                      f"멈춤 — 남은 {left}종목은 다음 호출에")
+                    log.error("[일봉 채움] %s (%s)", res["stopped"],
+                              ", ".join(source_order))
+                    break
+                if (i // max(1, batch)) % 5 == 4:
+                    log.info("[일봉 채움] 진행 %d/%d종목 · %.0f초",
+                             i + len(part), len(todo), time.time() - t0)
     finally:
         conn.close()
 
@@ -348,15 +509,15 @@ def fill(codes: list[str] | None = None,
     st = status()
     res["status"] = st
     # 끝났으면 무엇이 들어왔는지 한 줄로 남긴다. 조용히 끝내지 않는다.
-    log.info("[일봉 채움] %d/%d종목 · %s행 저장 · %.1f초 · 소스 %s · "
-             "테이블 %s행/%s종목 최신 %s",
-             res["ok"], res["codes"], f"{res['rows']:,}", res["elapsed"],
-             res["by_source"] or "없음",
+    log.info("[일봉 채움] %d/%d종목 받음(이미 최신 %d) · %s행 저장 · %.1f초 · "
+             "소스 %s · 테이블 %s행/%s종목 최신 %s",
+             res["ok"], res["codes"] - res["skipped"], res["skipped"],
+             f"{res['rows']:,}", res["elapsed"], res["by_source"] or "없음",
              f"{st['rows']:,}", st["codes"], st["last"])
     if res["failed"]:
         log.warning("[일봉 채움] %d종목 실패%s", res["failed"],
                     f" — 예: {res['errors'][0]}" if res["errors"] else "")
-    if res["ok"] == 0:
+    if res["ok"] == 0 and len(todo) > 0:
         log.error("[일봉 채움] 한 종목도 못 받았다 — 신고가 섹션이 빈다. "
                   "소스가 전부 막혔는지 확인하라 (%s)", ", ".join(source_order))
     return res

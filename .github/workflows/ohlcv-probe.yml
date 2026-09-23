@@ -7,6 +7,10 @@ name: 일봉 소스 점검
 
 on:
   workflow_dispatch:
+    inputs:
+      n:
+        description: '실제 수집 종목 수 (네이버 시총 상위, 최대 100)'
+        default: '15'
   push:
     branches: ['claude/ohlcv-autofill']
     paths:
@@ -34,7 +38,7 @@ jobs:
           python3 scripts/check_ohlcv_autofill.py 2>&1 | tee /tmp/unit.txt
       - name: 실제 수집 한 번 (임시 DB — 레포 DB 는 건드리지 않는다)
         run: |
-          python3 scripts/probe_ohlcv_fill.py 15 2>&1 | tee /tmp/fill.txt
+          python3 scripts/probe_ohlcv_fill.py ${{ inputs.n || 15 }} 2>&1 | tee /tmp/fill.txt
       - name: 런 요약에 올린다
         if: always()
         run: |

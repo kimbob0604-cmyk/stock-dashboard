@@ -3276,8 +3276,8 @@ def _startup_naver_universe_sync():
 def _startup_ohlcv_fill():
     """부팅 직후 일봉(ohlcv) 채움. 별도 데몬 스레드에서 돈다.
 
-    **고를 종목이 생긴 다음이라야 한다** — 대상을 거래대금 상위로 고르는데
-    그 값이 아직 없으면 0종목을 받고 끝난다.
+    **고를 종목이 생긴 다음이라야 한다** — 대상을 `stocks` 의 시가총액으로
+    고르는데(ETF 제외 1,000억 이상) 그 표가 아직 비었으면 0종목을 받고 끝난다.
 
     그래서 기다리는 조건이 '유니버스에 종목이 100개 넘게 있는가' 가 아니다.
     그 조건은 **재배포 직후 늘 즉시 참이다** — `_load_naver_universe()` 가
@@ -6758,7 +6758,9 @@ def _startup():
     # 것인데, 일봉 채움은 표준 라이브러리로 네이버 JSON 만 읽는다(ohlcv_autofill).
     # 여기 걸릴 이유가 없었다.
     #
-    # 데몬 스레드라 Flask 기동을 막지 않는다(300종목 약 5분).
+    # 데몬 스레드라 Flask 기동을 막지 않는다. 재배포 직후(빈 DB)는 시총 800억
+    # 이상 ~1,500종목 전 구간이라 동시 4개로 수 분(러너 실측 기준 추정 ~7분),
+    # DB 가 살아 있는 재시작이면 증분이라 거의 즉시 끝난다.
     threading.Thread(target=_startup_ohlcv_fill,
                      daemon=True, name="ohlcv-startup").start()
 
@@ -6908,10 +6910,10 @@ def _startup():
         # db/dashboard.db 가 사라지므로 재시작 한 번에 신고가 섹션이 영구히
         # 비었다("일봉 거래일이 0일뿐"). 그 구멍을 막는다.
         #
-        # 16:10 인 이유 — 15:35 장마감 가격 sync 뒤라서 거래대금 상위로 고르는
-        # 대상이 당일 확정 거래대금 기준이 된다. 300종목에 약 5분이라
-        # (실측 1.04초/종목) 19:00 저녁 시황까지 두 시간 반 넘게 남는다 —
-        # **시황 잡보다 반드시 먼저 끝난다.**
+        # 16:10 인 이유 — 15:35 장마감 가격 sync 뒤라서 오늘 확정 종가 봉을
+        # 받고, 대상을 고르는 시총도 당일 종가 기준이 된다. 대상은 ETF 를 뺀
+        # 시총 800억 이상 전 종목(~1,500)이지만 **증분**이라 종목마다 어제 이후
+        # 며칠치만 받는다. 이 봉들이 다음 날 16:00 시황의 '전일까지 종가' 가 된다.
         _scheduler.add_job(_fill_ohlcv_job, "cron",
                            day_of_week="mon-fri", hour=16, minute=10,
                            id="ohlcv_autofill", max_instances=1,
@@ -7223,34 +7225,47 @@ def _startup():
 # 실시간 가격 동기화 — naver_universe + stocks 테이블 갱신
 # ─────────────────────────────────────────────────────────────────────────
 
+# 이름에 들어 있으면 ETF/ETN 으로 본다. SQLite `LIKE '%p%'` 라 ASCII 는 대소문자를
+# 가리지 않고 **이름 어디에 있어도** 걸린다. 그래서 운용사 브랜드는 뒤에 공백을
+# 붙여 적는다 — ETF 는 `BNK 주주가치액티브` 처럼 브랜드 뒤가 띄어져 있고, 같은
+# 글자로 시작하는 회사는 붙여 쓴다(`BNK금융지주` · `HK이노엔` · `파워로직스`).
+#
+# 2026-09-23 전 종목 4,063개(data/naver_universe_seed.json)로 잰 값:
+#  - 'BNK' 가 BNK금융지주(138930, 은행 지주사)를 ETF 로 찍고 있었다 → 'BNK '.
+#    BNK 운용 ETF 5개는 전부 공백이 있어 하나도 놓치지 않는다.
+#  - 브랜드 14개가 빠져 ETF 101개가 표식 없이 남아 있었다(KIWOOM 200 · TIME
+#    코스피액티브 · KoAct … ). 아래 두 번째 묶음이 그것이다.
+#  - 고친 뒤 4,063개 중 1,255개가 ETF 로 잡히고 새 오탐은 0개다. 표지가 있는데
+#    안 잡히는 것은 신한글로벌액티브리츠(481850) 하나 — ETF 가 아니라 상장
+#    리츠(부동산투자회사)라 맞게 남는다.
+# 브랜드를 더할 때는 scripts/check_etf_marking.py 를 돌려 오탐을 먼저 본다.
+ETF_PATTERNS = (
+    'KODEX', 'TIGER', 'KBSTAR', 'KOSEF', 'HANARO',
+    'ARIRANG', 'KINDEX', 'TREX', 'ACE ', 'SOL ',
+    ' ETF', ' ETN', 'TRF', '레버리지', '인버스', '선물',
+    'TIMEFOLIO', 'BNK ', 'FOCUS', 'WON ', 'SMART',
+    'PLUS ', 'RISE ', 'WOORI',
+    # 2026-09-23 전 종목 대조로 찾은 누락 브랜드
+    '1Q ', 'DAISHIN343 ', 'HK ', 'KCGI ', 'KIWOOM ', 'KoAct ', 'MIDAS ',
+    'TIME ', 'TRUSTON ', 'UNICORN ', 'VITA ', '마이티 ', '에셋플러스 ', '파워 ',
+)
+
+
+def _is_etf_name(name: str) -> bool:
+    """`mark_etf_stocks` 와 같은 판정을 이름 하나에. DB 없이 거를 때 쓴다.
+
+    SQLite `LIKE '%p%'` 와 맞춘다 — ASCII 는 대소문자를 가리지 않고 이름
+    어디에 있어도 걸린다. 일봉 채움이 시드(is_etf 표식이 없다)에서 대상을
+    고를 때 ETF 를 빼는 데 쓴다.
+    """
+    n = (name or "").lower()
+    return any(p.lower() in n for p in ETF_PATTERNS)
+
+
 def mark_etf_stocks():
     """ETF/ETN 종목 자동 마킹. 매일 03:10 cron."""
     if not (_SQLITE_OK and USE_SQLITE):
         return 0
-    # 이름에 들어 있으면 ETF/ETN 으로 본다. SQLite `LIKE '%p%'` 라 ASCII 는 대소문자를
-    # 가리지 않고 **이름 어디에 있어도** 걸린다. 그래서 운용사 브랜드는 뒤에 공백을
-    # 붙여 적는다 — ETF 는 `BNK 주주가치액티브` 처럼 브랜드 뒤가 띄어져 있고, 같은
-    # 글자로 시작하는 회사는 붙여 쓴다(`BNK금융지주` · `HK이노엔` · `파워로직스`).
-    #
-    # 2026-09-23 전 종목 4,063개(data/naver_universe_seed.json)로 잰 값:
-    #  - 'BNK' 가 BNK금융지주(138930, 은행 지주사)를 ETF 로 찍고 있었다 → 'BNK '.
-    #    BNK 운용 ETF 5개는 전부 공백이 있어 하나도 놓치지 않는다.
-    #  - 브랜드 14개가 빠져 ETF 101개가 표식 없이 남아 있었다(KIWOOM 200 · TIME
-    #    코스피액티브 · KoAct … ). 아래 두 번째 묶음이 그것이다.
-    #  - 고친 뒤 4,063개 중 1,255개가 ETF 로 잡히고 새 오탐은 0개다. 표지가 있는데
-    #    안 잡히는 것은 신한글로벌액티브리츠(481850) 하나 — ETF 가 아니라 상장
-    #    리츠(부동산투자회사)라 맞게 남는다.
-    # 브랜드를 더할 때는 scripts/check_etf_marking.py 를 돌려 오탐을 먼저 본다.
-    ETF_PATTERNS = (
-        'KODEX', 'TIGER', 'KBSTAR', 'KOSEF', 'HANARO',
-        'ARIRANG', 'KINDEX', 'TREX', 'ACE ', 'SOL ',
-        ' ETF', ' ETN', 'TRF', '레버리지', '인버스', '선물',
-        'TIMEFOLIO', 'BNK ', 'FOCUS', 'WON ', 'SMART',
-        'PLUS ', 'RISE ', 'WOORI',
-        # 2026-09-23 전 종목 대조로 찾은 누락 브랜드
-        '1Q ', 'DAISHIN343 ', 'HK ', 'KCGI ', 'KIWOOM ', 'KoAct ', 'MIDAS ',
-        'TIME ', 'TRUSTON ', 'UNICORN ', 'VITA ', '마이티 ', '에셋플러스 ', '파워 ',
-    )
     with _get_db() as conn:
         conn.execute("UPDATE stocks SET is_etf = 0")
         for p in ETF_PATTERNS:
@@ -7587,41 +7602,46 @@ def api_refresh_prices():
 
 # ── 일봉(ohlcv) 자동 채움 ──────────────────────────────────────────────────
 def _ohlcv_ranked_codes() -> tuple[str, list]:
-    """일봉을 받을 순서를 `stocks` 표에서 뽑는다. (기준, [(점수, 코드)])
+    """일봉 대상 후보를 `stocks` 표에서 뽑는다. (기준, [(시가총액 원, 코드)])
 
     ohlcv_autofill 은 server.py 를 import 할 수 없어(순환) 이 함수를 주입받는다.
+    **ETF/ETN 은 여기서 뺀다.** 시총 하한(1,000억 판정 · 800억부터 받아 둠)은
+    ohlcv_autofill.select_universe 한 곳에서 건다 — 기준이 두 곳에 흩어지면
+    한쪽만 고쳐지는 날이 온다.
 
     **왜 유니버스가 아니라 이 표인가.** Render 무료 플랜은 cache/ 가 비영속이라
-    재배포하면 `_load_naver_universe()` 가 커밋된 시드로 떨어지는데, 시드에는
-    거래대금(volume_mn)이 없다. 반면 `stocks` 는 부팅 직후 가격 갱신
-    (`_boot_refresh_kr` → `_refresh_prices_from_naver`)이 거래대금까지 채운다.
-    2026-09-18 에 일봉이 계속 비었던 까닭이 이것이다.
+    재배포하면 `_load_naver_universe()` 가 커밋된 시드로 떨어진다. `stocks` 는
+    부팅 직후 가격 갱신(`_boot_refresh_kr` → `_refresh_prices_from_naver`)이
+    오늘 폴링 시총(원)으로 채운다. 시드 시총(몇 달 묵은 값)보다 그쪽이 낫다.
 
-    거래대금이 아직 0이면 시가총액으로 고른다. 고른 기준을 같이 돌려주는 이유는
-    메시지가 '거래대금 상위' 라고 잘못 적지 않게 하려는 것이다.
+    ETF 는 is_etf 표식만 믿지 않고 **이름으로도 거른다**(`_is_etf_name`,
+    mark_etf_stocks 와 같은 패턴). 03:10 cron 은 Render 가 자는 시각이라 거의
+    안 돌고, 재배포로 새로 찬 행은 is_etf 가 기본값 0 이다 — 2026-09-22 시황에
+    ETF 가 섞여 나간 이유다. 이 함수는 부팅 대기 중 15초마다 불리므로 표식을
+    UPDATE 로 다시 붙이지 않고 읽기만 한다.
     """
     if not (_SQLITE_OK and USE_SQLITE):
         return "none", []
     with _get_db() as conn:
         rows = conn.execute(
-            "SELECT code, volume_mn, market_cap FROM stocks "
-            "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'").fetchall()
-    import ohlcv_autofill as _oa
-    by_volume = [(float(r["volume_mn"] or 0), r["code"]) for r in rows
-                 if (r["volume_mn"] or 0) >= _oa.UNIVERSE_MIN_VOLUME_MN]
-    if by_volume:
-        return "volume", by_volume
-    by_cap = [(float(r["market_cap"] or 0), r["code"]) for r in rows
-              if (r["market_cap"] or 0) > 0]
+            "SELECT code, name, market_cap FROM stocks "
+            "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' "
+            "  AND (market = '' OR market LIKE 'KOS%') "
+            "  AND COALESCE(is_etf, 0) = 0 "
+            "  AND COALESCE(market_cap, 0) > 0").fetchall()
+    by_cap = [(float(r["market_cap"]), r["code"]) for r in rows
+              if not _is_etf_name(r["name"])]
     if by_cap:
         return "market_cap", by_cap
     return "none", []
 
 
 # 일봉 채움은 **한 번에 하나만** 돈다. 부르는 데가 넷이다 — 부팅 스레드,
-# 16:10 잡, 시황이 데이터 미완일 때, 수동 API. 둘이 겹치면 같은 300종목을
+# 16:10 잡, 시황이 데이터 미완일 때, 수동 API. 둘이 겹치면 같은 1,500종목을
 # 동시에 네이버에 두 번 물어 차단을 부른다. 뒤엣것은 앞엣것이 끝날 때까지
-# 기다렸다가, 이미 찼으면 건너뛰기 판정에 걸려 곧바로 돌아간다.
+# 기다렸다가, 이미 찬 종목은 증분 판정(ohlcv_autofill.plan)에 걸려 묻지도
+# 않고 곧바로 돌아간다. 이 락이 잡혀 있는 동안은 시황도 기다린다
+# (_brief_data_ready) — 채우다 만 일봉으로 신고가를 내지 않으려는 것이다.
 _OHLCV_FILL_LOCK = threading.Lock()
 
 
@@ -7639,18 +7659,22 @@ def _fill_ohlcv_job(force: bool = False) -> dict:
 def _fill_ohlcv_job_inner(force: bool = False) -> dict:
     """일봉을 받아 ohlcv 를 채운다. 스케줄러(16:10)와 부팅 스레드가 부른다.
 
-    수집 자체는 ohlcv_autofill 모듈이 한다 — 여기는 유니버스를 넘겨 주고
-    결과를 로그로 남기는 얇은 껍데기다. 예외를 올리지 않는다(부르는 쪽이
-    데몬 스레드와 스케줄러라 죽으면 침묵이 된다).
+    수집 자체는 ohlcv_autofill 모듈이 한다 — 여기는 대상 후보·ETF 판정·최근
+    거래일을 넘겨 주고 결과를 로그로 남기는 얇은 껍데기다. 예외를 올리지
+    않는다(부르는 쪽이 데몬 스레드와 스케줄러라 죽으면 침묵이 된다).
 
-    force=False 면 **최근 거래일까지 이미 채워져 있을 때만** 건너뛴다. 부팅이
-    잦은 Render 에서 재시작마다 5분을 다시 쓰지 않으려는 것이다.
+    **건너뛰기는 종목마다 한다.** 예전에는 테이블 전체의 최신일 하나만 보고
+    통째로 건너뛰었는데, 대상이 1,500종목이 되면 재배포 직후 채우다 끊긴 날
+    (일부만 최신) 나머지를 영영 안 받는다. 지금은 `up_to` 를 넘겨 주고
+    ohlcv_autofill.plan 이 종목마다 '최근 거래일까지 있으면 묻지 않음 / 모자라면
+    자기 마지막 날부터 / 없으면 전 구간' 을 정한다. 부팅이 잦은 Render 에서도
+    다 찬 종목에 다시 요청을 쓰지 않는다.
 
-    건너뛰는 기준을 '며칠 이내' 로 두면 안 된다 — 16:10 잡이 도는 시점에
-    테이블의 최신 날짜는 늘 전 거래일이라, 그런 기준이면 **매일 자기 자신을
-    건너뛰고 오늘 봉이 영영 안 들어온다.** 기준은 `_get_trading_date()` 가
-    말하는 최근 거래일이다. 주말·휴장에는 그 값이 금요일이므로 부팅 때
-    재수집이 도는 일도 없다.
+    기준을 '며칠 이내' 로 두면 안 된다 — 16:10 잡이 도는 시점에 각 종목의
+    최신 날짜는 늘 전 거래일이라, 그런 기준이면 **매일 자기 자신을 건너뛰고
+    오늘 봉이 영영 안 들어온다.** 기준은 `_get_trading_date()` 가 말하는 최근
+    거래일이다. 주말·휴장에는 그 값이 금요일이므로 부팅 때 재수집이 도는 일도
+    없다. `force=True` 면 가진 것을 무시하고 전 구간을 다시 받는다.
     """
     try:
         import ohlcv_autofill as _oa
@@ -7658,26 +7682,18 @@ def _fill_ohlcv_job_inner(force: bool = False) -> dict:
         log.error("[일봉 채움] 모듈 로드 실패: %s", exc)
         return {"error": f"import 실패: {exc}"}
 
+    latest_needed = None
     if not force:
-        st = _oa.status()
-        # 신고가 판정에 60거래일이 필요하다. 그만큼 있고 최근 거래일까지
-        # 들어와 있으면 다시 받지 않는다. '있다' 와 '쓸 만하다' 는 다르므로
-        # 행 수·종목 수·최신일을 모두 본다.
-        if st["rows"] and st["codes"] >= 50 and st["last"]:
-            try:
-                td = _get_trading_date()                   # YYYYMMDD
-                latest_needed = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
-                if st["last"] >= latest_needed:
-                    log.info("[일봉 채움] 이미 최근 거래일(%s)까지 있음 "
-                             "(%s행/%s종목) — 건너뜀",
-                             st["last"], f"{st['rows']:,}", st["codes"])
-                    return {"skipped": True, "status": st}
-            except Exception:                              # noqa: BLE001
-                pass       # 거래일을 못 구하면 그냥 받는다
+        try:
+            td = _get_trading_date()                       # YYYYMMDD
+            latest_needed = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+        except Exception:                                  # noqa: BLE001
+            pass       # 거래일을 못 구하면 종목마다 마지막 날부터 다시 받는다
 
     try:
         return _oa.fill(load_universe=_load_naver_universe,
-                        load_ranked=_ohlcv_ranked_codes, now=now_kst())
+                        load_ranked=_ohlcv_ranked_codes, is_etf=_is_etf_name,
+                        up_to=latest_needed, full=force, now=now_kst())
     except Exception as exc:                               # noqa: BLE001
         log.exception("[일봉 채움] 실패")
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -7703,8 +7719,9 @@ def api_ops_brief_closing():
     한다. 그 길이다 — 자동 경로는 건드리지 않는다.
 
     데이터가 덜 찼으면 `send_closing_market_summary` 가 먼저 일봉을 채우고
-    다시 본다(300종목 약 5분). 그래서 **백그라운드 스레드로 돌리고 즉시
-    돌아온다** — HTTP 가 그동안 매달려 있으면 프록시가 먼저 끊는다.
+    다시 본다(재배포 직후 빈 DB 면 ~1,500종목 전 구간이라 수 분). 그래서
+    **백그라운드 스레드로 돌리고 즉시 돌아온다** — HTTP 가 그동안 매달려
+    있으면 프록시가 먼저 끊는다.
     진행 상황은 `/api/ops/ohlcv/status` 로 본다.
     """
     force = (request.args.get("force") or "").strip() in ("1", "true", "yes")
@@ -12568,18 +12585,26 @@ def _fmt_nh_flow(entry, latest: str | None) -> str:
     return tail
 
 
-def _ohlcv_scope_note(scanned: int) -> str:
+def _ohlcv_scope_note(scanned: int, universe: int | None = None) -> str:
     """신고가가 **무엇을 모집단으로 한 결과인지** 한 조각.
 
-    일봉은 거래대금 상위 N종목만 받아 둔다(ohlcv_autofill.UNIVERSE_TOP_N).
-    전 종목이 아니므로 그 사실을 메시지가 말해야 한다 — 300종목을 훑고
-    "신고가 3종목" 이라고만 쓰면 읽는 사람은 4,000종목 중 3종목으로 읽는다.
+    모집단은 ETF/ETN 을 뺀 시총 1,000억 이상 종목이다
+    (ohlcv_autofill.MIN_MARKET_CAP_WON). 문구는 ohlcv_autofill.coverage_note
+    한 곳에서 만든다 — 이 함수는 그것을 부르는 얇은 껍데기다.
 
-    실제로 훑은 수(`scanned`)를 적는다. 설정값이 아니라 결과다 — 수집이
-    일부 실패하면 설정값은 300이어도 실제는 260일 수 있고, 그 차이가
-    읽는 사람에게 중요하다.
+    `scanned` 는 실제로 판정한 수(일봉이 있는 종목), `universe` 는 모집단 수다.
+    둘을 같이 적는 이유: 재배포 직후 일봉을 채우는 중이거나 일부가 실패한
+    날, 600종목만 보고 "시총 1,000억 이상 대상" 이라고만 쓰면 읽는 사람은
+    1,400종목 기준으로 읽는다. 모자라면 '일봉 미수집 N종목' 이 붙는다.
+
+    예전에는 거래대금 상위 300종목만 받아 두어 "222종목 대상" 이 나갔다 —
+    ETF 가 상위를 차지해 주식은 그만큼만 남았던 것이다.
     """
-    return f"{scanned:,}종목 대상"
+    try:
+        import ohlcv_autofill as _oa
+        return _oa.coverage_note(scanned, universe)
+    except Exception:                                      # noqa: BLE001
+        return f"{scanned:,}종목 대상"
 
 
 def _ohlcv_fill_hint() -> str:
@@ -13080,6 +13105,10 @@ def build_market_summary(dry_run: bool = False) -> dict:
                     # 전 종목 5년 일봉(수천 종목 x 1,250봉)을 통째로 훑는다.
                     # 52주를 못 뚫은 종목은 역사적일 수 없으므로, 전 구간
                     # 최고 종가는 **52주를 뚫은 몇 종목에만** 물으면 된다.
+                    # 모집단: ETF 가 아닌 시총 1,000억(원 단위 1e11) 이상.
+                    # 일봉은 그보다 넓게(800억~) 받아 두지만 판정은 여기서 자른다.
+                    import ohlcv_autofill as _oa
+                    min_cap = _oa.MIN_MARKET_CAP_WON
                     rows = conn.execute("""
                         SELECT s.code AS code, s.name AS name, s.sector AS sector,
                                s.change_pct AS change_pct, s.close AS close,
@@ -13094,8 +13123,21 @@ def build_market_summary(dry_run: bool = False) -> dict:
                           AND COALESCE(s.is_etf, 0) = 0
                           AND s.close >= 1000 AND s.change_pct IS NOT NULL
                           AND COALESCE(s.volume_mn, 0) > 0
+                          AND COALESCE(s.market_cap, 0) >= ?
                         GROUP BY s.code
-                    """, (cut60, cut252, today_ymd)).fetchall()
+                    """, (cut60, cut252, today_ymd, min_cap)).fetchall()
+                    # 같은 조건에서 일봉만 뺀 수 — 모집단. `rows` 가 이보다 적으면
+                    # 그만큼 일봉이 없어 판정하지 못한 것이다(채우는 중·수집
+                    # 실패·신규 상장 직후). 그 차이를 머리말에 그대로 적는다.
+                    universe_n = conn.execute("""
+                        SELECT COUNT(*) FROM stocks s
+                        WHERE (s.market = '' OR s.market LIKE 'KOS%')
+                          AND COALESCE(s.is_etf, 0) = 0
+                          AND s.close >= 1000 AND s.change_pct IS NOT NULL
+                          AND COALESCE(s.volume_mn, 0) > 0
+                          AND COALESCE(s.market_cap, 0) >= ?
+                    """, (min_cap,)).fetchone()[0]
+                    scope = _ohlcv_scope_note(len(rows), universe_n)
 
                     over52 = [r for r in rows
                               if r["close"] and r["h252"] and r["close"] >= r["h252"]]
@@ -13159,10 +13201,10 @@ def build_market_summary(dry_run: bool = False) -> dict:
                              "items": items})
                     if nh_section["subsections"]:
                         # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
-                        # **모집단을 반드시 밝힌다** — 일봉을 거래대금 상위
-                        # N종목만 받아 두므로 전 종목 기준이 아니다. 안 적으면
+                        # **모집단을 반드시 밝힌다** — 시총 1,000억 이상만 보고,
+                        # 그중 일봉이 없는 종목은 판정하지 못했다. 안 적으면
                         # "신고가 3종목" 을 전 종목 기준으로 읽는다.
-                        basis = (f"  <i>{_ohlcv_scope_note(len(rows))} · "
+                        basis = (f"  <i>{scope} · "
                                  f"종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
                                  f"역사적=일봉 {first_day}~")
                         # `*` 를 쓴 줄이 하나라도 있으면 그 뜻을 여기서 밝힌다.
@@ -13183,8 +13225,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
                             basis += f" · 수급은 {_d} 기준(당일 확정 전)"
                         nh_section["items"] = [basis + "</i>"]
                     else:
+                        # 없다는 말도 무엇을 훑고 없는지 밝힌다 — 절반만 훑고
+                        # '없음' 이면 그건 없는 게 아니라 모르는 것이다.
                         nh_section["error"] = (
-                            f"오늘 신고가 종목 없음 ({last_day}까지 종가 기준)")
+                            f"오늘 신고가 종목 없음 ({scope} · "
+                            f"{last_day}까지 종가 기준)")
         except sqlite3.OperationalError as exc:
             nh_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
             log.warning("[summary] newhigh DB OperationalError: %s", exc)
@@ -13847,6 +13892,12 @@ def _brief_data_ready() -> tuple[bool, str]:
         return False, f"일봉 현황을 못 읽었다: {type(exc).__name__}"
     if rows <= 0:
         return False, "일봉 테이블이 비어 있다 (재배포 직후면 채워지는 중)"
+    # 행이 있어도 **채우는 중이면** 아직이다. 대상이 ~1,500종목이라 재배포 직후
+    # 전 구간 채움이 몇 분 걸리는데, 그 사이 행 수만 보고 보내면 절반만 훑은
+    # 신고가가 나간다. 부르는 쪽이 곧바로 _fill_ohlcv_job() 을 불러 그 락이
+    # 풀릴 때까지 기다린 뒤 다시 본다.
+    if _OHLCV_FILL_LOCK.locked():
+        return False, f"일봉 채움이 진행 중이다 (지금 {rows:,}행)"
     try:
         health = _check_market_data_health()
     except Exception as exc:                                  # noqa: BLE001
@@ -13914,7 +13965,7 @@ def _send_closing_market_summary(*, catchup: bool = False,
             # **기다리기만 하지 않는다.** 재배포로 DB 가 날아간 상태에서
             # 30분마다 "아직 안 찼다" 만 적고 물러나면, 채우는 주체가 그동안
             # 한 번도 안 깨어 있었을 때 하루가 그대로 지나간다 (2026-09-18).
-            # 빠진 것이 일봉이면 여기서 직접 채운다 — 300종목 약 5분이고,
+            # 빠진 것이 일봉이면 여기서 직접 채운다 — 빈 DB 면 수 분이고,
             # 이 잡은 max_instances=1 · misfire_grace 1800 이라 막아도 된다.
             log.warning("[장마감시황] 데이터 미완 — 직접 채우고 다시 본다: %s", why)
             try:
