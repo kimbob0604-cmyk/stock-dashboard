@@ -344,3 +344,122 @@ def get_price_detail(code: str) -> dict | None:
     except Exception as exc:
         log.warning("[KIS] 현재가 %s 호출실패: %s", code, exc)
         return None
+
+
+# ── 코스피200 선물 (근월물·원월물) ─────────────────────
+# 2026-09-23 러너 실측(ETF-Traker board/tools/probe_kis_futures.py)으로 확정한 것:
+#   · 종목코드는 2026 표준코드 개편 이후 형식 'A01612' 다. 예전 '101W12' 식도,
+#     'A' 를 뗀 '01612' 도 rt_cd=0 에 빈 output1 을 준다 — 실패가 아니라 빈 값이라
+#     조용히 넘어가기 쉽다. 그래서 빈 output1 을 실패로 센다.
+#   · 월물 순서는 지수선물 마스터(fo_idx_code_mts)의 7번째 칸(1=근월물).
+#     날짜로 만기를 계산하지 않는다 — 만기일(둘째 목요일) 당일까지 근월물이
+#     살아 있고, 휴장으로 만기가 밀리는 해도 있다. 마스터가 거래소 기준이다.
+#   · 현재가 API(FHMIF10000000) output1 필드:
+#     futs_oprc 시가 · futs_hgpr 고가 · futs_lwpr 저가 · futs_prpr 현재가(마감 뒤엔 종가)
+#     futs_prdy_vrss/futs_prdy_ctrt 전일 대비 · hts_otst_stpl_qty 미결제약정
+#     otst_stpl_qty_icdc 미결제약정 증감 · acml_vol 거래량 · futs_last_tr_date 최종거래일
+FO_MASTER_URL = "https://new.real.download.dws.co.kr/common/master/fo_idx_code_mts.mst.zip"
+_fut_master_cache: dict = {"date": None, "contracts": None}
+
+
+def _now_kst() -> datetime:
+    # Render 는 UTC 로 돈다. 날짜 경계·as_of 는 KST 로 잡는다.
+    from datetime import timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=9)))
+
+
+def _kospi200_futures_contracts() -> list:
+    """[(순번, 단축코드, 이름)] — 1=근월물. 마스터는 하루 한 번만 받는다."""
+    import io, zipfile
+    today = _now_kst().strftime("%Y%m%d")
+    if _fut_master_cache["date"] == today and _fut_master_cache["contracts"]:
+        return _fut_master_cache["contracts"]
+    r = requests.get(FO_MASTER_URL, timeout=20)
+    r.raise_for_status()
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    text = z.read(z.namelist()[0]).decode("cp949", errors="replace")
+    out = []
+    for ln in text.splitlines():
+        f = ln.split("|")
+        # '1|A01612|KR4A016C0004|F 202612| |00000.00|1|2001|KOSPI200'
+        if len(f) > 8 and f[0] == "1" and f[8].strip() == "KOSPI200":
+            try:
+                out.append((int(f[6]), f[1].strip(), f[3].strip()))
+            except ValueError:
+                continue
+    out.sort()
+    if out:
+        _fut_master_cache.update(date=today, contracts=out)
+    return out
+
+
+def get_kospi200_futures(n: int = 2) -> dict:
+    """코스피200 선물 근월물·원월물 시세·미결제약정.
+
+    반환: {"contracts": [...], "error": str|None, "source", "as_of"}
+    값을 못 받은 월물은 목록에 넣지 않고 error 에 사유를 적는다 — 0 으로 채우지 않는다.
+    """
+    result = {"contracts": [], "error": None,
+              "source": "KIS FHMIF10000000",
+              "as_of": _now_kst().strftime("%Y-%m-%d %H:%M")}
+    c = _get_cache("k200_futures", 300)
+    if c is not None:
+        return c
+    try:
+        master = _kospi200_futures_contracts()
+    except Exception as exc:
+        result["error"] = f"월물 마스터 수신 실패: {type(exc).__name__}"
+        return result
+    if not master:
+        result["error"] = "월물 마스터에 코스피200 선물이 없음"
+        return result
+    errors = []
+    labels = {1: "근월물", 2: "원월물"}
+    for order, code, name in master[:n]:
+        h = _headers("FHMIF10000000")
+        if not h:
+            result["error"] = "KIS 토큰 없음 (APP_KEY/SECRET 확인)"
+            return result
+        _rate_limit()
+        try:
+            r = requests.get(
+                f"{KIS_BASE}/uapi/domestic-futureoption/v1/quotations/inquire-price",
+                headers=h, params={"FID_COND_MRKT_DIV_CODE": "F", "FID_INPUT_ISCD": code},
+                timeout=10,
+            )
+            d = r.json()
+        except Exception as exc:
+            errors.append(f"{code} 요청 실패 {type(exc).__name__}")
+            continue
+        o = d.get("output1") or {}
+        if d.get("rt_cd") != "0" or not o.get("futs_prpr"):
+            errors.append(f"{code} 응답 없음 ({d.get('msg1', '')[:40]})")
+            continue
+
+        def _f(k):
+            v = o.get(k)
+            try:
+                return float(v) if v not in (None, "") else None
+            except ValueError:
+                return None
+
+        def _i(k):
+            v = _f(k)
+            return int(v) if v is not None else None
+
+        result["contracts"].append({
+            "label": labels.get(order, f"{order}번째"),
+            "code": code,
+            "name": o.get("hts_kor_isnm") or name,
+            "open": _f("futs_oprc"), "high": _f("futs_hgpr"),
+            "low": _f("futs_lwpr"), "close": _f("futs_prpr"),
+            "change": _f("futs_prdy_vrss"), "change_pct": _f("futs_prdy_ctrt"),
+            "oi": _i("hts_otst_stpl_qty"), "oi_change": _i("otst_stpl_qty_icdc"),
+            "volume": _i("acml_vol"),
+            "last_trade_date": o.get("futs_last_tr_date"),
+        })
+    if errors:
+        result["error"] = " · ".join(errors)
+    if result["contracts"] and not errors:
+        _set_cache("k200_futures", result)
+    return result
