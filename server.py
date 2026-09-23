@@ -12765,7 +12765,18 @@ def _fetch_us_indices_live(names) -> tuple[list, list]:
     for name in names:
         sym = US_INDEX_TICKERS[name]
         try:
-            h = _yf.Ticker(sym).history(period="10d", interval="1d", auto_adjust=False)
+            t = _yf.Ticker(sym)
+            h = t.history(period="10d", interval="1d", auto_adjust=False)
+            # 야후가 **마지막 일봉의 종가를 비워 두는** 날이 있다 — 2026-09-23 19:22
+            # KST 러너 실측에서 ^GSPC·^IXIC 의 9/22 봉이 close=NaN 이었다(장 마감
+            # 14시간 뒤). 빈 봉을 버리면 하루 묵은 9/21 값이 '09/21 종가' 로 나간다 —
+            # 표기는 정직하지만 시황이 하루 늦다. 그 날짜의 종가는 시세 메타
+            # (fast_info.last_price)에 있으므로 거기서 채운다. 못 채우면 묵은 값과
+            # 그 날짜를 그대로 적는다.
+            nan_day = None
+            if h is not None and not h.empty and h["Close"].isna().iloc[-1]:
+                ts_nan = h.index[-1]
+                nan_day = ts_nan.date() if hasattr(ts_nan, "date") else None
             h = h[h["Close"].notna()] if h is not None and not h.empty else h
             if h is None or len(h) < 2:
                 errors.append(f"{name} 일봉 부족")
@@ -12773,6 +12784,13 @@ def _fetch_us_indices_live(names) -> tuple[list, list]:
             last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
             ts = h.index[-1]
             bar_day = ts.date() if hasattr(ts, "date") else None
+            if nan_day and bar_day and nan_day > bar_day:
+                try:
+                    lp = float(t.fast_info["last_price"])
+                except Exception:
+                    lp = float("nan")
+                if lp == lp and lp > 0:
+                    last, prev, bar_day = lp, last, nan_day
             # 현물 지수는 뉴욕 09:30~16:00 사이 오늘 봉이면 아직 종가가 아니다.
             # NQ=F 는 거의 24시간 돌아 마지막 봉이 늘 진행 중이다.
             live = sym.endswith("=F") or (
