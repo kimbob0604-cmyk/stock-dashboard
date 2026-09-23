@@ -24,15 +24,29 @@ jobs:
       - uses: actions/checkout@v4
 
       # Render 무료 플랜은 잔다. 깨우고 뜰 때까지 기다린다 (wake.yml 과 같은 방식).
+      #
+      # **정지된 서비스는 기다려도 안 깨어난다.** Render 가 503 에 헤더로 그렇게
+      # 말해 준다(x-render-routing: suspend-by-user). 처음 이 점검을 넣은 날
+      # (2026-09-23) 그것을 안 보고 3분을 기다려 '서버가 깨지 않았다' 로만 끝났다 —
+      # wake.yml 이 09-18 에 한 실수를 그대로 되풀이했다. 알아보는 즉시 멈추고 말한다.
       - name: 깨우기
         run: |
-          for i in $(seq 1 12); do
+          for i in $(seq 1 16); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$URL/api/health" || echo 000)
             echo "health 시도 $i → $code"
             [ "$code" = "200" ] && exit 0
-            sleep 15
+            if [ "$i" = "1" ]; then
+              hdr=$(curl -sS -o /dev/null -D - --max-time 60 "$URL/api/health" \
+                    | grep -iE '^(HTTP/|x-render)' || true)
+              printf '%s\n' "$hdr"
+              if printf '%s' "$hdr" | grep -qi 'x-render-routing: *suspend'; then
+                echo "::error::Render 서비스가 정지(suspended) 상태다. 기다려도 안 깨어난다 — Render 대시보드에서 Resume 을 눌러야 한다. 시황도 이 상태에서는 안 나간다."
+                exit 1
+              fi
+            fi
+            sleep 30
           done
-          echo "::error::서버가 깨지 않았다"; exit 1
+          echo "::error::8분 동안 200 을 받지 못했다. 마지막 HTTP $code — 503 이면 재배포 중이다"; exit 1
 
       - name: 시황 받기 (보내지 않음)
         run: |
