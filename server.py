@@ -6680,6 +6680,12 @@ def _startup():
                 try:
                     n = _refresh_prices_from_naver()
                     log.info("[부팅] KR 가격 stale 해소 — %d종목 갱신", n)
+                    # 재배포로 DB 가 새로 차면 새 행은 is_etf 기본값 0 이다.
+                    # 03:10 cron 을 기다리면 그 사이 화면·알림에 ETF 가 섞인다.
+                    try:
+                        log.info("[부팅] ETF 표식 %d종목", mark_etf_stocks())
+                    except Exception as exc:
+                        log.warning("[부팅] ETF 표식 실패: %s", exc)
                     # flow_cache 도 부팅 시 1회 갱신 (시총 큰 종목만)
                     # 가격 갱신이 끝난 후 stocks.market_cap 으로 정렬 가능
                     try:
@@ -7221,12 +7227,29 @@ def mark_etf_stocks():
     """ETF/ETN 종목 자동 마킹. 매일 03:10 cron."""
     if not (_SQLITE_OK and USE_SQLITE):
         return 0
+    # 이름에 들어 있으면 ETF/ETN 으로 본다. SQLite `LIKE '%p%'` 라 ASCII 는 대소문자를
+    # 가리지 않고 **이름 어디에 있어도** 걸린다. 그래서 운용사 브랜드는 뒤에 공백을
+    # 붙여 적는다 — ETF 는 `BNK 주주가치액티브` 처럼 브랜드 뒤가 띄어져 있고, 같은
+    # 글자로 시작하는 회사는 붙여 쓴다(`BNK금융지주` · `HK이노엔` · `파워로직스`).
+    #
+    # 2026-09-23 전 종목 4,063개(data/naver_universe_seed.json)로 잰 값:
+    #  - 'BNK' 가 BNK금융지주(138930, 은행 지주사)를 ETF 로 찍고 있었다 → 'BNK '.
+    #    BNK 운용 ETF 5개는 전부 공백이 있어 하나도 놓치지 않는다.
+    #  - 브랜드 14개가 빠져 ETF 101개가 표식 없이 남아 있었다(KIWOOM 200 · TIME
+    #    코스피액티브 · KoAct … ). 아래 두 번째 묶음이 그것이다.
+    #  - 고친 뒤 4,063개 중 1,255개가 ETF 로 잡히고 새 오탐은 0개다. 표지가 있는데
+    #    안 잡히는 것은 신한글로벌액티브리츠(481850) 하나 — ETF 가 아니라 상장
+    #    리츠(부동산투자회사)라 맞게 남는다.
+    # 브랜드를 더할 때는 scripts/check_etf_marking.py 를 돌려 오탐을 먼저 본다.
     ETF_PATTERNS = (
         'KODEX', 'TIGER', 'KBSTAR', 'KOSEF', 'HANARO',
         'ARIRANG', 'KINDEX', 'TREX', 'ACE ', 'SOL ',
         ' ETF', ' ETN', 'TRF', '레버리지', '인버스', '선물',
-        'TIMEFOLIO', 'BNK', 'FOCUS', 'WON ', 'SMART',
+        'TIMEFOLIO', 'BNK ', 'FOCUS', 'WON ', 'SMART',
         'PLUS ', 'RISE ', 'WOORI',
+        # 2026-09-23 전 종목 대조로 찾은 누락 브랜드
+        '1Q ', 'DAISHIN343 ', 'HK ', 'KCGI ', 'KIWOOM ', 'KoAct ', 'MIDAS ',
+        'TIME ', 'TRUSTON ', 'UNICORN ', 'VITA ', '마이티 ', '에셋플러스 ', '파워 ',
     )
     with _get_db() as conn:
         conn.execute("UPDATE stocks SET is_etf = 0")
@@ -12703,6 +12726,26 @@ def build_market_summary(dry_run: bool = False) -> dict:
         "sections": [],
     }
     debug_info: dict = {} if dry_run else {}
+
+    # ── 0. ETF 표식을 새로 붙인다 ──
+    # 아래 특징주·거래대금·신고가 쿼리는 전부 `is_etf = 0` 으로 ETF 를 거른다.
+    # 그 표식은 03:10 cron(mark_etf_stocks)이 붙이는데, Render 무료 플랜은 그
+    # 시각에 자고 있어 cron 이 거의 돌지 않는다(16:00 시황이 밀리는 것과 같은
+    # 이유 — closing_brief_catchup 주석). 재배포로 DB 가 날아간 날이나 새 상장
+    # 행이 들어온 날은 표식이 기본값 0 인 채로 남아, 2026-09-22 시황에 KODEX 200 ·
+    # TIGER 200 · KODEX CD금리액티브 등이 거래대금 상위와 역사적 신고가(10종목 중
+    # 8종목)에 섞여 나갔다. 거르는 쿼리도 패턴도 맞았고 **표식이 낡아 있었다**.
+    # 읽기 직전에 붙이면 cron 이 돌았는지와 무관해진다. UPDATE 스무 몇 번이라 싸다.
+    try:
+        n_etf = mark_etf_stocks()
+        if dry_run:
+            debug_info["etf_marked"] = n_etf
+    except Exception as exc:
+        # 시황 전체를 막지는 않는다. 다만 삼키지 않는다 — 이 실패면 ETF 가 섞여
+        # 나갈 수 있다는 뜻이라 로그와 debug 에 남긴다.
+        log.warning("[summary] ETF 표식 갱신 실패 — ETF 가 섞여 나갈 수 있다: %s", exc)
+        if dry_run:
+            debug_info["etf_marked_error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
 
     # ── 1. 지수 ── (4-5-2-B: KR 라이브, US 캐시+신선도)
     idx_section = {"title": "📈 지수", "items": []}
