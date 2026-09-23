@@ -12714,6 +12714,95 @@ def _parse_json_list(s):
         return []
 
 
+# ─── 미국 지수: 시황을 만들 때 직접 받는다 ───
+# 예전에는 data.json 의 market_overview 를 읽었다. 그 값은 data_fetcher 가 돌 때만
+# 갱신되고 **몇 월 며칠 종가인지 적혀 있지 않다**. 신선도는 data.json 의
+# actual_date(= 한국 거래일)로 쟀는데, 한국 16:00 시황이 보여 줄 미국 값은 늘
+# 하루 전 미국 거래일 종가라 이 비교는 맞을 수가 없다 — 멀쩡한 값에 ⚠️ 가 붙고,
+# 며칠 묵은 값이어도 data.json 날짜만 오늘이면 표시 없이 나갔다.
+# 이제 yfinance 일봉을 그 자리에서 받아 **마지막 봉의 미국 날짜**를 함께 적는다.
+# 못 받으면 옛 값을 쓰지 않고 못 받았다고 적는다.
+US_INDEX_TICKERS = {
+    "S&P 500": "^GSPC", "NASDAQ": "^IXIC", "DOW": "^DJI",
+    "Russell 2000": "^RUT", "SOX (반도체)": "^SOX", "나스닥100 선물": "NQ=F",
+}
+
+
+def _fetch_us_indices_live(names) -> tuple[list, list]:
+    """[(이름, 값, 등락률%, 'MM/DD', 장중여부)], [실패 사유]"""
+    rows, errors = [], []
+    try:
+        import yfinance as _yf
+    except Exception:
+        return rows, ["yfinance 미설치"]
+    from zoneinfo import ZoneInfo
+    ny_now = datetime.now(ZoneInfo("America/New_York"))
+    for name in names:
+        sym = US_INDEX_TICKERS[name]
+        try:
+            h = _yf.Ticker(sym).history(period="10d", interval="1d", auto_adjust=False)
+            h = h[h["Close"].notna()] if h is not None and not h.empty else h
+            if h is None or len(h) < 2:
+                errors.append(f"{name} 일봉 부족")
+                continue
+            last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
+            ts = h.index[-1]
+            bar_day = ts.date() if hasattr(ts, "date") else None
+            # 현물 지수는 뉴욕 09:30~16:00 사이 오늘 봉이면 아직 종가가 아니다.
+            # NQ=F 는 거의 24시간 돌아 마지막 봉이 늘 진행 중이다.
+            live = sym.endswith("=F") or (
+                bar_day == ny_now.date() and ny_now.weekday() < 5
+                and (9, 30) <= (ny_now.hour, ny_now.minute) < (16, 0))
+            rows.append((name, last, (last / prev - 1) * 100 if prev else None,
+                         bar_day.strftime("%m/%d") if bar_day else "?", live))
+        except Exception as exc:
+            errors.append(f"{name} {type(exc).__name__}")
+    return rows, errors
+
+
+def _us_index_lines(names) -> list:
+    rows, errors = _fetch_us_indices_live(names)
+    out = []
+    for name, v, p, day, live in rows:
+        chg = f" {'+' if p >= 0 else ''}{p:.2f}%" if p is not None else ""
+        tag = f"{day} 현재" if live else f"{day} 종가"
+        out.append(f"{name} {v:,.2f}{chg} <i>({tag})</i>")
+    if errors:
+        out.append(f"<i>⚠️ 미국 지수 수신 실패: {', '.join(errors)[:150]}</i>")
+    return out
+
+
+def _kospi200_futures_section() -> dict:
+    """🧭 코스피200 선물 — 근월물·원월물 시가·고가·저가·종가·미결제약정(KIS)."""
+    sec = {"title": "🧭 코스피200 선물", "items": []}
+    try:
+        from kis_api import get_kospi200_futures
+        fut = get_kospi200_futures(2)
+    except Exception as exc:
+        sec["error"] = f"KIS 선물 조회 실패: {type(exc).__name__}: {str(exc)[:80]}"
+        return sec
+    # 정규장(08:45~15:45) 안이면 futs_prpr 은 종가가 아니라 현재가다.
+    hm = (now_kst().hour, now_kst().minute)
+    close_label = "현재" if (8, 45) <= hm < (15, 45) and now_kst().weekday() < 5 else "종가"
+    for c in fut.get("contracts", []):
+        def n(v, fmt="{:,.2f}"):
+            return fmt.format(v) if v is not None else "—"
+        p = c.get("change_pct")
+        chg = f" {'+' if p >= 0 else ''}{p:.2f}%" if p is not None else ""
+        oi_chg = c.get("oi_change")
+        oi_chg_s = f" ({'+' if oi_chg >= 0 else ''}{oi_chg:,})" if oi_chg is not None else ""
+        sec["items"].append(f"<b>{c['label']}</b> {c['name']} · {close_label} {n(c.get('close'))}{chg}")
+        sec["items"].append(
+            f"  시 {n(c.get('open'))} · 고 {n(c.get('high'))} · 저 {n(c.get('low'))}")
+        sec["items"].append(f"  미결제약정 {n(c.get('oi'), '{:,}')}{oi_chg_s}")
+    if fut.get("error"):
+        if sec["items"]:
+            sec["items"].append(f"<i>⚠️ {fut['error'][:150]}</i>")
+        else:
+            sec["error"] = fut["error"]
+    return sec
+
+
 def build_market_summary(dry_run: bool = False) -> dict:
     """매크로·섹터·특징주·수급·공시·AI 섹션을 DB/캐시에서 집계.
 
@@ -12764,24 +12853,13 @@ def build_market_summary(dry_run: bool = False) -> dict:
     except Exception as exc:
         log.debug("[market_summary] KR live fetch fail: %s", exc)
 
-    # US: data.json market_overview + 신선도 라벨 표기
-    mo = (dj.get("market_overview") or {})
-    data_date = dj.get("actual_date")
-    today_yyyymmdd = now_kst().strftime("%Y%m%d")
-    us_stale_tag = "" if data_date == today_yyyymmdd else " ⚠️"
-
-    for name, obj, stale_tag in (
-        ("KOSPI", kospi_obj, ""),
-        ("KOSDAQ", kosdaq_obj, ""),
-        ("S&P 500", mo.get("sp500"), us_stale_tag),
-        ("NASDAQ", mo.get("nasdaq"), us_stale_tag),
-    ):
+    for name, obj in (("KOSPI", kospi_obj), ("KOSDAQ", kosdaq_obj)):
         if isinstance(obj, dict) and obj.get("value") is not None:
             v = obj["value"]; p = obj.get("change_pct") or 0
             sign = "+" if p >= 0 else ""
-            idx_section["items"].append(f"{name} {v:,.2f} {sign}{p:.2f}%{stale_tag}")
-    if us_stale_tag and idx_section["items"]:
-        idx_section["items"].append(f"<i>⚠️ 표시: 미국 지수 데이터 stale ({data_date or 'unknown'})</i>")
+            idx_section["items"].append(f"{name} {v:,.2f} {sign}{p:.2f}%")
+    # US: 그 자리에서 받는다 — 마지막 봉의 미국 날짜를 함께 적는다
+    idx_section["items"].extend(_us_index_lines(("S&P 500", "NASDAQ")))
     summary["sections"].append(idx_section)
 
     # ── 2. 매크로 ──
@@ -12806,35 +12884,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
             macro_section["items"].append(f"{it['name']} {v:,.2f} {sign}{p:.2f}%{note}")
     summary["sections"].append(macro_section)
 
-    # ── 3. 옵션/선물 ──
-    opts_section = {"title": "🔮 옵션/선물", "items": []}
-    for sym in ("SPY", "QQQ"):
-        try:
-            f = BASE_DIR / "cache" / f"options_signal_{sym}.json"
-            if not f.exists(): continue
-            od = json.loads(f.read_text(encoding="utf-8"))
-            pcr = od.get("pcr", {})
-            mp = od.get("max_pain", {})
-            gex = od.get("gex", {})
-            ovr = od.get("overall", {})
-            opts_section["items"].append(
-                f"{sym} ${od.get('spot_price', 0)} | PCR {pcr.get('volume', '—')} | "
-                f"MaxPain ${mp.get('strike', '—')} ({mp.get('diff_pct', 0):+.1f}%) | "
-                f"GEX {gex.get('regime', '—')} → {ovr.get('emoji', '')} {ovr.get('direction', '—')}"
-            )
-        except Exception:
-            pass
-    try:
-        nf = json.loads((BASE_DIR / "cache" / "night_futures.json").read_text(encoding="utf-8"))
-        if nf.get("night_close"):
-            p = nf.get("change_pct") or 0
-            sign = "+" if p >= 0 else ""
-            opts_section["items"].append(
-                f"코스피200 야간선물 {nf['night_close']} {sign}{p}% — {nf.get('signal', '')}"
-            )
-    except Exception:
-        pass
-    summary["sections"].append(opts_section)
+    # ── 3. 코스피200 선물 ──
+    # 예전 '🔮 옵션/선물' 은 SPY·QQQ 옵션 신호와 '코스피200 야간선물' 이었는데, 뒤의
+    # 것은 yfinance ^KS200(현물 지수) 두 날 종가를 선물처럼 적은 대용값이었다.
+    # 사용자 요청(2026-09-23)으로 빼고 KIS 실제 선물 시세로 바꾼다.
+    summary["sections"].append(_kospi200_futures_section())
 
     # ── 4. 섹터 ──
     _t_sector = time.time()
@@ -13370,26 +13424,11 @@ def build_us_market_summary() -> dict:
         "sections": [],
     }
 
-    # ── 1. 미국 지수 (data.json.market_overview) ──
+    # ── 1. 미국 지수 (yfinance 실시간 — _fetch_us_indices_live) ──
     idx_section = {"title": "🇺🇸 미국 지수", "items": []}
-    try:
-        dj = json.loads((BASE_DIR / "data.json").read_text(encoding="utf-8")) \
-            if (BASE_DIR / "data.json").exists() else {}
-    except Exception:
-        dj = {}
-    mo = (dj.get("market_overview") or {})
-    for name, obj in (
-        ("S&P 500", mo.get("sp500")),
-        ("NASDAQ", mo.get("nasdaq")),
-        ("DOW", mo.get("dow")),
-        ("Russell 2000", mo.get("russell")),
-        ("SOX (반도체)", mo.get("sox")),
-        ("나스닥100 선물", mo.get("nasdaq_futures")),
-    ):
-        if isinstance(obj, dict) and obj.get("value") is not None:
-            v = obj["value"]; p = obj.get("change_pct") or 0
-            sign = "+" if p >= 0 else ""
-            idx_section["items"].append(f"{name} {v:,.2f} {sign}{p:.2f}%")
+    # data.json 에는 DOW·Russell·SOX 가 채워진 적이 없어 늘 빠졌고, 있는 값도
+    # 날짜가 없었다. 그 자리에서 받는다 (_fetch_us_indices_live 주석).
+    idx_section["items"].extend(_us_index_lines(tuple(US_INDEX_TICKERS)))
     summary["sections"].append(idx_section)
 
     # ── 2. 옵션/변동성 ──
