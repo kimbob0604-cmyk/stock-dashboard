@@ -57,25 +57,15 @@ for node in tree.body:
 check(len(chunks) == 4, f'함수 3개 + 티커 표를 꺼냈다 ({len(chunks)})')
 
 
-class Frame:
-    """yfinance history 의 흉내 — Close 열과 날짜 인덱스."""
-    def __init__(self, closes, days):
-        self._c, self.index = closes, days
-        self.empty = not closes
-
-    def __len__(self):
-        return len(self._c)
-
-    def __getitem__(self, k):
-        if k == 'Close':
-            return types.SimpleNamespace(iloc=self._c, notna=lambda: self)
-        return self
-
-    def notna(self):
-        return self
+import pandas as pd                                          # noqa: E402  yfinance 가 끌고 오는 의존성
 
 
-def run_us(frames, now_ny):
+def Frame(closes, days):
+    """yfinance history 와 같은 꼴 — 뉴욕 시간대 날짜 인덱스와 Close 열."""
+    return pd.DataFrame({'Close': closes}, index=pd.DatetimeIndex(days))
+
+
+def run_us(frames, now_ny, last_price=None):
     fake = types.ModuleType('yfinance')
 
     def Ticker(sym):
@@ -84,7 +74,8 @@ def run_us(frames, now_ny):
             if isinstance(f, Exception):
                 raise f
             return f
-        return types.SimpleNamespace(history=history)
+        return types.SimpleNamespace(history=history,
+                                     fast_info={'last_price': (last_price or {}).get(sym)})
     fake.Ticker = Ticker
     sys.modules['yfinance'] = fake
 
@@ -129,6 +120,18 @@ l = ns['_us_index_lines'](('S&P 500', 'NASDAQ'))
 print('   ', l)
 check(len(l) == 1 and '미국 지수 수신 실패' in l[0] and 'S&P 500' in l[0] and 'NASDAQ' in l[0],
       '두 지수 모두 실패 사유 한 줄')
+
+print('4-1. 야후가 마지막 일봉 종가를 비워 둔 날 (2026-09-23 실측: 9/22 close=NaN)')
+nan = float('nan')
+frames = {'^GSPC': Frame([7650.5, 7764.7, nan], days(18, 21, 22))}
+ns = run_us(frames, ny(2026, 9, 23, 6, 22), last_price={'^GSPC': 7801.2})
+l = ns['_us_index_lines'](('S&P 500',))
+print('   ', l)
+check(l[0] == 'S&P 500 7,801.20 +0.47% <i>(09/22 종가)</i>',
+      '빈 종가는 시세 메타(last_price)로 채우고 그 날짜로 적는다')
+ns = run_us(frames, ny(2026, 9, 23, 6, 22), last_price={'^GSPC': nan})
+l = ns['_us_index_lines'](('S&P 500',))
+check(l[0].endswith('(09/21 종가)</i>'), f'못 채우면 묵은 값과 그 날짜를 그대로 적는다 ({l[0]})')
 
 print('5. 코스피200 선물 — 실측 응답')
 import kis_api as K
