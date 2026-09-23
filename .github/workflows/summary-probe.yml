@@ -1,0 +1,77 @@
+name: 장마감 시황 미리보기 점검
+
+# 운영 서버의 시황을 **보내지 않고** 받아서 ETF 가 섞였는지 본다.
+# 개발 환경에서는 onrender.com 이 조직 프록시에 막혀 있어 여기서 본다.
+#
+# GET /api/market_summary 는 시황을 만들기만 하고 텔레그램으로 보내지 않는다
+# (보내는 쪽은 POST /api/ops/brief/closing — brief-kick.yml). 시황을 만들며
+# ETF 표식을 새로 붙이는 UPDATE 가 돌지만 멱등이라 몇 번 불러도 같다.
+#
+# 2026-09-22 시황에 KODEX 200 · TIGER 200 · KODEX CD금리액티브 등이 섞여 나간
+# 뒤 넣었다. 판정 패턴은 server.py 의 ETF_PATTERNS 를 그대로 읽는다 — 여기에
+# 목록을 따로 두면 둘이 갈린다.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      URL: https://stock-dashboard.onrender.com
+    steps:
+      - uses: actions/checkout@v4
+
+      # Render 무료 플랜은 잔다. 깨우고 뜰 때까지 기다린다 (wake.yml 과 같은 방식).
+      - name: 깨우기
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$URL/api/health" || echo 000)
+            echo "health 시도 $i → $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 15
+          done
+          echo "::error::서버가 깨지 않았다"; exit 1
+
+      - name: 시황 받기 (보내지 않음)
+        run: |
+          code=$(curl -sS -o /tmp/summary.json -w '%{http_code}' --max-time 180 "$URL/api/market_summary" || echo 000)
+          echo "market_summary → HTTP $code · $(wc -c < /tmp/summary.json) 바이트"
+          [ "$code" = "200" ] || { echo "::error::시황을 받지 못했다"; head -c 400 /tmp/summary.json; exit 1; }
+
+      - name: ETF 가 섞였나
+        run: |
+          python3 - <<'PY'
+          import json, re, sys
+          src = open('server.py', encoding='utf-8').read()
+          m = re.search(r'ETF_PATTERNS = \((.*?)\n    \)', src, re.S)
+          pats = re.findall(r"'([^']*)'", re.sub(r'#.*', '', m.group(1)))
+          s = json.load(open('/tmp/summary.json', encoding='utf-8'))
+          print(f"생성 {s.get('generated_at')} · 판정 패턴 {len(pats)}개")
+          bad, seen = [], 0
+          for sec in s.get('sections') or []:
+              title = sec.get('title') or ''
+              # 소제목(`TOP 10` · `±5% 이내`)은 판정에 넣지 않는다 — 항목 글자만 본다.
+              lines = [('', x) for x in (sec.get('items') or [])]
+              for sub in sec.get('subsections') or []:
+                  lines += [(sub.get('subtitle') or '', x) for x in (sub.get('items') or [])]
+              if not any(k in title for k in ('특징주', '신고가')):
+                  continue
+              print(f"\n{title}")
+              for sub, ln in lines:
+                  seen += 1
+                  # 종목 이름은 ' — 업종' 앞, 등락률 앞까지다. 업종 글자를 판정에 넣지 않는다.
+                  name = re.split(r'\s[+-]\d', str(ln).strip(), maxsplit=1)[0]
+                  # SQLite LIKE 처럼 ASCII 대소문자를 가리지 않는다
+                  hit = [p for p in pats if p.upper() in (name + ' ').upper()]
+                  mark = '  ETF? ' if hit else '       '
+                  print(mark + (f'[{sub}] ' if sub else '') + str(ln).strip()[:100]
+                        + (f'   ← {hit}' if hit else ''))
+                  if hit:
+                      bad.append(ln)
+          print(f"\n특징주·신고가 {seen}줄 중 ETF 패턴 {len(bad)}줄")
+          if not seen:
+              print('::warning::특징주·신고가 줄이 없다 — 판정할 것이 없다(장중이거나 데이터가 비었다)')
+          sys.exit(1 if bad else 0)
+          PY
