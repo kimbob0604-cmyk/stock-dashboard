@@ -28,7 +28,8 @@ def check(ok, msg):
         fails.append(msg)
 
 
-m = re.search(r'ETF_PATTERNS = \((.*?)\n    \)', SRC, re.S)
+# 패턴은 모듈 수준 상수다 — 일봉 채움(_is_etf_name)도 같은 목록을 쓴다.
+m = re.search(r'(?m)^ETF_PATTERNS = \((.*?)\n\)', SRC, re.S)
 assert m, 'ETF_PATTERNS 를 server.py 에서 못 찾았다'
 PATS = re.findall(r"'([^']*)'", re.sub(r'#.*', '', m.group(1)))
 assert len(PATS) > 20, f'패턴이 {len(PATS)}개뿐이다 — 꺼내는 정규식이 틀렸다'
