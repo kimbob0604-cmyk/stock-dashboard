@@ -39,20 +39,42 @@ def head(t):
 
 
 head("1. 가격 유니버스 확보 (빌더의 입력)")
-# 러너에는 cache/ 가 없다. 빌더가 쓰는 naver_universe 를 실제 수집으로 채운다.
-uni = server._load_naver_universe()
-if not (uni or {}).get("stocks"):
-    print("  universe 없음 → _build_naver_universe_background 로 생성 시도")
+# 러너에는 cache/ 가 없어 _load_naver_universe() 가 커밋된 시드로 폴백한다.
+# 시드에는 name·sectors·market_cap 만 있고 거래대금이 없다 — 그대로 빌드하면
+# 테마가 전부 걸러진다. 실제 경로대로 가격 sync 를 먼저 돌려 시세를 채운다.
+live = server._universe_live_count()
+print(f"  시작 시점 시세 있는 종목: {live}개")
+if live < 100:
+    print("  가격 sync 실행 (_refresh_prices_from_naver)…")
     try:
-        server._build_naver_universe_background()
+        n = server._refresh_prices_from_naver()
+        print(f"  갱신 {n}종목")
     except Exception as exc:
-        print(f"  생성 실패: {type(exc).__name__}: {exc}")
-    uni = server._load_naver_universe()
-n_uni = len((uni or {}).get("stocks") or {})
+        print(f"  가격 sync 실패: {type(exc).__name__}: {exc}")
+    live = server._universe_live_count()
+
+n_uni = len((server._load_naver_universe() or {}).get("stocks") or {})
 check("universe 종목 1000개 이상", n_uni >= 1000, f"{n_uni}종목")
-if n_uni < 1000:
+check("시세 있는 종목 100개 이상", live >= 100, f"{live}종목")
+if live < 100:
     print("\n입력이 없으면 빌더를 검증할 수 없다. 중단.")
     sys.exit(1)
+
+head("1-b. 시세 없는 유니버스에서는 만들지 않는가")
+# 부팅 직후 시드만 올라온 상태를 흉내 낸다. 빈 data.json 을 쓰면 안 된다.
+_uni = server._load_naver_universe()
+_saved = {c: {k: v.get(k) for k in ("volume_mn", "change_pct")}
+          for c, v in list(_uni["stocks"].items())}
+try:
+    for v in _uni["stocks"].values():
+        v["volume_mn"] = 0
+    r0 = server._build_data_json(write=False)
+    check("시세 없으면 생성 보류", r0.get("ok") is False, str(r0)[:120])
+finally:
+    for c, kv in _saved.items():
+        server._load_naver_universe()["stocks"][c].update(kv)
+check("복원 확인", server._universe_live_count() >= 100,
+      f"{server._universe_live_count()}종목")
 
 head("2. 빌더 실행 (파일은 임시 경로로)")
 tmpdir = tempfile.mkdtemp(prefix="datajson_test_")

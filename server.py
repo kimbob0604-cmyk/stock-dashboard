@@ -7782,6 +7782,21 @@ def _build_new_high_sectors(mapping: list, themes_out: list) -> list:
     return sorted(out, key=lambda x: -x["count"])
 
 
+def _universe_live_count(umap: dict | None = None) -> int:
+    """유니버스에서 **오늘 시세가 들어온** 종목 수.
+
+    _load_naver_universe() 는 스크랩 캐시가 없으면 커밋된 시드
+    (data/naver_universe_seed.json)로 폴백한다. 시드에는 name·sectors·
+    market_cap 만 있고 change_pct·volume_mn 이 아예 없다 —
+    '종목이 있다' 와 '시세가 있다' 는 다른 얘기다.
+    이걸 구분하지 않으면 부팅 직후 시드를 보고 data.json 을 만들다가
+    거래대금 0 때문에 테마가 전부 걸러져 0개가 나온다.
+    """
+    if umap is None:
+        umap = (_load_naver_universe() or {}).get("stocks") or {}
+    return sum(1 for v in umap.values() if float(v.get("volume_mn") or 0) > 0)
+
+
 def _build_data_json(write: bool = True) -> dict:
     """data.json 을 서버에서 만든다. 맥북 cron + git push 를 대신한다.
 
@@ -7804,6 +7819,16 @@ def _build_data_json(write: bool = True) -> dict:
     if not umap:
         _note_collect_error("data_json", "naver_universe 비어 있음 — 가격 sync 전이다")
         return {"ok": False, "error": "naver_universe 없음"}
+
+    live = _universe_live_count(umap)
+    if live < 100:
+        # 시드만 올라온 상태다. 여기서 만들면 거래대금 0 때문에 테마가 전부
+        # 걸러져 빈 파일이 된다. 만들지 않고 물러난다.
+        _note_collect_error(
+            "data_json",
+            f"유니버스에 시세가 없다 (시세 있는 종목 {live}개) — 가격 sync 전이다. 생성 보류")
+        return {"ok": False, "error": f"시세 없는 유니버스 (live={live})",
+                "live_stocks": live}
 
     def _code(it):
         return it["code"] if isinstance(it, dict) else it
@@ -7912,12 +7937,28 @@ def _startup_data_json():
     """부팅 직후 1회. Render 는 재시작하면 git 에 있는 낡은 판으로 되돌아가므로
     여기서 한 번 덮어써야 그날 값이 올라온다.
 
-    가격 sync 가 naver_universe 를 채운 뒤여야 의미가 있어서 조금 기다린다."""
+    **시드가 아니라 실제 시세를 기다린다.** _load_naver_universe() 는 캐시가
+    없으면 커밋된 시드로 폴백하는데 거기엔 거래대금이 없다. 종목 수만 보고
+    출발하면 테마가 전부 걸러져 0개가 나오고, 그대로 끝나 버린다.
+    """
     try:
-        for _ in range(30):                     # 최대 5분
-            if (_load_naver_universe() or {}).get("stocks"):
+        for i in range(60):                      # 최대 10분
+            if _universe_live_count() >= 100:
                 break
+            if i == 12:
+                # 2분이 지나도 시세가 없으면 가격 sync 를 직접 한 번 돌린다.
+                # 부팅 시각이 장중 sync 사이 구간이면 다음 cron 까지 30분을
+                # 기다리게 되는데, 그동안 화면은 낡은 data.json 을 보여 준다.
+                log.info("[data.json] 시세 대기 2분 경과 — 가격 sync 를 직접 부른다")
+                try:
+                    _refresh_prices_from_naver()
+                except Exception as exc:
+                    log.warning("[data.json] 가격 sync 실패: %s", exc)
             time.sleep(10)
+        else:
+            _note_collect_error("data_json", "부팅 후 10분간 시세가 안 들어와 생성 보류")
+            return
+
         age = _data_json_stale_min()
         if age is not None and age < 180:
             log.info("[data.json] 부팅 시점에 이미 신선함 (%.0f분 전) — 생성 생략", age)
