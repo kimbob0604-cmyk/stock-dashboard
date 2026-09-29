@@ -85,6 +85,10 @@ jobs:
           pip install -q requests beautifulsoup4 lxml
           python3 scripts/probe_naver_sources.py
 
+      - name: 대체 JSON 엔드포인트 찾기
+        if: always()
+        run: python3 scripts/probe_naver_json_api.py
+
       - name: 러너에서 네이버가 열리는가
         if: always()
         run: |
