@@ -1,0 +1,123 @@
+name: 배포 후 실측
+
+# 머지 → Render 자동 배포 후, 실제로 값이 채워졌는지 숫자로 확인한다.
+# "고쳤다" 는 이 워크플로 출력으로만 말한다.
+#
+# 배포 완료 감지: /api/ops/diag/sources 는 이번 PR 에서 새로 생긴 경로다.
+# 배포 전에는 404, 배포 후에는 200 이므로 그 자체가 신호다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
+    paths:
+      - '.github/workflows/verify-deploy.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+    steps:
+      - name: 새 코드가 떴는지 기다린다
+        run: |
+          set -u
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /tmp/s.json -w '%{http_code}' --max-time 60 \
+                   "$URL/api/ops/diag/sources" || echo 000)
+            echo "시도 $i — /api/ops/diag/sources HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "새 코드 배포 확인"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::20분 동안 새 엔드포인트가 200 을 주지 않았다. 배포 실패 또는 지연."
+          exit 1
+
+      - name: 수집 트리거 (배포 직후엔 아직 안 돌았을 수 있다)
+        run: |
+          set -u
+          echo "--- 수급 배치 수동 트리거 (top_n=40) ---"
+          curl -s -X POST --max-time 60 "$URL/api/flow/refresh-batch?top_n=40" | head -c 300
+          echo
+          echo "백그라운드 수집 대기 (40종목 × 0.4s + 여유)"
+          sleep 90
+
+      - name: 무엇이 들어오는가
+        if: always()
+        run: |
+          set -u
+          echo "=============== /api/ops/diag/sources ==============="
+          curl -s --max-time 60 "$URL/api/ops/diag/sources" | python3 -m json.tool
+
+      - name: 화면 데이터 — 숫자로
+        if: always()
+        run: |
+          set -u
+          echo "=============== /api/sectors ==============="
+          code=$(curl -s -o /tmp/sec.json -w '%{http_code}' --max-time 90 "$URL/api/sectors")
+          echo "HTTP $code"
+          python3 - <<'PY'
+import json
+d = json.load(open('/tmp/sec.json'))
+if 'sectors' in d:
+    s = d['sectors']
+    print(f"업종 {len(s)}개, source={d.get('source')}")
+    for x in s[:5]:
+        print(f"  {x['name']:20s} {x['change_pct']:+6.2f}%  "
+              f"{x['total']:4d}종목 (상승 {x['up']} 보합 {x['flat']} 하락 {x['down']})")
+else:
+    print("실패:", d)
+PY
+
+          echo
+          echo "=============== /api/flow/005930 (삼성전자 수급) ==============="
+          code=$(curl -s -o /tmp/flow.json -w '%{http_code}' --max-time 90 "$URL/api/flow/005930")
+          echo "HTTP $code"
+          python3 - <<'PY'
+import json
+d = json.load(open('/tmp/flow.json'))
+if 'dates' in d:
+    print(f"거래일 {len(d['dates'])}일: {d['dates'][0]} ~ {d['dates'][-1]}")
+    print(f"source={d.get('source')}  외국인보유율={d.get('foreign_hold_ratio')}")
+    print("  최근 3일 (외국인 / 기관 / 개인, 주):")
+    ind = d.get('individual_shares') or [None]*len(d['dates'])
+    for i in range(-3, 0):
+        print(f"    {d['dates'][i]}  {d['foreign_shares'][i]:+12,}  "
+              f"{d['inst_shares'][i]:+12,}  "
+              f"{(ind[i] if ind[i] is not None else 0):+12,}")
+else:
+    print("실패:", d)
+PY
+
+          echo
+          echo "=============== /api/screener (시총 채워졌나) ==============="
+          curl -s -o /tmp/scr.json --max-time 90 "$URL/api/screener?limit=5"
+          python3 - <<'PY'
+import json
+d = json.load(open('/tmp/scr.json'))
+st = d.get('stocks') or []
+have = sum(1 for s in st if s.get('market_cap'))
+print(f"총 {d.get('count')}종목, 응답 {len(st)}건 중 시총 있는 것 {have}건")
+for s in st[:5]:
+    mc = s.get('market_cap')
+    print(f"  {s['name']:20s} {s.get('close'):>12,.0f}  "
+          f"{s.get('change_pct'):+6.2f}%  시총={mc if mc else '없음'}")
+PY
+
+      - name: 워치독 판정
+        if: always()
+        run: |
+          set -u
+          curl -s --max-time 90 "$URL/api/ops/watchdog" | python3 -m json.tool | head -60
+
+      - name: 수집 실패 로그
+        if: always()
+        run: |
+          set -u
+          curl -s --max-time 60 "$URL/api/ops/diag/collect_errors?limit=15" | python3 -m json.tool | head -80
