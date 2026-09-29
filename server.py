@@ -318,7 +318,30 @@ def _get_trading_date() -> str:
     today = now_kst().strftime("%Y%m%d")
     # 미래 날짜는 버린다(파일명이 잘못 남아 있을 수 있다).
     cands = [c for c in cands if c <= today]
-    return max(cands) if cands else today
+
+    # 주말이면 직전 금요일을 오늘로 친다. 공휴일까지는 못 가리지만,
+    # 2주 전을 돌려주는 것보다는 훨씬 덜 틀린다.
+    _n = now_kst()
+    _recent = _n - timedelta(days=max(0, _n.weekday() - 4))
+    recent_weekday = _recent.strftime("%Y%m%d")
+
+    best = max(cands) if cands else recent_weekday
+
+    # **낡은 증거는 증거가 아니다.** Render 는 영속 디스크가 없어 재시작 직후
+    # cache/ 가 비고, 그러면 후보가 data.json 하나만 남는다. 그게 몇 주 전이면
+    # 다시 과거를 보게 된다 — 이 함수가 처음 고장 난 방식이 정확히 그것이다.
+    try:
+        gap = (datetime.strptime(today, "%Y%m%d")
+               - datetime.strptime(best, "%Y%m%d")).days
+    except Exception:
+        gap = 0
+    if gap > 7:
+        _note_collect_error(
+            "trading_date",
+            f"최신 증거가 {best} 로 {gap}일 낡았다 (data.json 갱신 중단 의심) "
+            f"— {recent_weekday} 로 대체한다")
+        return recent_weekday
+    return best
 
 
 # 수집 실패 링버퍼. Render 로그를 볼 수 없으니 밖에서 읽을 창구가 필요하다.
@@ -335,8 +358,9 @@ def _mask_secrets(s: str) -> str:
     if not s:
         return s
     out = _SECRET_RE.sub(lambda m: f"{m.group(1)}=***", s)
-    # 텔레그램 봇 토큰 형태(숫자:영문)와 URL 쿼리의 key= 도 통째로 가린다
-    out = re.sub(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b", "***", out)
+    # 텔레그램 봇 토큰(숫자:영문). URL 의 /bot<토큰>/ 형태로도 나오므로
+    # 앞에 단어경계를 두지 않는다 — 't' 와 '1' 사이엔 경계가 없다.
+    out = re.sub(r"\d{6,}:[A-Za-z0-9_-]{20,}", "***", out)
     out = re.sub(r"(?i)([?&](?:key|apikey|auth_key|serviceKey)=)[^&\s]+", r"\1***", out)
     return out
 

@@ -96,6 +96,14 @@ print("4. 부수 검증")
 print("=" * 62)
 print(f"    _get_trading_date() = {server._get_trading_date()}")
 check("거래일이 8자리", len(server._get_trading_date()) == 8)
+# data.json 이 멈춰도 2주 전을 돌려주면 안 된다. 러너는 cache/ 가 비어 있어서
+# data.json 하나만 후보인데, 그게 낡으면 오늘 기준으로 대체돼야 한다.
+import datetime as _dt  # noqa: E402
+_td = server._get_trading_date()
+_gap = (_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).replace(tzinfo=None)
+        - _dt.datetime.strptime(_td, "%Y%m%d")).days
+check("거래일이 7일 이내", _gap <= 7, f"{_td} ({_gap}일 전)")
+
 masked = server._mask_secrets("api_key=abcd1234efgh&token=zzzz9999 bot123456789:AAbbCCddEEffGGhhIIjjKKllMMnnOO")
 print(f"    마스킹: {masked}")
 check("api_key 가려짐", "abcd1234efgh" not in masked)
