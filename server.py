@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations as _comb
 from pathlib import Path
@@ -276,16 +277,68 @@ def _pykrx_ticker_name(code: str) -> str | None:
 # 차트 계산 헬퍼
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_trading_date() -> str:
-    """data.json 의 actual_date 반환, 없으면 오늘 날짜 (YYYYMMDD)"""
+    """오늘(또는 가장 최근) 거래일 YYYYMMDD.
+
+    **data.json 만 믿지 않는다.** data.json 은 맥북 크론이 git push 로
+    갱신하는데, 그게 멈추면 이 함수가 몇 주 전 날짜를 계속 돌려준다.
+    이 함수를 읽는 곳이 server.py 안에만 15곳이 넘어서, 한 번 낡으면
+    시황·스크리너·일봉·펀더멘털 캐시가 전부 과거를 본다.
+
+    실제로 2026-09-29 에 20260915 를 돌려주고 있었다. 그래서
+    /api/screener 가 cache/fundamental_20260915.json 을 찾다 못 찾고
+    시가총액·PER·PBR 을 전 종목 null 로 내보냈다.
+
+    그래서 **서버가 오늘 실제로 데이터를 받았다는 증거** 와 비교해
+    더 최신인 쪽을 쓴다. 날짜를 과거로 되돌리지 않는다.
+      1) data.json 의 actual_date
+      2) 오늘자 naver_universe 캐시 파일 (가격 sync 가 성공해야만 생긴다)
+      3) 둘 다 없으면 오늘 날짜
+    """
+    cands: list[str] = []
+
     if DATA_JSON.exists():
         try:
             d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
             ad = d.get("actual_date") or d.get("updated_at", "")[:10]
             if ad:
-                return ad.replace("-", "")
+                cands.append(ad.replace("-", ""))
         except Exception:
             pass
-    return now_kst().strftime("%Y%m%d")
+
+    # 가격 sync 는 종목을 실제로 갱신했을 때만 cache/naver_universe_<날짜>.json
+    # 을 쓴다. 그 파일이 있다는 건 그날 장이 돌았다는 1차 증거다.
+    try:
+        for p in (BASE_DIR / "cache").glob("naver_universe_*.json"):
+            stem = p.stem.rsplit("_", 1)[-1]
+            if len(stem) == 8 and stem.isdigit():
+                cands.append(stem)
+    except Exception:
+        pass
+
+    today = now_kst().strftime("%Y%m%d")
+    # 미래 날짜는 버린다(파일명이 잘못 남아 있을 수 있다).
+    cands = [c for c in cands if c <= today]
+    return max(cands) if cands else today
+
+
+# 수집 실패 링버퍼. Render 로그를 볼 수 없으니 밖에서 읽을 창구가 필요하다.
+_COLLECT_ERRORS: deque = deque(maxlen=120)
+
+_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|auth[_-]?key"
+    r"|appkey|appsecret|bot\d+:[\w-]+)"
+    r"\s*[=:]\s*[\"']?([^\s\"'&,}]{4,})")
+
+
+def _mask_secrets(s: str) -> str:
+    """로그·진단 응답에 키가 섞여 나가지 않게 가린다."""
+    if not s:
+        return s
+    out = _SECRET_RE.sub(lambda m: f"{m.group(1)}=***", s)
+    # 텔레그램 봇 토큰 형태(숫자:영문)와 URL 쿼리의 key= 도 통째로 가린다
+    out = re.sub(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b", "***", out)
+    out = re.sub(r"(?i)([?&](?:key|apikey|auth_key|serviceKey)=)[^&\s]+", r"\1***", out)
+    return out
 
 
 def _calc_rsi_macd(closes: list) -> dict:
@@ -2693,10 +2746,160 @@ def _parse_naver_flow_number(s: str) -> int:
             return 0
 
 
+def _note_collect_error(source: str, detail: str) -> None:
+    """수집 실패를 링버퍼에 남긴다. /api/ops/diag/collect_errors 로 읽는다.
+
+    Render 로그를 볼 수 없는 상황에서 '무엇이 언제부터 왜 안 들어오는지' 를
+    밖에서 확인할 유일한 창구다. 2026-09-29 에 네이버 PC 페이지가 SPA 로
+    바뀌어 스크레이핑이 전부 0행을 돌려줬는데, 서버는 조용히 False 만
+    반환해서 어디가 끊겼는지 알 방법이 없었다.
+    """
+    try:
+        _COLLECT_ERRORS.append({
+            "at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": source,
+            "detail": _mask_secrets(str(detail))[:300],
+        })
+    except Exception:
+        pass
+
+
+def _fetch_naver_trend(code: str, days: int = 20) -> dict | None:
+    """
+    종목별 투자자 매매동향을 네이버 모바일 JSON API 에서 받는다.
+
+    **왜 JSON 인가** — 2026-09-29 확인: finance.naver.com 의 PC 페이지
+    (item/frgn.naver, sise/sise_group.naver)가 Next.js 클라이언트 렌더링으로
+    바뀌었다. HTTP 200 에 136KB 를 주지만 `<table>` 이 한 개도 없다.
+    BeautifulSoup 셀렉터(table.type2)가 맞을 대상 자체가 사라진 것이다.
+    차단이 아니라 소스 형식 변경이라, IP 를 바꿔도 안 된다.
+
+    응답: [{itemCode, bizdate, foreignerPureBuyQuant, organPureBuyQuant,
+            individualPureBuyQuant, closePrice, foreignerHoldRatio, ...}]
+    최신이 앞. 예전 스크레이퍼와 같게 오래된 → 최신 순으로 뒤집어 돌려준다.
+
+    개인 순매수와 외국인 보유율은 예전 스크레이퍼에 없던 값이다. 같이 받아 둔다.
+    """
+    import re as _re
+    import urllib.request
+    if not _re.fullmatch(r"\d{6}", code):
+        return None
+
+    url = (f"https://m.stock.naver.com/api/stock/{code}/trend"
+           f"?pageSize={days}&page=1")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        _note_collect_error("naver_trend", f"{code}: {type(exc).__name__}: {exc}")
+        return None
+
+    if not isinstance(rows, list) or not rows:
+        _note_collect_error("naver_trend", f"{code}: 빈 응답 또는 형식 변경 ({type(rows).__name__})")
+        return None
+
+    dates, closes, foreign_net, inst_net, indi_net = [], [], [], [], []
+    hold_ratio = None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        bd = str(r.get("bizdate") or "")
+        if not _re.fullmatch(r"\d{8}", bd):
+            continue
+        close = _parse_naver_flow_number(str(r.get("closePrice") or ""))
+        if close <= 0:
+            continue
+        dates.append(f"{bd[:4]}-{bd[4:6]}-{bd[6:]}")
+        closes.append(close)
+        foreign_net.append(_parse_naver_flow_number(str(r.get("foreignerPureBuyQuant") or "")))
+        inst_net.append(_parse_naver_flow_number(str(r.get("organPureBuyQuant") or "")))
+        indi_net.append(_parse_naver_flow_number(str(r.get("individualPureBuyQuant") or "")))
+        if hold_ratio is None:
+            hold_ratio = str(r.get("foreignerHoldRatio") or "") or None
+
+    if not dates:
+        _note_collect_error("naver_trend", f"{code}: 행 추출 0 — 응답 키가 바뀐 듯")
+        return None
+
+    # 네이버는 최신이 앞. 기존 소비자들이 '오래된 → 최신' 을 기대한다.
+    dates.reverse(); closes.reverse()
+    foreign_net.reverse(); inst_net.reverse(); indi_net.reverse()
+
+    return {
+        "dates": dates, "closes": closes,
+        "foreign_net": foreign_net, "inst_net": inst_net,
+        "individual_net": indi_net, "foreign_hold_ratio": hold_ratio,
+    }
+
+
+def _save_flow(code: str, stock_name: str, t: dict) -> dict:
+    """_fetch_naver_trend 결과를 캐시 + flow_cache DB 에 쓰고 응답 dict 를 만든다."""
+    dates, closes = t["dates"], t["closes"]
+    foreign_net, inst_net = t["foreign_net"], t["inst_net"]
+    # 순매수 '원' 금액 = 주식수 × 종가 (추정치 — 체결단가가 아니라 종가 기준)
+    foreign_value = [f * c for f, c in zip(foreign_net, closes)]
+    inst_value = [i * c for i, c in zip(inst_net, closes)]
+    fetched_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
+    result = {
+        "code": code, "name": stock_name,
+        "dates": dates, "close": closes,
+        "foreign_shares": foreign_net, "inst_shares": inst_net,
+        "individual_shares": t.get("individual_net") or [],
+        "foreign_hold_ratio": t.get("foreign_hold_ratio"),
+        "foreign_value": foreign_value, "inst_value": inst_value,
+        "foreign_sum_20": sum(foreign_value),
+        "inst_sum_20": sum(inst_value),
+        "source": "naver_mobile_api", "fetched_at": fetched_at,
+    }
+    try:
+        cache_file = BASE_DIR / "cache" / f"flow_{code}.json"
+        cache_file.parent.mkdir(exist_ok=True)
+        cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    except Exception:
+        pass
+
+    if USE_SQLITE and _SQLITE_OK:
+        try:
+            with _get_db() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO flow_cache "
+                    "(code, name, dates_json, close_json, foreign_shares_json, "
+                    "inst_shares_json, foreign_value_json, inst_value_json, "
+                    "foreign_sum_20, inst_sum_20, source, fetched_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (code, stock_name,
+                     json.dumps(dates, ensure_ascii=False),
+                     json.dumps(closes, ensure_ascii=False),
+                     json.dumps(foreign_net, ensure_ascii=False),
+                     json.dumps(inst_net, ensure_ascii=False),
+                     json.dumps(foreign_value, ensure_ascii=False),
+                     json.dumps(inst_value, ensure_ascii=False),
+                     sum(foreign_value), sum(inst_value),
+                     "naver_mobile_api", fetched_at),
+                )
+                conn.commit()
+        except Exception as exc:
+            log.debug("[flow] %s DB fail: %s", code, exc)
+    return result
+
+
 def _fetch_and_save_flow(code: str) -> bool:
-    """Naver 외인/기관 수급 페이지 fetch → cache + flow_cache DB 갱신.
-    api_flow 의 내부 fetch 로직을 재사용 가능한 헬퍼로 분리. cron batch 용.
+    """수급 fetch → cache + flow_cache DB 갱신. cron batch 용.
     Returns: True 성공 / False 실패."""
+    t = _fetch_naver_trend(code)
+    if not t:
+        return False
+    _save_flow(code, _get_stock_name(code) or code, t)
+    return True
+
+
+def _fetch_and_save_flow_legacy_unused(code: str) -> bool:
+    """예전 HTML 스크레이퍼. 네이버 PC 페이지가 SPA 로 바뀌어 더는 동작하지
+    않는다(table 0개). 되돌릴 일이 있을 때 참고용으로만 남긴다."""
     import re as _re
     if not _re.fullmatch(r"\d{6}", code):
         return False
@@ -2802,6 +3005,10 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
     if not (_SQLITE_OK and USE_SQLITE):
         return {"ok": False, "error": "SQLite 비활성"}
     t0 = time.time()
+    # 대상 선정 — 시총 순이 원칙이다. 다만 **시총이 비어 있다고 수집을 통째로
+    # 거르면 안 된다.** 예전엔 market_cap > 0 조건 하나로 0종목을 돌려주고
+    # 수급이 통째로 안 모였다. Render 는 영속 디스크가 없어 재시작 직후
+    # 시총이 비는 구간이 실제로 생긴다. 그때는 거래대금으로 대신 줄을 세운다.
     try:
         with _get_db() as conn:
             rows = conn.execute("""
@@ -2812,9 +3019,29 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
                   AND close >= 1000
                 ORDER BY market_cap DESC LIMIT ?
             """, (top_n,)).fetchall()
-        codes = [r["code"] for r in rows]
+            codes = [r["code"] for r in rows]
+            if not codes:
+                log.warning("[flow batch] 시총 기준 0종목 — 거래대금 순으로 대체한다 "
+                            "(stocks.market_cap 이 비어 있다)")
+                _note_collect_error(
+                    "flow_batch",
+                    "stocks.market_cap 이 전부 비어 시총 정렬이 0종목을 반환 — 거래대금 순으로 대체")
+                rows = conn.execute("""
+                    SELECT code FROM stocks
+                    WHERE (market='' OR market LIKE 'KOS%')
+                      AND COALESCE(is_etf, 0) = 0
+                      AND close >= 1000
+                      AND volume_mn IS NOT NULL
+                    ORDER BY volume_mn DESC LIMIT ?
+                """, (top_n,)).fetchall()
+                codes = [r["code"] for r in rows]
     except Exception as exc:
+        _note_collect_error("flow_batch", f"종목 조회 실패: {exc}")
         return {"ok": False, "error": f"종목 조회 실패: {exc}"}
+
+    if not codes:
+        _note_collect_error("flow_batch", "대상 종목 0개 — stocks 테이블이 비었다")
+        return {"ok": False, "error": "대상 종목 0개"}
 
     ok = 0; fail = 0
     for i, code in enumerate(codes, 1):
@@ -2826,6 +3053,10 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
     elapsed = time.time() - t0
     log.info("[flow batch] %d종목 갱신 (%d 성공, %d 실패, %.1fs)",
              len(codes), ok, fail, elapsed)
+    # 전부 실패하면 소스가 바뀐 것이다. 조용히 넘어가지 않는다.
+    if codes and ok == 0:
+        _note_collect_error("flow_batch",
+                            f"{len(codes)}종목 전부 실패 — 네이버 매매동향 API 응답 확인 필요")
     return {
         "ok": True, "total": len(codes),
         "success": ok, "failed": fail,
@@ -2890,111 +3121,22 @@ def api_flow(code: str):
         except Exception:
             pass
 
-    try:
-        import requests as _rq
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return jsonify({"error": "bs4/requests 미설치"}), 500
+    # ── 수집: 네이버 모바일 JSON API ──
+    # 예전엔 finance.naver.com/item/frgn.naver 를 BeautifulSoup 으로 긁었다.
+    # 2026-09-29 그 페이지가 SPA 로 바뀌어 table 이 0개가 되면서 전면 실패했다.
+    t = _fetch_naver_trend(code)
+    if not t:
+        # 왜 비었는지를 숨기지 않는다. 화면이 '데이터 없음' 과 '수집 실패' 를
+        # 구분할 수 있어야 한다.
+        return jsonify({
+            "error": "수급 수집 실패",
+            "missing": "flow",
+            "code": code,
+            "detail": "네이버 투자자 매매동향 API 응답 없음 "
+                      "— /api/ops/diag/collect_errors 참조",
+        }), 502
 
-    url = "https://finance.naver.com/item/frgn.naver"
-    try:
-        res = _rq.get(
-            url,
-            params={"code": code},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8,
-        )
-        res.encoding = "euc-kr"
-        soup = BeautifulSoup(res.text, "html.parser")
-    except Exception as exc:
-        return jsonify({"error": "데이터 없음", "detail": f"네이버 금융 요청 실패: {exc}"}), 502
-
-    table = soup.select_one('table.type2[summary*="외국인"]')
-    if table is None:
-        table = soup.select_one("table.type2")
-    if table is None:
-        return jsonify({"error": "데이터 없음", "detail": "테이블 파싱 실패"}), 502
-
-    dates:        list[str] = []
-    closes:       list[int] = []
-    foreign_net:  list[int] = []   # 주식 수
-    inst_net:     list[int] = []   # 주식 수
-
-    for tr in table.select("tr"):
-        tds = tr.find_all("td")
-        if len(tds) < 7:
-            continue   # 헤더/구분선 스킵
-        # [0] 날짜  [1] 종가  [2] 전일비  [3] 등락률  [4] 거래량  [5] 기관  [6] 외국인
-        date_txt = tds[0].get_text(strip=True)
-        if not _re.match(r"\d{4}\.\d{2}\.\d{2}", date_txt):
-            continue
-        try:
-            close = int(tds[1].get_text(strip=True).replace(",", ""))
-        except ValueError:
-            continue
-        inst_shares = _parse_naver_flow_number(tds[5].get_text(strip=True))
-        for_shares  = _parse_naver_flow_number(tds[6].get_text(strip=True))
-
-        dates.append(date_txt.replace(".", "-"))
-        closes.append(close)
-        inst_net.append(inst_shares)
-        foreign_net.append(for_shares)
-
-    if not dates:
-        return jsonify({"error": "데이터 없음", "detail": "행 추출 실패"}), 502
-
-    # 오래된 → 최신 순으로 정렬 (네이버는 최신이 위)
-    dates.reverse(); closes.reverse()
-    foreign_net.reverse(); inst_net.reverse()
-
-    # 대략적인 순매수 '원' 금액 = 주식수 × 종가 (추정치)
-    foreign_value = [f * c for f, c in zip(foreign_net, closes)]
-    inst_value    = [i * c for i, c in zip(inst_net,    closes)]
-
-    result = {
-        "code":           code,
-        "name":           stock_name,
-        "dates":          dates,
-        "close":          closes,
-        "foreign_shares": foreign_net,
-        "inst_shares":    inst_net,
-        "foreign_value":  foreign_value,    # 원 (추정)
-        "inst_value":     inst_value,       # 원 (추정)
-        "foreign_sum_20": sum(foreign_value),
-        "inst_sum_20":    sum(inst_value),
-        "source":         "naver_finance",
-        "fetched_at":     now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    cache_file.parent.mkdir(exist_ok=True)
-    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # SQLite 동시 기록
-    if USE_SQLITE and _SQLITE_OK:
-        try:
-            with _get_db() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO flow_cache "
-                    "(code, name, dates_json, close_json, foreign_shares_json, "
-                    "inst_shares_json, foreign_value_json, inst_value_json, "
-                    "foreign_sum_20, inst_sum_20, source, fetched_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-                    (
-                        code, stock_name,
-                        json.dumps(dates, ensure_ascii=False),
-                        json.dumps(closes, ensure_ascii=False),
-                        json.dumps(foreign_net, ensure_ascii=False),
-                        json.dumps(inst_net, ensure_ascii=False),
-                        json.dumps(foreign_value, ensure_ascii=False),
-                        json.dumps(inst_value, ensure_ascii=False),
-                        sum(foreign_value), sum(inst_value),
-                        "naver_finance", result["fetched_at"],
-                    ),
-                )
-                conn.commit()
-        except Exception as exc:
-            log.debug("[SQLite] flow write fail: %s", exc)
-
-    return jsonify(result)
+    return jsonify(_save_flow(code, stock_name, t))
 
 
 
@@ -3009,12 +3151,58 @@ def _parse_pct(s: str) -> float:
         return 0.0
 
 
+def _naver_json(url: str, source: str, timeout: int = 10):
+    """네이버 모바일 JSON API 공통 호출. 실패는 링버퍼에 남기고 None."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        _note_collect_error(source, f"{type(exc).__name__}: {exc}")
+        return None
+
+
 def _scrape_naver_sectors() -> list[dict]:
     """
-    네이버 금융 업종 랜딩 페이지에서 79개 KRX 업종 요약을 스크랩.
-    URL: https://finance.naver.com/sise/sise_group.naver?type=upjong
+    79개 KRX 업종 요약.
+
+    예전엔 finance.naver.com/sise/sise_group.naver 를 BeautifulSoup 으로
+    긁었다. 2026-09-29 그 페이지가 Next.js SPA 로 바뀌어 `<table>` 이
+    0개가 됐고(HTTP 200, 136KB, table 0), /api/sectors 가 502 를 냈다.
+    모바일 JSON API 로 옮긴다 — 같은 필드를 그대로 준다.
+
     Returns: [{no, name, change_pct, total, up, flat, down}]
     """
+    d = _naver_json(
+        "https://m.stock.naver.com/api/stocks/industry?page=1&pageSize=100",
+        "naver_sectors")
+    if not isinstance(d, dict):
+        return []
+    groups = d.get("groups")
+    if not isinstance(groups, list) or not groups:
+        _note_collect_error("naver_sectors", f"groups 없음 — 응답 키 {list(d)[:8]}")
+        return []
+
+    out: list[dict] = []
+    for g in groups:
+        if not isinstance(g, dict) or g.get("no") is None:
+            continue
+        out.append({
+            "no": str(g.get("no")),
+            "name": g.get("name") or "",
+            "change_pct": _parse_pct(str(g.get("changeRate") or "0")),
+            "total": int(g.get("totalCount") or 0),
+            "up": int(g.get("riseCount") or 0),
+            "flat": int(g.get("steadyCount") or 0),
+            "down": int(g.get("fallCount") or 0),
+        })
+    return out
+
+
+def _scrape_naver_sectors_legacy_unused() -> list[dict]:
+    """예전 HTML 스크레이퍼. SPA 전환으로 더는 동작하지 않는다. 참고용."""
     import re as _re
     import requests as _rq
     from bs4 import BeautifulSoup
@@ -3064,10 +3252,46 @@ def _scrape_naver_sectors() -> list[dict]:
 
 def _scrape_naver_sector_detail(no: str) -> dict:
     """
-    네이버 업종 상세 페이지에서 해당 업종 소속 종목 리스트 추출.
-    URL: sise_group_detail.naver?type=upjong&no=<no>
+    업종 소속 종목 리스트. 업종 요약과 같은 이유로 모바일 JSON API 를 쓴다.
     Returns: {sector_name, stocks: [{code, name, close, change_pct, volume, volume_mn}]}
     """
+    d = _naver_json(
+        f"https://m.stock.naver.com/api/stocks/industry/{no}?page=1&pageSize=100",
+        "naver_sector_detail")
+    if not isinstance(d, dict):
+        return {"error": "업종 상세 조회 실패", "sector_name": "", "stocks": []}
+
+    ginfo = d.get("groupInfo") or {}
+    sector_name = ginfo.get("name") or ""
+    rows = d.get("stocks")
+    if not isinstance(rows, list):
+        _note_collect_error("naver_sector_detail", f"no={no} stocks 없음 — 키 {list(d)[:8]}")
+        return {"sector_name": sector_name, "stocks": []}
+
+    stocks: list[dict] = []
+    seen: set = set()
+    for s in rows:
+        if not isinstance(s, dict):
+            continue
+        code = str(s.get("itemCode") or "")
+        if not re.fullmatch(r"\d{6}", code) or code in seen:
+            continue
+        seen.add(code)
+        close = _parse_naver_flow_number(str(s.get("closePrice") or ""))
+        vol = _parse_naver_flow_number(str(s.get("accumulatedTradingVolume") or ""))
+        stocks.append({
+            "code": code,
+            "name": s.get("stockName") or code,
+            "close": close,
+            "change_pct": _parse_pct(str(s.get("fluctuationsRatio") or "0")),
+            "volume": vol,
+            "volume_mn": int(vol * close / 1_000_000) if close and vol else 0,
+        })
+    return {"sector_name": sector_name, "stocks": stocks}
+
+
+def _scrape_naver_sector_detail_legacy_unused(no: str) -> dict:
+    """예전 HTML 스크레이퍼. SPA 전환으로 더는 동작하지 않는다. 참고용."""
     import re as _re
     import requests as _rq
     from bs4 import BeautifulSoup
@@ -3413,12 +3637,14 @@ def api_sectors():
     sectors = _scrape_naver_sectors()
     if not sectors:
         return jsonify({
-            "error": "Naver 업종 페이지 파싱 실패",
-            "source": "naver_finance",
+            "error": "업종 수집 실패",
+            "missing": "sectors",
+            "source": "naver_mobile_api",
+            "detail": "네이버 업종 API 응답 없음 — /api/ops/diag/collect_errors 참조",
         }), 502
 
     result = {
-        "source":       "naver_finance",
+        "source":       "naver_mobile_api",
         "count":        len(sectors),
         "sectors":      sectors,
         "fetched_at":   now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -14286,6 +14512,14 @@ def api_ops_watchdog():
     out["note"] = ("휴장일 — 갱신 자체가 없는 날이다" if not due.get("trading_day")
                    else (f"지금은 안 따짐: {', '.join(skipped)}" if skipped
                          else "전부 따지는 시간대"))
+    # 무엇이 빠졌는지를 판정과 같이 내보낸다. '건강하지 않다' 만으로는
+    # 화면도 사람도 어느 데이터를 못 믿어야 하는지 알 수 없다.
+    try:
+        recent = list(_COLLECT_ERRORS)[-8:]
+        out["recent_collect_errors"] = list(reversed(recent))
+        out["collect_error_sources"] = sorted({e.get("source", "?") for e in _COLLECT_ERRORS})
+    except Exception:
+        pass
     return jsonify(out)
 
 
@@ -17600,6 +17834,91 @@ def api_ops_cron_trigger(job_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/ops/diag/collect_errors", methods=["GET"])
+def api_ops_diag_collect_errors():
+    """최근 수집 실패 목록. Render 로그를 볼 수 없을 때의 유일한 창구다.
+
+    키·토큰은 _mask_secrets 로 가려서 나간다.
+    Query: ?source=naver_trend 로 걸러 볼 수 있다. ?limit=50 (기본 50).
+    """
+    src = (request.args.get("source") or "").strip()
+    limit = max(1, min(int(request.args.get("limit", 50) or 50), 120))
+    items = list(_COLLECT_ERRORS)
+    if src:
+        items = [e for e in items if e.get("source") == src]
+    items = items[-limit:]
+    items.reverse()  # 최신이 위
+
+    by_source: dict = {}
+    for e in _COLLECT_ERRORS:
+        by_source[e.get("source", "?")] = by_source.get(e.get("source", "?"), 0) + 1
+
+    return jsonify({
+        "count": len(items),
+        "total_buffered": len(_COLLECT_ERRORS),
+        "buffer_max": _COLLECT_ERRORS.maxlen,
+        "by_source": by_source,
+        "errors": items,
+        "note": "버퍼는 프로세스 메모리다 — 재시작하면 비워진다. "
+                "비어 있다고 수집이 정상이라는 뜻은 아니다.",
+    })
+
+
+@app.route("/api/ops/diag/sources", methods=["GET"])
+def api_ops_diag_sources():
+    """지금 무엇이 들어오고 무엇이 안 들어오는지 한 화면으로.
+
+    '데이터가 비어 있다' 와 '수집이 깨졌다' 를 구분해서 보여 준다.
+    화면·텔레그램이 빠진 데이터를 숨기지 않게 하려고 만든 단일 진실 출처다.
+    """
+    out: dict = {"checked_at": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+                 "trading_date": _get_trading_date(), "sources": {}, "missing": []}
+
+    def _put(key, label, ok, detail):
+        out["sources"][key] = {"label": label, "ok": bool(ok), "detail": detail}
+        if not ok:
+            out["missing"].append(label)
+
+    if _SQLITE_OK and USE_SQLITE:
+        try:
+            with _get_db() as conn:
+                n_price = conn.execute(
+                    "SELECT COUNT(*) FROM stocks WHERE change_pct IS NOT NULL "
+                    "AND close > 0").fetchone()[0]
+                n_cap = conn.execute(
+                    "SELECT COUNT(*) FROM stocks WHERE market_cap IS NOT NULL "
+                    "AND market_cap > 0").fetchone()[0]
+                n_flow = conn.execute(
+                    "SELECT COUNT(*) FROM flow_cache "
+                    "WHERE foreign_value_json IS NOT NULL").fetchone()[0]
+                frow = conn.execute(
+                    "SELECT dates_json, fetched_at FROM flow_cache "
+                    "WHERE code='005930'").fetchone()
+                n_ohlcv = conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
+            flow_latest = None
+            if frow and frow["dates_json"]:
+                d = _parse_json_list(frow["dates_json"])
+                flow_latest = d[-1] if d else None
+            _put("price", "가격 (KR)", n_price >= 1000, f"{n_price}종목")
+            _put("market_cap", "시가총액", n_cap >= 1000, f"{n_cap}종목")
+            _put("flow", "투자자 수급", n_flow >= 50,
+                 f"{n_flow}행, 최신 {flow_latest or '없음'}")
+            _put("ohlcv", "일봉", n_ohlcv > 0, f"{n_ohlcv}행")
+        except Exception as exc:
+            out["db_error"] = _mask_secrets(str(exc))[:200]
+    else:
+        out["db_error"] = "SQLite 비활성"
+
+    sec_cache = BASE_DIR / "cache" / "sectors_naver_landing.json"
+    _put("sectors", "업종", sec_cache.exists(),
+         "캐시 있음" if sec_cache.exists() else "캐시 없음")
+
+    recent = list(_COLLECT_ERRORS)[-10:]
+    out["recent_errors"] = list(reversed(recent))
+    out["healthy"] = not out["missing"]
+    return jsonify(out)
+
+
 @app.route("/api/ops/diag/stocks_schema", methods=["GET"])
 def api_ops_diag_stocks_schema():
     """stocks 테이블 schema 진단 (Render 환경에서 ALTER 컬럼 부재 의심 시)."""
@@ -18136,8 +18455,12 @@ def api_revision_history(code):
         return jsonify({'error': str(e)}), 500
 
 
-# gunicorn 이 모듈을 import 하는 시점에 자동 실행
-_startup()
+# gunicorn 이 모듈을 import 하는 시점에 자동 실행.
+# SERVER_NO_STARTUP=1 이면 건너뛴다 — 스케줄러·백그라운드 스레드 없이
+# 파서 함수만 import 해서 테스트하려고 둔 문이다 (scripts/test_collectors.py).
+# 운영에서는 이 변수를 설정하지 않으므로 동작이 달라지지 않는다.
+if os.environ.get("SERVER_NO_STARTUP") != "1":
+    _startup()
 
 
 if __name__ == "__main__":
