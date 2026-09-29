@@ -1,0 +1,58 @@
+name: 배포 후 실측
+
+# 머지 → Render 자동 배포 후, 실제로 값이 채워졌는지 숫자로 확인한다.
+# "고쳤다" 는 이 워크플로 출력으로만 말한다.
+#
+# 배포 완료 감지: /api/ops/diag/sources 는 이번 변경에서 새로 생긴 경로다.
+# 배포 전 404, 배포 후 200 이라 그 자체가 신호다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
+    paths:
+      - '.github/workflows/verify-deploy.yml'
+      - 'scripts/verify_deploy.py'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 새 코드가 떴는지 기다린다
+        run: |
+          set -u
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+                   "$URL/api/ops/diag/sources" || echo 000)
+            echo "시도 $i — /api/ops/diag/sources HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "새 코드 배포 확인"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::20분 동안 새 엔드포인트가 200 을 주지 않았다. 배포 실패 또는 지연."
+          exit 1
+
+      - name: 수집 트리거 (배포 직후엔 아직 안 돌았다)
+        run: |
+          set -u
+          echo "수급 배치 수동 트리거 (top_n=80)"
+          curl -s -X POST --max-time 60 "$URL/api/flow/refresh-batch?top_n=80" | head -c 300
+          echo
+          echo "백그라운드 수집 대기 (80종목 x 0.4s + 여유)"
+          sleep 150
+
+      - name: 실측
+        run: python3 scripts/verify_deploy.py "$URL"
