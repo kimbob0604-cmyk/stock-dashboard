@@ -7,14 +7,10 @@ name: 수집 정지 진단
 # 아무것도 고치지 않는다. 읽기만 한다 (POST 로 뭔가 트리거하지 않는다).
 # 결과는 잡 로그로 읽는다 — 아티팩트를 만들지 않는다.
 
+# 원인 규명을 마친 뒤로는 수동 실행만 남긴다. 같은 증상이 또 나오면
+# Actions 에서 직접 돌려 서버 상태와 네이버 응답을 한 번에 본다.
 on:
   workflow_dispatch:
-  # 기본 브랜치에 없는 워크플로는 dispatch 목록에 안 뜬다. 진단 브랜치에
-  # push 로도 돌게 해서 main 을 건드리지 않고 한 번 받아 본다.
-  push:
-    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
-    paths:
-      - '.github/workflows/collect-diag.yml'
 
 permissions:
   contents: read

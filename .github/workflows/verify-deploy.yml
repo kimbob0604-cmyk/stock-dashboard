@@ -3,16 +3,11 @@ name: 배포 후 실측
 # 머지 → Render 자동 배포 후, 실제로 값이 채워졌는지 숫자로 확인한다.
 # "고쳤다" 는 이 워크플로 출력으로만 말한다.
 #
-# 배포 완료 감지: /api/ops/diag/sources 는 이번 변경에서 새로 생긴 경로다.
-# 배포 전 404, 배포 후 200 이라 그 자체가 신호다.
+# 배포 완료 감지는 '값' 으로 한다 — 엔드포인트 존재 여부로는 이미 있는
+# 경로를 고친 배포를 구분할 수 없다. verify_deploy.py --wait 참조.
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
-    paths:
-      - '.github/workflows/verify-deploy.yml'
-      - 'scripts/verify_deploy.py'
 
 permissions:
   contents: read
