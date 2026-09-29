@@ -7688,6 +7688,40 @@ _DATA_JSON_SPARK_DAYS = 20
 # 빌드를 직렬화한다. 부팅 스레드와 수동 재생성 요청이 겹치면 같은 .tmp 를
 # 두 스레드가 쓰고 각자 replace 해서 어느 쪽 결과가 남는지 알 수 없게 된다.
 _DATA_JSON_LOCK = threading.Lock()
+# 지금 도는 빌드가 언제 시작했는지. 멈춘 빌드를 밖에서 알아보려면 필요하다.
+_DATA_JSON_BUILD_STARTED: float | None = None
+
+
+def _run_with_budget(fn, seconds: float, label: str, default=None):
+    """fn() 을 별도 스레드에서 돌리고 제한 시간을 넘기면 포기한다.
+
+    **왜 필요한가** — 2026-09-29 실측에서 data.json 빌드 하나가 12분 넘게
+    끝나지 않고 락을 쥐고 있었다(status 가 building=True 를 계속 돌려줬다).
+    입력은 멀쩡했다(매핑 171종목 중 162종목 시세 확보, 기준 102).
+    단계 하나가 매달리면 전체가 인질이 되고, 그 뒤 예약 생성(15:45·16:20)
+    까지 전부 막힌다. 한 조각이 느리다고 나머지를 포기할 이유가 없다.
+
+    파이썬은 스레드를 죽일 수 없다. 넘긴 스레드는 그대로 두고(데몬이라
+    프로세스를 붙잡지 않는다) 호출만 돌아온다.
+    """
+    box: dict = {}
+
+    def _work():
+        try:
+            box["v"] = fn()
+        except Exception as exc:          # noqa: BLE001
+            box["e"] = exc
+
+    th = threading.Thread(target=_work, daemon=True, name=f"budget-{label}")
+    th.start()
+    th.join(seconds)
+    if th.is_alive():
+        _note_collect_error("data_json", f"{label} {seconds:.0f}초 초과 — 건너뛴다")
+        return default, False
+    if "e" in box:
+        _note_collect_error("data_json", f"{label} 실패: {box['e']}")
+        return default, False
+    return box.get("v", default), True
 
 
 def _spark_from_ohlcv(codes: list[str], days: int = _DATA_JSON_SPARK_DAYS) -> dict:
@@ -7865,11 +7899,16 @@ def _build_data_json(write: bool = True) -> dict:
     # **락을 오래 기다리지 않는다.** 예전엔 120초를 기다렸는데, 호출이 몇 개만
     # 겹쳐도 서로가 서로를 막아 전부 타임아웃으로 끝났다(2026-09-29 실측에서
     # 재현). 진행 중이면 그렇게 말하고 바로 돌아가는 편이 훨씬 낫다.
+    global _DATA_JSON_BUILD_STARTED
     if not _DATA_JSON_LOCK.acquire(timeout=5):
-        return {"ok": False, "error": "다른 생성이 진행 중", "busy": True}
+        held = (time.time() - (_DATA_JSON_BUILD_STARTED or time.time()))
+        return {"ok": False, "error": "다른 생성이 진행 중", "busy": True,
+                "running_sec": round(held, 1)}
+    _DATA_JSON_BUILD_STARTED = time.time()
     try:
         return _build_data_json_inner(write)
     finally:
+        _DATA_JSON_BUILD_STARTED = None
         _DATA_JSON_LOCK.release()
 
 
@@ -7923,7 +7962,10 @@ def _build_data_json_inner(write: bool = True) -> dict:
                 "error": f"매핑 종목 시세 부족 ({mapped_live}/{len(all_codes)})",
                 "mapped_live": mapped_live, "mapped_total": len(all_codes)}
 
-    sparks = _spark_from_ohlcv(all_codes)
+    # 각 단계에 예산을 건다. 하나가 매달려도 나머지는 나가야 한다.
+    sparks, _ok_sp = _run_with_budget(
+        lambda: _spark_from_ohlcv(all_codes), 60, "스파크라인", default={})
+    sparks = sparks or {}
 
     themes_out: list = []
     for theme in mapping:
@@ -7977,7 +8019,24 @@ def _build_data_json_inner(write: bool = True) -> dict:
             pass   # 기존 파일을 못 읽으면 비교를 건너뛴다 — 새로 쓰는 게 낫다
 
     _rank_history_push(themes_out)
-    idx = _fetch_kr_indices_live() or {}
+    idx, _ = _run_with_budget(_fetch_kr_indices_live, 20, "국내지수", default={})
+    idx = idx or {}
+
+    # 해외지수는 yfinance 네트워크라 제일 잘 매달린다. 12분 멈춤의 유력 용의자다.
+    mkt, ok_mkt = _run_with_budget(_build_market_overview, 45, "해외지수", default={})
+    if not mkt:
+        # **빈 값을 그냥 내보내지 않는다**(2026-09-29 에 그렇게 조용히 비었다).
+        # 직전 파일에 있던 값을 재사용하고, 재사용했다는 사실을 남긴다.
+        try:
+            if DATA_JSON.exists():
+                prev_mkt = (json.loads(DATA_JSON.read_text(encoding="utf-8"))
+                            .get("market_overview") or {})
+                if prev_mkt:
+                    mkt = prev_mkt
+                    _note_collect_error(
+                        "data_json", "해외지수 실패 — 직전 파일 값 재사용")
+        except Exception:
+            pass
 
     output = {
         "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -7986,7 +8045,7 @@ def _build_data_json_inner(write: bool = True) -> dict:
         "kosdaq": idx.get("kosdaq", {"value": 0.0, "change_pct": 0.0}),
         "themes": themes_out,
         "new_high_sectors": _build_new_high_sectors(mapping, themes_out),
-        "market_overview": _build_market_overview(),
+        "market_overview": mkt,
         "source": "server",     # 맥북 cron 산출물과 구분된다
     }
 
@@ -18389,6 +18448,8 @@ def api_ops_data_json_status():
                 if float((umap.get(c) or {}).get("volume_mn") or 0) > 0)
             out["mapped_need"] = max(1, int(len(codes) * 0.6))
         out["build_in_progress"] = _DATA_JSON_LOCK.locked()
+        if _DATA_JSON_BUILD_STARTED:
+            out["build_running_sec"] = round(time.time() - _DATA_JSON_BUILD_STARTED, 1)
     except Exception as exc:
         out["diag_error"] = _mask_secrets(str(exc))[:200]
     return jsonify(out)

@@ -180,6 +180,22 @@ try:
         for c, v in _bak.items():
             _u[c]["volume_mn"] = v
 
+    head("4-d. 단계가 매달려도 빌드가 끝나는가")
+    # 2026-09-29 실측: 빌드 하나가 12분 넘게 락을 쥐고 끝나지 않아
+    # 이후 예약 생성까지 전부 막혔다. 해외지수(yfinance)가 유력 용의자였다.
+    import time as _t
+    _orig_mkt = server._build_market_overview
+    server._build_market_overview = lambda: _t.sleep(600)   # 영원히 매달린다
+    try:
+        _t0 = _t.time()
+        r4 = server._build_data_json(write=False)
+        _el = _t.time() - _t0
+        check("매달려도 90초 안에 반환", _el < 90, f"{_el:.0f}초")
+        check("그래도 빌드는 성공", r4.get("ok") is True, str(r4)[:140])
+    finally:
+        server._build_market_overview = _orig_mkt
+    check("락이 풀렸다", not server._DATA_JSON_LOCK.locked())
+
     head("5. 실패해도 기존 파일을 덮지 않는가")
     before = server.DATA_JSON.read_text(encoding="utf-8")
     mp = os.path.join(ROOT, "themes_mapping.json")
