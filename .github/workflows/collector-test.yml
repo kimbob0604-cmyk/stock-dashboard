@@ -1,0 +1,30 @@
+name: 수집기 검증
+
+# 개발 컨테이너는 네이버가 프록시에 막혀 있다. 새 수집기가 실제로 도는지
+# 러너에서 **server.py 의 진짜 함수로** 확인한다. 배포 전 관문이다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
+    paths:
+      - 'server.py'
+      - 'scripts/test_collectors.py'
+      - '.github/workflows/collector-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 의존성
+        run: pip install -q -r requirements.txt
+      - name: 수집기 검증
+        run: python3 scripts/test_collectors.py
