@@ -66,6 +66,37 @@ if "--wait" in sys.argv:
     sys.exit(0 if wait_for_deploy() else 1)
 
 
+def wait_for_flow(target=50, max_min=8):
+    """수급 배치가 끝날 때까지 기다린다.
+
+    고정 sleep 으로 재면 재배포 직후엔 배치가 아직 도는 중이라 낮게 나온다
+    (실제로 71행 → 38행으로 들쭉날쭉했다). 행 수가 목표를 넘거나
+    더 늘지 않을 때까지 본다.
+    """
+    import time
+    last, flat = -1, 0
+    for i in range(1, int(max_min * 3) + 1):
+        _, d = get("/api/ops/watchdog", timeout=60)
+        n = (d or {}).get("flow_rows") or 0
+        print(f"  {i:2d}) flow_rows={n}")
+        if n >= target:
+            print(f"  목표 {target}행 도달")
+            return n
+        flat = flat + 1 if n == last else 0
+        last = n
+        if flat >= 3:
+            print(f"  3회 연속 증가 없음 — 배치 종료로 본다 ({n}행)")
+            return n
+        time.sleep(20)
+    return last
+
+
+if "--wait-flow" in sys.argv:
+    head("0. 수급 배치 완료 대기")
+    wait_for_flow()
+    sys.exit(0)
+
+
 def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""))
     if not cond:
