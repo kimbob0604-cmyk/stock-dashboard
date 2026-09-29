@@ -9,6 +9,7 @@ on:
     paths:
       - 'server.py'
       - 'scripts/test_collectors.py'
+      - 'scripts/test_data_json.py'
       - '.github/workflows/collector-test.yml'
 
 permissions:
@@ -27,3 +28,5 @@ jobs:
         run: pip install -q -r requirements.txt
       - name: 수집기 검증
         run: python3 scripts/test_collectors.py
+      - name: data.json 생성기 검증
+        run: python3 scripts/test_data_json.py
