@@ -40,22 +40,38 @@ def head(t):
 
 
 def wait_for_deploy(max_min=20):
-    """배포 완료를 '값' 으로 감지한다.
+    """배포 완료를 기다린다.
 
-    엔드포인트 존재 여부로는 구분이 안 되는 배포가 있다(이미 있던 경로를
-    고치는 경우). 구 코드는 stocks.updated_at(UTC)을 now_kst() 에서 빼서
-    경과시간이 항상 540분 이상으로 나왔으므로, 그 값이 400분 아래로
-    내려오는 것이 새 코드의 신호다.
+    1순위: /api/health 의 git_commit 이 기대 SHA 와 같은지. 이게 가장 확실하다.
+           (--wait <sha> 로 넘긴다. GitHub Actions 에서는 github.sha)
+    2순위: SHA 를 못 받았거나 서버가 git_commit 을 안 주면, 예전처럼
+           stocks_age_min 이 정상 범위인지로 본다. 이미 배포된 경로를 고친
+           배포는 이 방법으로 구분되지 않으니 어디까지나 차선이다.
     """
     import time
+    want = None
+    for a in sys.argv[1:]:
+        if len(a) >= 7 and all(c in "0123456789abcdef" for c in a.lower()):
+            want = a.lower()
+            break
+
     tries = max(1, int(max_min * 2))
     for i in range(1, tries + 1):
-        st, d = get("/api/ops/watchdog", timeout=60)
-        age = (d or {}).get("stocks_age_min")
-        print(f"  시도 {i}/{tries} — HTTP {st}  stocks_age_min={age}")
-        if st == 200 and isinstance(age, (int, float)) and age < 400:
-            print("  새 코드 배포 확인 (경과시간이 정상 범위)")
-            return True
+        st, h = get("/api/health", timeout=60)
+        have = (h or {}).get("git_commit")
+        if want and have:
+            print(f"  시도 {i}/{tries} — HTTP {st}  배포 커밋 {have[:8]} (기대 {want[:8]})")
+            if have.lower().startswith(want[:len(have)]) or want.startswith(have.lower()):
+                print("  새 코드 배포 확인 (커밋 일치)")
+                return True
+        else:
+            _, d = get("/api/ops/watchdog", timeout=60)
+            age = (d or {}).get("stocks_age_min")
+            print(f"  시도 {i}/{tries} — HTTP {st}  git_commit={have}  "
+                  f"stocks_age_min={age}")
+            if st == 200 and isinstance(age, (int, float)) and age < 400:
+                print("  배포 확인 (커밋 정보 없음 — 경과시간으로 판정)")
+                return True
         time.sleep(30)
     print("::error::배포가 시간 안에 반영되지 않았다.")
     return False

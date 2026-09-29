@@ -4610,6 +4610,13 @@ def api_health():
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "scheduler_running": sched_running,
         "scheduler_jobs": job_count,
+        # **지금 도는 코드가 어느 커밋인지.** 이게 없어서 배포 완료를 매번
+        # 다른 방법으로 짐작해야 했다 — 새 엔드포인트의 404→200 이나
+        # 특정 값의 변화 같은 것들. 그런 감지는 '이미 있던 경로를 고친 배포'
+        # 에서는 통하지 않는다. Render 가 RENDER_GIT_COMMIT 을 넣어 준다.
+        "git_commit": (os.environ.get("RENDER_GIT_COMMIT")
+                       or os.environ.get("GIT_COMMIT") or "")[:40] or None,
+        "git_branch": os.environ.get("RENDER_GIT_BRANCH") or None,
     })
 
 
