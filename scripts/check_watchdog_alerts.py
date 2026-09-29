@@ -53,7 +53,8 @@ def boot():
 
     ns = {
         "_check_market_data_health": lambda: dict(HEALTH),
-        "send_telegram": lambda msg: sent.append(msg),
+        # 알림 정책(1~5)은 '켜졌을 때' 를 본다. 기본 꺼짐은 맨 아래 6번이 본다.
+        "_watchdog_notify": lambda msg: sent.append(msg),
         "_refresh_prices_from_naver": lambda: 0,
         "_refresh_flow_batch": lambda top_n=200: {"success": 0},
         "_ops_get": ops_get, "_ops_set": ops_set,
@@ -97,6 +98,28 @@ NOW = _dt.datetime(2026, 9, 16, 16, 30)
 watchdog = boot()
 watchdog()
 assert len(sent) == 3 and '자동복구 실패' in head(sent[2]), [head(x) for x in sent]
+
+# 6. 기본은 꺼짐 — WATCHDOG_TELEGRAM 없으면 텔레그램을 부르지 않고 로그만 남긴다
+import os
+hm = re.search(r'^def _watchdog_telegram_on\(.*?^def _watchdog_notify\(.*?(?=^\S)', SRC, re.S | re.M)
+assert hm, '_watchdog_telegram_on/_watchdog_notify 를 못 찾았다'
+tg, logged = [], []
+
+
+class _L:
+    def warning(self, *a):
+        logged.append(a)
+
+
+hns = {"os": os, "re": re, "log": _L(), "send_telegram": lambda m: tg.append(m)}
+exec(compile(hm.group(0), 'server.py(발췌)', 'exec'), hns)
+os.environ.pop("WATCHDOG_TELEGRAM", None)
+hns["_watchdog_notify"]("🛠 <b>[시스템] 데이터 이상 — 자동복구 실패</b>\n  • x")
+assert tg == [] and logged, '기본값에서 텔레그램이 나갔다'
+os.environ["WATCHDOG_TELEGRAM"] = "1"
+hns["_watchdog_notify"]("켜짐")
+assert tg == ["켜짐"], tg
+os.environ.pop("WATCHDOG_TELEGRAM")
 
 print('보낸 알림:', [head(x).replace('🛠 <b>', '').replace('</b>', '') for x in sent])
 print('통과')

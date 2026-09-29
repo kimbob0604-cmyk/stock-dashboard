@@ -13714,28 +13714,7 @@ def build_us_market_summary() -> dict:
             pass
     summary["sections"].append(dom_section)
 
-    # ── 8. US AI 추천 ──
-    ai_section = {"title": "🤖 US AI 추천", "items": []}
-    p = BASE_DIR / "cache" / "agent_result_us_latest.json"
-    if p.exists():
-        try:
-            agent = json.loads(p.read_text(encoding="utf-8"))
-            news = agent.get("agents", {}).get("news", {}) or {}
-            hot = news.get("hot_sectors") or news.get("hot_themes") or []
-            if hot:
-                ai_section["items"].append(f"  핫 섹터: {', '.join(hot[:5])}")
-            picks = (agent.get("final_picks") or [])[:5]
-            if picks:
-                ai_section["items"].append(f"  추천 {len(picks)}종목:")
-                for pk in picks:
-                    ai_section["items"].append(
-                        f"    {pk.get('name')} ({pk.get('code')}) {pk.get('total_score', 0)}점"
-                    )
-        except Exception:
-            pass
-    if not ai_section["items"]:
-        ai_section["items"].append("  US AI 추천 데이터 없음")
-    summary["sections"].append(ai_section)
+    # US AI 추천 구획은 뺐다(2026-09-29 사용자 요청 — 늘 "데이터 없음" 만 나갔다)
 
     # 캐시 저장
     try:
@@ -14210,6 +14189,22 @@ def _check_market_data_health() -> dict:
     return out
 
 
+def _watchdog_telegram_on() -> bool:
+    """워치독 알림을 텔레그램으로 보낼지. **기본은 끔**(2026-09-29 사용자 요청 — '자동복구
+    실패' 알림을 받지 않는다). 판정·자가복구·상태 저장·로그는 그대로 돈다.
+    다시 켜려면 Render 환경변수 WATCHDOG_TELEGRAM=1."""
+    return os.environ.get("WATCHDOG_TELEGRAM", "0").strip() == "1"
+
+
+def _watchdog_notify(msg: str) -> None:
+    """워치독의 텔레그램 자리. 꺼져 있으면 Render 로그에만 남긴다."""
+    if _watchdog_telegram_on():
+        send_telegram(msg)
+    else:
+        log.warning("[워치독] 텔레그램 알림 꺼짐(WATCHDOG_TELEGRAM) — %s",
+                    re.sub(r"<[^>]+>", "", msg).replace("\n", " / "))
+
+
 def _market_watchdog():
     """주기 워치독 — 비정상 감지 시 자동 재갱신 + 관리자 1회 알림/복구 알림.
     cron: 평일 08:00~20:00 30분 간격."""
@@ -14223,7 +14218,7 @@ def _market_watchdog():
         # 직전에 사고 알림을 보냈다면 복구 알림 1회
         if alerted:
             _ops_set("watchdog_alerted", 0)
-            send_telegram(
+            _watchdog_notify(
                 f"🛠 <b>[시스템] 데이터 복구됨</b>\n"
                 f"KR 종목 {health['stocks_kr']}개 · 수급 {health['flow_rows']}행 정상화"
             )
@@ -14254,7 +14249,7 @@ def _market_watchdog():
         # 이전에 사고 알림을 이미 보냈으면 복구 알림, 아니면 조용히 복구
         if alerted:
             _ops_set("watchdog_alerted", 0)
-            send_telegram(
+            _watchdog_notify(
                 f"🛠 <b>[시스템] 자동 복구 완료</b>\n"
                 f"KR 종목 {after['stocks_kr']}개 · 수급 {after['flow_rows']}행"
             )
@@ -14267,7 +14262,7 @@ def _market_watchdog():
     else:
         _ops_set("watchdog_alerted", 1)
         _ops_set("watchdog_alert_date", today)
-        send_telegram(
+        _watchdog_notify(
             "🛠 <b>[시스템] 데이터 이상 — 자동복구 실패</b>\n"
             + "\n".join(f"  • {i}" for i in after["issues"])
             + "\n<i>Naver 차단/네트워크 의심 — Render Logs 확인</i>"
