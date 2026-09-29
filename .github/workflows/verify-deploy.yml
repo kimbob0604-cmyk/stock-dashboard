@@ -37,12 +37,8 @@ jobs:
       - name: 수급 배치 완료 대기
         run: python3 scripts/verify_deploy.py "$URL" --wait-flow
 
-      - name: data.json 재생성 트리거
-        run: |
-          set -u
-          echo "data.json 수동 재생성 (맥북 cron 을 대신하는 경로)"
-          curl -s -X POST --max-time 180 "$URL/api/ops/data_json/rebuild" | head -c 600
-          echo
+      - name: data.json 서버 생성 대기
+        run: python3 scripts/verify_deploy.py "$URL" --wait-datajson
 
       - name: 실측
         run: python3 scripts/verify_deploy.py "$URL"

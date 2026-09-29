@@ -7685,6 +7685,10 @@ def refresh_us_universe_if_stale(max_days: int = 7):
 
 _DATA_JSON_SPARK_DAYS = 20
 
+# 빌드를 직렬화한다. 부팅 스레드와 수동 재생성 요청이 겹치면 같은 .tmp 를
+# 두 스레드가 쓰고 각자 replace 해서 어느 쪽 결과가 남는지 알 수 없게 된다.
+_DATA_JSON_LOCK = threading.Lock()
+
 
 def _spark_from_ohlcv(codes: list[str], days: int = _DATA_JSON_SPARK_DAYS) -> dict:
     """ohlcv 테이블에서 종목별 최근 종가를 첫날=100 으로 정규화."""
@@ -7858,6 +7862,15 @@ def _build_data_json(write: bool = True) -> dict:
     실패해도 **기존 파일을 망가뜨리지 않는다**. 테마를 하나도 못 만들면
     쓰지 않고 그대로 둔다 — 낡은 데이터가 빈 데이터보다 낫다.
     """
+    if not _DATA_JSON_LOCK.acquire(timeout=120):
+        return {"ok": False, "error": "다른 생성이 진행 중 (120초 대기 초과)"}
+    try:
+        return _build_data_json_inner(write)
+    finally:
+        _DATA_JSON_LOCK.release()
+
+
+def _build_data_json_inner(write: bool = True) -> dict:
     t0 = time.time()
     mapping_file = BASE_DIR / "themes_mapping.json"
     if not mapping_file.exists():

@@ -107,6 +107,41 @@ def wait_for_flow(target=50, max_min=8):
     return last
 
 
+def wait_for_data_json(max_min=10):
+    """data.json 이 서버 생성본이 될 때까지 기다린다.
+
+    배포 직후엔 컨테이너가 막 떠서 유니버스가 아직 안 채워졌고, 빌더는
+    (일부러) 그 상태에서 만들기를 거부한다. 한 번 찔러 보고 끝내면 늘
+    git 에 있는 낡은 판을 재게 된다 — 측정이 이른 것이지 고장이 아니다.
+    주기적으로 재생성을 트리거하면서 될 때까지 본다.
+    """
+    import time
+    import urllib.request
+    for i in range(1, int(max_min * 2) + 1):
+        st, d = get("/api/ops/data_json/status", timeout=60)
+        src = (d or {}).get("source")
+        themes = (d or {}).get("themes")
+        print(f"  {i:2d}) source={src}  테마={themes}  age={(d or {}).get('age_min')}")
+        if src == "server" and (themes or 0) >= 20:
+            print("  서버 생성본 확인")
+            return True
+        try:                       # 재생성 시도 (아직 이르면 서버가 스스로 보류한다)
+            req = urllib.request.Request(BASE + "/api/ops/data_json/rebuild", method="POST")
+            with urllib.request.urlopen(req, timeout=180) as r:
+                body = r.read().decode("utf-8")[:200]
+            print(f"      rebuild → {body}")
+        except Exception as e:
+            print(f"      rebuild → {type(e).__name__}: {str(e)[:120]}")
+        time.sleep(30)
+    print("  시간 안에 서버 생성본이 되지 않았다")
+    return False
+
+
+if "--wait-datajson" in sys.argv:
+    head("0. data.json 서버 생성 대기")
+    sys.exit(0 if wait_for_data_json() else 1)
+
+
 if "--wait-flow" in sys.argv:
     head("0. 수급 배치 완료 대기")
     wait_for_flow()
