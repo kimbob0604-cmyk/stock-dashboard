@@ -7040,6 +7040,11 @@ def _startup():
     threading.Thread(target=_startup_ohlcv_fill,
                      daemon=True, name="ohlcv-startup").start()
 
+    # Render 는 영속 디스크가 없어 재시작하면 data.json 이 git 에 있는 판으로
+    # 되돌아간다. 부팅 직후 한 번 덮어써야 그날 값이 올라온다.
+    threading.Thread(target=_startup_data_json,
+                     daemon=True, name="datajson-startup").start()
+
     # APScheduler: 장중 자동 갱신 (Render에선 _scheduled_update 등록 안 함)
     if _SCHEDULER_OK:
         def _scheduled_update():
@@ -7179,6 +7184,22 @@ def _startup():
                            day_of_week="mon-fri", hour="16-17", minute="*/5",
                            id="price_sync_afterhours", max_instances=1)
         log.info("[가격 동기화] 장중 30분 + 장마감 + 시간외 스케줄 등록")
+
+        # ── data.json 서버 생성 ──
+        # 예전엔 맥북 cron 이 18:00 에 만들어 git push 했다. 그 cron 이 멈추면
+        # 아무 신호 없이 파일이 굳는다(2026-09-15 에 실제로 멈췄다). 서버가 직접 만든다.
+        #
+        # 두 번 도는 이유:
+        #   15:45 — 15:35 가격 sync 직후. 15:50 마감 시황이 오늘 값을 쓰게 한다.
+        #           (맥북 18:00 체제에서는 시황이 늘 전날 data.json 을 봤다)
+        #   16:20 — 16:10 일봉 채움 직후. 스파크라인에 오늘 봉이 들어간다.
+        _scheduler.add_job(_refresh_data_json_job, "cron",
+                           day_of_week="mon-fri", hour=15, minute=45,
+                           id="data_json_close", max_instances=1)
+        _scheduler.add_job(_refresh_data_json_job, "cron",
+                           day_of_week="mon-fri", hour=16, minute=20,
+                           id="data_json_evening", max_instances=1)
+        log.info("[data.json] 15:45 · 16:20 생성 스케줄 등록")
 
         # ── 일봉(ohlcv) 자동 채움 ──
         # ohlcv 는 신고가·52주 밴드·상관관계 등 server.py 읽기 15곳의 입력인데
@@ -7630,6 +7651,321 @@ def refresh_us_universe_if_stale(max_days: int = 7):
     except Exception as exc:
         log.warning("[US Universe] 재수집 실패: %s", exc)
         return False
+
+
+# ── data.json 서버 생성 ────────────────────────────────────────────────────
+# 여태 data.json 은 맥북 cron(scripts/daily_macbook_cron.sh)이 매일 18:00 에
+# 만들어 git push 하면 Render 가 자동 배포로 받아 가는 구조였다. 그 cron 이
+# 멈추면 아무도 모른 채 파일이 굳는다 — 실제로 2026-09-15 에 멈췄고 2주간
+# 아무 신호가 없었다.
+#
+# 맥북 파이프라인(data_fetcher.py)을 그대로 옮기지는 않는다. 그쪽은 종목마다
+# pykrx 를 한 번씩 부르는데, pykrx 1.2.x 는 KRX 계정 로그인을 요구하고
+# (website/comm/auth.py) 수백 회 호출이라 Render 무료 플랜에서 감당이 안 된다.
+#
+# 대신 **서버가 이미 쓰고 있는 소스**로 같은 스키마를 만든다. 전부 지금
+# 돌아가는 경로다: naver_universe(등락률·거래대금), ohlcv 테이블(스파크라인),
+# polling 지수 API, yfinance(해외지수).
+#
+# 영속성: Render 는 영속 디스크가 없어 재시작하면 런타임에 쓴 data.json 이
+# 사라지고 git 에 있는 판으로 되돌아간다. 그래서 부팅 직후에 한 번 만들고
+# 이후 스케줄로 갱신한다. git push 는 하지 않는다.
+
+_DATA_JSON_SPARK_DAYS = 20
+
+
+def _spark_from_ohlcv(codes: list[str], days: int = _DATA_JSON_SPARK_DAYS) -> dict:
+    """ohlcv 테이블에서 종목별 최근 종가를 첫날=100 으로 정규화."""
+    out: dict = {}
+    if not (_SQLITE_OK and USE_SQLITE) or not codes:
+        return out
+    try:
+        with _get_db() as conn:
+            for code in codes:
+                rows = conn.execute(
+                    "SELECT close FROM ohlcv WHERE code=? AND close > 0 "
+                    "ORDER BY date DESC LIMIT ?", (code, days)).fetchall()
+                if len(rows) < 2:
+                    continue
+                closes = [float(r["close"]) for r in rows][::-1]  # 오래된 → 최신
+                base = closes[0]
+                if base <= 0:
+                    continue
+                out[code] = [round(c / base * 100, 2) for c in closes]
+    except Exception as exc:
+        _note_collect_error("data_json", f"스파크라인 조회 실패: {exc}")
+    return out
+
+
+def _rank_history_push(themes_out: list) -> list:
+    """현재 순위를 히스토리에 적재하고 rank_change 를 붙인다.
+    data_fetcher.save_ranking_history / apply_rank_changes 와 같은 규칙·같은 파일."""
+    rf = BASE_DIR / "cache" / "ranking_history.json"
+    now_str = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    current = {t["name"]: i + 1 for i, t in enumerate(
+        sorted(themes_out, key=lambda x: abs(x["weighted_avg_pct"]), reverse=True))}
+
+    history: list = []
+    if rf.exists():
+        try:
+            loaded = json.loads(rf.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                history = loaded
+            elif isinstance(loaded, dict) and "current" in loaded:
+                history = [{"timestamp": now_str, "ranking": loaded["current"]}]
+        except Exception:
+            pass
+    history.append({"timestamp": now_str, "ranking": current})
+    history = history[-288:]
+    try:
+        rf.parent.mkdir(exist_ok=True)
+        rf.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    prev = history[-2]["ranking"] if len(history) >= 2 else {}
+    for t in themes_out:
+        c, p = current.get(t["name"]), prev.get(t["name"])
+        t["rank_change"] = (p - c) if (p and c) else 0
+    return themes_out
+
+
+def _build_market_overview() -> dict:
+    """해외 지수·환율. data_fetcher 의 fetch_market_overview 와 같은 4개 키."""
+    out: dict = {}
+    try:
+        rows, errs = _fetch_us_indices_live(["S&P 500", "NASDAQ", "나스닥100 선물"])
+        keymap = {"S&P 500": "sp500", "NASDAQ": "nasdaq", "나스닥100 선물": "nasdaq_futures"}
+        for r in rows:
+            name, value, chg = r[0], r[1], r[2]
+            if name in keymap and value:
+                out[keymap[name]] = {"value": round(float(value), 2),
+                                     "change_pct": round(float(chg), 2)}
+        for e in errs or []:
+            _note_collect_error("data_json", f"해외지수: {e}")
+    except Exception as exc:
+        _note_collect_error("data_json", f"해외지수 실패: {exc}")
+
+    # USD/KRW 는 US_INDEX_TICKERS 에 없어 따로 받는다.
+    try:
+        import yfinance as _yf
+        h = _yf.Ticker("KRW=X").history(period="5d", interval="1d", auto_adjust=False)
+        if h is not None and not h.empty:
+            cl = h["Close"].dropna().tolist()
+            if cl:
+                cur = float(cl[-1])
+                prv = float(cl[-2]) if len(cl) >= 2 else 0.0
+                out["usd_krw"] = {
+                    "value": round(cur, 2),
+                    "change_pct": round((cur / prv - 1) * 100, 2) if prv else 0.0,
+                }
+    except Exception as exc:
+        _note_collect_error("data_json", f"USD/KRW 실패: {exc}")
+    return out
+
+
+def _build_new_high_sectors(mapping: list, themes_out: list) -> list:
+    """신고가 종목이 5개 이상인 테마. 서버의 신고가 캐시를 재사용한다.
+    캐시가 없으면 빈 리스트 — 없는 것을 지어내지 않는다."""
+    cf = BASE_DIR / "cache" / f"new_highs_kr_{_get_trading_date()}.json"
+    data = _read_fresh_json(cf, 1440)
+    items = (data or {}).get("items") or []
+    if not items:
+        return []
+    hit = {str(i.get("code")) for i in items if i.get("code")}
+    out = []
+    for t in mapping:
+        codes = {(s["code"] if isinstance(s, dict) else s) for s in t.get("stocks", [])}
+        n = len(codes & hit)
+        if n >= 5:
+            out.append({"id": t.get("id"), "name": t.get("name"), "count": n})
+    return sorted(out, key=lambda x: -x["count"])
+
+
+def _universe_live_count(umap: dict | None = None) -> int:
+    """유니버스에서 **오늘 시세가 들어온** 종목 수.
+
+    _load_naver_universe() 는 스크랩 캐시가 없으면 커밋된 시드
+    (data/naver_universe_seed.json)로 폴백한다. 시드에는 name·sectors·
+    market_cap 만 있고 change_pct·volume_mn 이 아예 없다 —
+    '종목이 있다' 와 '시세가 있다' 는 다른 얘기다.
+    이걸 구분하지 않으면 부팅 직후 시드를 보고 data.json 을 만들다가
+    거래대금 0 때문에 테마가 전부 걸러져 0개가 나온다.
+    """
+    if umap is None:
+        umap = (_load_naver_universe() or {}).get("stocks") or {}
+    return sum(1 for v in umap.values() if float(v.get("volume_mn") or 0) > 0)
+
+
+def _build_data_json(write: bool = True) -> dict:
+    """data.json 을 서버에서 만든다. 맥북 cron + git push 를 대신한다.
+
+    실패해도 **기존 파일을 망가뜨리지 않는다**. 테마를 하나도 못 만들면
+    쓰지 않고 그대로 둔다 — 낡은 데이터가 빈 데이터보다 낫다.
+    """
+    t0 = time.time()
+    mapping_file = BASE_DIR / "themes_mapping.json"
+    if not mapping_file.exists():
+        _note_collect_error("data_json", "themes_mapping.json 없음 — 생성 불가")
+        return {"ok": False, "error": "themes_mapping.json 없음"}
+    try:
+        mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _note_collect_error("data_json", f"themes_mapping.json 파싱 실패: {exc}")
+        return {"ok": False, "error": f"매핑 파싱 실패: {exc}"}
+
+    uni = _load_naver_universe()
+    umap = (uni or {}).get("stocks") or {}
+    if not umap:
+        _note_collect_error("data_json", "naver_universe 비어 있음 — 가격 sync 전이다")
+        return {"ok": False, "error": "naver_universe 없음"}
+
+    live = _universe_live_count(umap)
+    if live < 100:
+        # 시드만 올라온 상태다. 여기서 만들면 거래대금 0 때문에 테마가 전부
+        # 걸러져 빈 파일이 된다. 만들지 않고 물러난다.
+        _note_collect_error(
+            "data_json",
+            f"유니버스에 시세가 없다 (시세 있는 종목 {live}개) — 가격 sync 전이다. 생성 보류")
+        return {"ok": False, "error": f"시세 없는 유니버스 (live={live})",
+                "live_stocks": live}
+
+    def _code(it):
+        return it["code"] if isinstance(it, dict) else it
+
+    all_codes = list({_code(s) for t in mapping for s in t.get("stocks", [])})
+    sparks = _spark_from_ohlcv(all_codes)
+
+    themes_out: list = []
+    for theme in mapping:
+        stocks_out = []
+        for item in theme.get("stocks", []):
+            code = _code(item)
+            u = umap.get(code) or {}
+            name = (item.get("name") if isinstance(item, dict) else None) \
+                or u.get("name") or _get_stock_name(code) or code
+            stocks_out.append({
+                "code": code,
+                "name": name,
+                "change_pct": round(float(u.get("change_pct") or 0.0), 2),
+                "volume_mn": int(float(u.get("volume_mn") or 0)),
+                "sparkline": sparks.get(code, []),
+            })
+        active = [s for s in stocks_out if s["volume_mn"] > 0]
+        if not active:
+            continue
+        themes_out.append({
+            "id": theme.get("id"),
+            "name": theme.get("name"),
+            "weighted_avg_pct": round(_weighted_avg_pct(stocks_out), 2),
+            "stock_count": len(theme.get("stocks", [])),
+            "active_count": len(active),
+            "stocks": stocks_out,
+        })
+
+    if not themes_out:
+        _note_collect_error("data_json", "테마 0개 — 기존 data.json 을 그대로 둔다")
+        return {"ok": False, "error": "테마 0개"}
+
+    _rank_history_push(themes_out)
+    idx = _fetch_kr_indices_live() or {}
+
+    output = {
+        "updated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "actual_date": _get_trading_date(),
+        "kospi": idx.get("kospi", {"value": 0.0, "change_pct": 0.0}),
+        "kosdaq": idx.get("kosdaq", {"value": 0.0, "change_pct": 0.0}),
+        "themes": themes_out,
+        "new_high_sectors": _build_new_high_sectors(mapping, themes_out),
+        "market_overview": _build_market_overview(),
+        "source": "server",     # 맥북 cron 산출물과 구분된다
+    }
+
+    if write:
+        try:
+            tmp = DATA_JSON.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(output, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            tmp.replace(DATA_JSON)   # 원자적 교체 — 반쯤 쓰인 파일을 남기지 않는다
+        except Exception as exc:
+            _note_collect_error("data_json", f"파일 쓰기 실패: {exc}")
+            return {"ok": False, "error": f"쓰기 실패: {exc}"}
+
+    n_spark = sum(1 for t in themes_out for s in t["stocks"] if s["sparkline"])
+    n_stock = sum(len(t["stocks"]) for t in themes_out)
+    log.info("[data.json] 생성 완료 — 테마 %d개, 종목 %d개, 스파크라인 %d개, %.1fs",
+             len(themes_out), n_stock, n_spark, time.time() - t0)
+    return {
+        "ok": True, "themes": len(themes_out), "stocks": n_stock,
+        "sparklines": n_spark, "actual_date": output["actual_date"],
+        "market_overview_keys": sorted(output["market_overview"]),
+        "new_high_sectors": len(output["new_high_sectors"]),
+        "elapsed_sec": round(time.time() - t0, 1),
+    }
+
+
+def _weighted_avg_pct(stocks_list: list) -> float:
+    """거래대금 가중 평균 등락률. data_fetcher.weighted_avg 와 같은 규칙."""
+    total = sum(s.get("volume_mn") or 0 for s in stocks_list)
+    if total <= 0:
+        return 0.0
+    return sum((s.get("change_pct") or 0.0) * (s.get("volume_mn") or 0)
+               for s in stocks_list) / total
+
+
+def _data_json_stale_min() -> float | None:
+    """data.json 의 updated_at 경과(분). 못 읽으면 None."""
+    if not DATA_JSON.exists():
+        return None
+    try:
+        d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+        upd = datetime.strptime(d.get("updated_at", ""), "%Y-%m-%d %H:%M:%S")
+        return (now_kst().replace(tzinfo=None) - upd).total_seconds() / 60
+    except Exception:
+        return None
+
+
+def _refresh_data_json_job():
+    """스케줄 진입점. 장 마감 뒤 하루 한 번 + 부팅 직후."""
+    res = _build_data_json()
+    if not res.get("ok"):
+        log.warning("[data.json] 생성 실패: %s", res.get("error"))
+    return res
+
+
+def _startup_data_json():
+    """부팅 직후 1회. Render 는 재시작하면 git 에 있는 낡은 판으로 되돌아가므로
+    여기서 한 번 덮어써야 그날 값이 올라온다.
+
+    **시드가 아니라 실제 시세를 기다린다.** _load_naver_universe() 는 캐시가
+    없으면 커밋된 시드로 폴백하는데 거기엔 거래대금이 없다. 종목 수만 보고
+    출발하면 테마가 전부 걸러져 0개가 나오고, 그대로 끝나 버린다.
+    """
+    try:
+        for i in range(60):                      # 최대 10분
+            if _universe_live_count() >= 100:
+                break
+            if i == 12:
+                # 2분이 지나도 시세가 없으면 가격 sync 를 직접 한 번 돌린다.
+                # 부팅 시각이 장중 sync 사이 구간이면 다음 cron 까지 30분을
+                # 기다리게 되는데, 그동안 화면은 낡은 data.json 을 보여 준다.
+                log.info("[data.json] 시세 대기 2분 경과 — 가격 sync 를 직접 부른다")
+                try:
+                    _refresh_prices_from_naver()
+                except Exception as exc:
+                    log.warning("[data.json] 가격 sync 실패: %s", exc)
+            time.sleep(10)
+        else:
+            _note_collect_error("data_json", "부팅 후 10분간 시세가 안 들어와 생성 보류")
+            return
+
+        age = _data_json_stale_min()
+        if age is not None and age < 180:
+            log.info("[data.json] 부팅 시점에 이미 신선함 (%.0f분 전) — 생성 생략", age)
+            return
+        _refresh_data_json_job()
+    except Exception as exc:
+        log.warning("[data.json] 부팅 생성 실패: %s", exc)
 
 
 def _refresh_prices_from_naver():
@@ -17893,6 +18229,41 @@ def api_ops_cron_trigger(job_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/ops/data_json/rebuild", methods=["POST"])
+def api_ops_data_json_rebuild():
+    """data.json 수동 재생성. 맥북 cron 을 대신하는 경로를 손으로 돌려 본다.
+
+    동기 실행이라 결과(테마 수·스파크라인 수)를 그대로 돌려준다.
+    실패해도 기존 파일은 건드리지 않는다.
+    """
+    res = _build_data_json()
+    return jsonify(res), (200 if res.get("ok") else 503)
+
+
+@app.route("/api/ops/data_json/status", methods=["GET"])
+def api_ops_data_json_status():
+    """data.json 이 언제 것이고 누가 만들었는지."""
+    out = {"exists": DATA_JSON.exists(), "age_min": _data_json_stale_min()}
+    if DATA_JSON.exists():
+        try:
+            d = json.loads(DATA_JSON.read_text(encoding="utf-8"))
+            out.update({
+                "updated_at": d.get("updated_at"),
+                "actual_date": d.get("actual_date"),
+                # source=server 면 이 서버가 만든 것, 없으면 맥북 cron 이 git 으로
+                # 넣어 둔 판이다. 구분이 돼야 'cron 이 멈췄다' 를 알 수 있다.
+                "source": d.get("source") or "macbook_cron_or_git",
+                "themes": len(d.get("themes") or []),
+                "market_overview_keys": sorted(d.get("market_overview") or {}),
+                "new_high_sectors": len(d.get("new_high_sectors") or []),
+            })
+        except Exception as exc:
+            out["error"] = _mask_secrets(str(exc))[:200]
+    age = out.get("age_min")
+    out["stale"] = (age is None) or (age > 24 * 60)
+    return jsonify(out)
+
+
 @app.route("/api/ops/diag/collect_errors", methods=["GET"])
 def api_ops_diag_collect_errors():
     """최근 수집 실패 목록. Render 로그를 볼 수 없을 때의 유일한 창구다.
@@ -17971,6 +18342,19 @@ def api_ops_diag_sources():
     sec_cache = BASE_DIR / "cache" / "sectors_naver_landing.json"
     _put("sectors", "업종", sec_cache.exists(),
          "캐시 있음" if sec_cache.exists() else "캐시 없음")
+
+    # data.json — 예전엔 맥북 cron 이 git push 로 넣었다. 지금은 서버가 만든다.
+    dj_age = _data_json_stale_min()
+    dj_src = "?"
+    try:
+        if DATA_JSON.exists():
+            dj_src = (json.loads(DATA_JSON.read_text(encoding="utf-8"))
+                      .get("source") or "git(맥북 cron)")
+    except Exception:
+        pass
+    _put("data_json", "data.json",
+         dj_age is not None and dj_age <= 24 * 60,
+         f"{'%.0f분 전' % dj_age if dj_age is not None else '읽기 실패'} · 출처 {dj_src}")
 
     recent = list(_COLLECT_ERRORS)[-10:]
     out["recent_errors"] = list(reversed(recent))
