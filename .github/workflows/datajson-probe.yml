@@ -1,0 +1,23 @@
+name: data.json 상태 즉시 확인
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+    steps:
+      - name: 상태
+        run: |
+          set -u
+          echo "=== /api/ops/data_json/status ==="
+          curl -s --max-time 60 "$URL/api/ops/data_json/status" | python3 -m json.tool
+          echo "=== rebuild 한 번 ==="
+          curl -s -X POST --max-time 240 "$URL/api/ops/data_json/rebuild" | python3 -m json.tool
+          echo "=== collect_errors (data_json) ==="
+          curl -s --max-time 60 "$URL/api/ops/diag/collect_errors?source=data_json&limit=10" | python3 -m json.tool
+          echo "=== diag/sources ==="
+          curl -s --max-time 60 "$URL/api/ops/diag/sources" | python3 -m json.tool
