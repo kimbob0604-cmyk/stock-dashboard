@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      URL: https://stock-dashboard.onrender.com
+      URL: https://stock-dashboard-kc23.onrender.com
     steps:
       - uses: actions/checkout@v4
 

@@ -35,7 +35,7 @@ jobs:
     steps:
       - name: 깨우고 보내고 지켜본다
         env:
-          URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard.onrender.com' }}
+          URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
           FORCE: ${{ inputs.force }}
         run: |
           set -u

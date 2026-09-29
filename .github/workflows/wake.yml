@@ -41,7 +41,7 @@ jobs:
           # Actions → Variables 에 DASHBOARD_URL). 없으면 Render 기본 규칙을
           # 따라가 보되, 그게 틀리면 아래에서 빨갛게 실패한다 — 조용히
           # 엉뚱한 곳을 두드리느니 눈에 띄는 편이 낫다.
-          URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard.onrender.com' }}
+          URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
         run: |
           set -u
           echo "대상 $URL"
