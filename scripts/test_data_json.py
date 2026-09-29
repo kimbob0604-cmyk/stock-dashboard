@@ -132,8 +132,22 @@ try:
             bad.append((t["name"], t["weighted_avg_pct"], min(cs), max(cs)))
     check("가중평균이 구성종목 범위 안", not bad, str(bad[:2]))
 
-    check("market_overview 비어있지 않음", bool(out["market_overview"]),
-          "yfinance 실패 시 빈 dict")
+    check("market_overview 4개 키 전부",
+          set(out["market_overview"]) >= {"sp500", "nasdaq", "nasdaq_futures", "usd_krw"},
+          f"받은 키 {sorted(out['market_overview'])}")
+
+    head("4-b. yfinance 동시 import 경합")
+    # 스레드가 동시에 처음 import 하면 반쯤 만들어진 모듈이 온다.
+    # 2026-09-29 배포 직후 실제로 그래서 market_overview 가 통째로 비었다.
+    import threading as _th
+    got = []
+    def _grab():
+        m = server._yf()
+        got.append(m is not None and hasattr(m, "Ticker"))
+    ths = [_th.Thread(target=_grab) for _ in range(8)]
+    for t in ths: t.start()
+    for t in ths: t.join()
+    check("8스레드 동시 요청에서 전부 온전한 모듈", all(got), f"{sum(got)}/8")
 
     # 스파크라인은 첫 값이 100 이어야 한다(정규화 규칙)
     sp = [s["sparkline"] for t in out["themes"] for s in t["stocks"] if s["sparkline"]]

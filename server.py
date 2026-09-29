@@ -7052,6 +7052,11 @@ def _startup():
     threading.Thread(target=_startup_data_json,
                      daemon=True, name="datajson-startup").start()
 
+    # yfinance 를 미리 한 번 제대로 올려 둔다. 여러 스레드가 동시에 처음
+    # import 하면 반쯤 만들어진 모듈이 와서 해외지수가 통째로 빈다.
+    threading.Thread(target=_warm_yfinance,
+                     daemon=True, name="yfinance-warm").start()
+
     # APScheduler: 장중 자동 갱신 (Render에선 _scheduled_update 등록 안 함)
     if _SCHEDULER_OK:
         def _scheduled_update():
@@ -7737,6 +7742,47 @@ def _rank_history_push(themes_out: list) -> list:
     return themes_out
 
 
+_YF_LOCK = threading.Lock()
+
+
+def _yf(retries: int = 3, delay: float = 1.5):
+    """완전히 초기화된 yfinance 모듈을 돌려준다. 못 얻으면 None.
+
+    스레드 여러 개가 같은 모듈을 **처음** import 하는 순간이 겹치면 파이썬이
+    반쯤 만들어진 모듈 객체를 돌려준다:
+      partially initialized module 'yfinance' has no attribute 'Ticker'
+      (most likely due to a circular import)
+    2026-09-29 배포 직후 실제로 이게 나서 data.json 의 market_overview 가
+    통째로 비었다 — 부팅 스레드들이 yfinance 를 물어오는 동안 재생성 요청이
+    같은 import 에 올라탔다. 예외가 아니라 값이 빈 것이라 조용히 지나갔다.
+
+    lock 으로 첫 import 를 직렬화하고, 그래도 반쯤 된 객체가 오면 잠깐 뒤
+    다시 본다. 한 번 제대로 올라오면 이후 import 는 캐시 조회라 공짜다.
+    """
+    for i in range(retries):
+        with _YF_LOCK:
+            try:
+                import yfinance as yf
+                if hasattr(yf, "Ticker"):
+                    return yf
+            except Exception as exc:
+                if i == retries - 1:
+                    _note_collect_error("yfinance", f"import 실패: {exc}")
+                    return None
+        time.sleep(delay)
+    _note_collect_error("yfinance", "반쯤 초기화된 모듈만 반복 관측 — 포기")
+    return None
+
+
+def _warm_yfinance():
+    """부팅 직후 yfinance 를 한 번 제대로 올려 둔다.
+    이후 곳곳의 `import yfinance` 는 캐시 조회가 되어 경합이 사라진다."""
+    try:
+        _yf(retries=5, delay=2.0)
+    except Exception:
+        pass
+
+
 def _build_market_overview() -> dict:
     """해외 지수·환율. data_fetcher 의 fetch_market_overview 와 같은 4개 키."""
     out: dict = {}
@@ -7755,8 +7801,10 @@ def _build_market_overview() -> dict:
 
     # USD/KRW 는 US_INDEX_TICKERS 에 없어 따로 받는다.
     try:
-        import yfinance as _yf
-        h = _yf.Ticker("KRW=X").history(period="5d", interval="1d", auto_adjust=False)
+        _m = _yf()
+        if _m is None:
+            raise RuntimeError("yfinance 사용 불가")
+        h = _m.Ticker("KRW=X").history(period="5d", interval="1d", auto_adjust=False)
         if h is not None and not h.empty:
             cl = h["Close"].dropna().tolist()
             if cl:
@@ -13375,16 +13423,17 @@ US_INDEX_TICKERS = {
 def _fetch_us_indices_live(names) -> tuple[list, list]:
     """[(이름, 값, 등락률%, 'MM/DD', 장중여부)], [실패 사유]"""
     rows, errors = [], []
-    try:
-        import yfinance as _yf
-    except Exception:
-        return rows, ["yfinance 미설치"]
+    # 그냥 import 하면 다른 스레드의 첫 import 와 겹쳤을 때 반쯤 만들어진
+    # 모듈이 와서 Ticker 접근이 AttributeError 로 죽는다. _yf() 가 그걸 막는다.
+    _yf_mod = _yf()
+    if _yf_mod is None:
+        return rows, ["yfinance 사용 불가"]
     from zoneinfo import ZoneInfo
     ny_now = datetime.now(ZoneInfo("America/New_York"))
     for name in names:
         sym = US_INDEX_TICKERS[name]
         try:
-            t = _yf.Ticker(sym)
+            t = _yf_mod.Ticker(sym)
             h = t.history(period="10d", interval="1d", auto_adjust=False)
             # 야후가 **마지막 일봉의 종가를 비워 두는** 날이 있다 — 2026-09-23 19:22
             # KST 러너 실측에서 ^GSPC·^IXIC 의 9/22 봉이 close=NaN 이었다(장 마감
