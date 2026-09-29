@@ -157,6 +157,29 @@ try:
     else:
         print("  (스파크라인 없음 — 러너에 ohlcv DB 가 없어서다. Render 에는 22만행 있다)")
 
+    head("4-c. 열화된 파일이 멀쩡한 파일을 덮지 않는가")
+    # 부팅 직후 부분 동기화 상태를 흉내 낸다. 매핑 종목의 시세를 대부분 지우면
+    # 테마가 줄어드는데, 그걸 그대로 쓰면 26개짜리가 13개짜리로 덮인다
+    # (2026-09-29 배포 직후 실제로 그랬다).
+    with open(os.path.join(ROOT, "themes_mapping.json"), encoding="utf-8") as _f:
+        _mapping = json.load(_f)
+    _wanted = {(s2["code"] if isinstance(s2, dict) else s2)
+               for t in _mapping for s2 in t.get("stocks", [])}
+    _u = server._load_naver_universe()["stocks"]
+    _mapcodes = [c for c in _u if c in _wanted]
+    _bak = {c: _u[c].get("volume_mn") for c in _mapcodes}
+    try:
+        for c in _mapcodes[: int(len(_mapcodes) * 0.7)]:
+            _u[c]["volume_mn"] = 0
+        r3 = server._build_data_json(write=True)
+        check("시세 커버리지 낮으면 생성 보류", r3.get("ok") is False, str(r3)[:140])
+        cur = json.loads(server.DATA_JSON.read_text(encoding="utf-8"))
+        check("기존 테마 수 유지", len(cur["themes"]) == len(out["themes"]),
+              f"{len(cur['themes'])} vs {len(out['themes'])}")
+    finally:
+        for c, v in _bak.items():
+            _u[c]["volume_mn"] = v
+
     head("5. 실패해도 기존 파일을 덮지 않는가")
     before = server.DATA_JSON.read_text(encoding="utf-8")
     mp = os.path.join(ROOT, "themes_mapping.json")
