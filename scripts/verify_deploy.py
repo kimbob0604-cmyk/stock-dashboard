@@ -172,6 +172,30 @@ if isinstance(d, dict):
     check("KR 종목 1000개 이상", (d.get("stocks_kr") or 0) >= 1000, str(d.get("stocks_kr")))
     check("수급 50행 이상", (d.get("flow_rows") or 0) >= 50, str(d.get("flow_rows")))
 
+head("5-b. data.json — 서버가 만들고 있나")
+st, d = get("/api/ops/data_json/status")
+print(f"  HTTP {st}")
+if isinstance(d, dict):
+    print(f"  updated_at={d.get('updated_at')}  actual_date={d.get('actual_date')}")
+    print(f"  source={d.get('source')}  테마={d.get('themes')}  "
+          f"age={d.get('age_min')}분  stale={d.get('stale')}")
+    print(f"  market_overview 키: {d.get('market_overview_keys')}")
+    check("data.json 이 서버 생성본", d.get("source") == "server", str(d.get("source")))
+    check("24시간 이내", d.get("stale") is False, f"{d.get('age_min')}분 전")
+    check("테마 10개 이상", (d.get("themes") or 0) >= 10, str(d.get("themes")))
+
+head("5-b. data.json — 서버가 만들고 있나")
+st, d = get("/api/ops/data_json/status")
+print(f"  HTTP {st}")
+if isinstance(d, dict):
+    print(f"  updated_at={d.get('updated_at')}  actual_date={d.get('actual_date')}")
+    print(f"  source={d.get('source')}  테마={d.get('themes')}  "
+          f"age={d.get('age_min')}분  stale={d.get('stale')}")
+    print(f"  market_overview 키: {d.get('market_overview_keys')}")
+    check("data.json 이 서버 생성본", d.get("source") == "server", str(d.get("source")))
+    check("24시간 이내", d.get("stale") is False, f"{d.get('age_min')}분 전")
+    check("테마 10개 이상", (d.get("themes") or 0) >= 10, str(d.get("themes")))
+
 head("6. /api/ops/diag/collect_errors — 최근 수집 실패")
 st, d = get("/api/ops/diag/collect_errors?limit=10")
 print(f"  HTTP {st}")
