@@ -7889,6 +7889,24 @@ def _build_data_json(write: bool = True) -> dict:
         return it["code"] if isinstance(it, dict) else it
 
     all_codes = list({_code(s) for t in mapping for s in t.get("stocks", [])})
+
+    # **전체 유니버스가 아니라 이 매핑의 종목에 시세가 있는지**를 본다.
+    # 부팅 직후엔 가격 sync 가 4063종목을 배치로 훑는 중이라 일부만 채워진다.
+    # 그 상태로 만들면 거래대금 0인 테마가 통째로 걸러져 26개가 13개가 된다 —
+    # 빈 파일은 아니지만 멀쩡한 파일을 열화된 것으로 덮는 셈이다.
+    # 2026-09-29 배포 직후 실제로 그렇게 나왔다.
+    mapped_live = sum(1 for c in all_codes
+                      if float((umap.get(c) or {}).get("volume_mn") or 0) > 0)
+    need = max(1, int(len(all_codes) * 0.6))
+    if mapped_live < need:
+        _note_collect_error(
+            "data_json",
+            f"매핑 종목 시세 부족 ({mapped_live}/{len(all_codes)}, 최소 {need}) "
+            f"— 가격 sync 진행 중으로 보인다. 생성 보류")
+        return {"ok": False,
+                "error": f"매핑 종목 시세 부족 ({mapped_live}/{len(all_codes)})",
+                "mapped_live": mapped_live, "mapped_total": len(all_codes)}
+
     sparks = _spark_from_ohlcv(all_codes)
 
     themes_out: list = []
@@ -7921,6 +7939,26 @@ def _build_data_json(write: bool = True) -> dict:
     if not themes_out:
         _note_collect_error("data_json", "테마 0개 — 기존 data.json 을 그대로 둔다")
         return {"ok": False, "error": "테마 0개"}
+
+    # 마지막 안전망 — **멀쩡한 파일을 열화된 것으로 덮지 않는다.**
+    # 위 시세 커버리지 검사를 빠져나온 경우에도, 기존 파일보다 테마가 크게
+    # 줄었다면 뭔가 덜 채워진 것이다. 기존이 하루 넘게 낡았다면 그때는
+    # 적은 테마라도 오늘 값이 낫다.
+    if write:
+        try:
+            prev = json.loads(DATA_JSON.read_text(encoding="utf-8")) if DATA_JSON.exists() else {}
+            prev_n = len(prev.get("themes") or [])
+            age = _data_json_stale_min()
+            if prev_n and len(themes_out) < prev_n * 0.7 and (age is not None and age < 24 * 60):
+                _note_collect_error(
+                    "data_json",
+                    f"테마가 {prev_n}개 → {len(themes_out)}개로 줄어 생성 보류 "
+                    f"(기존 파일은 {age:.0f}분 전 것이라 아직 쓸 만하다)")
+                return {"ok": False,
+                        "error": f"테마 감소 {prev_n}→{len(themes_out)} — 기존 유지",
+                        "themes": len(themes_out), "prev_themes": prev_n}
+        except Exception:
+            pass   # 기존 파일을 못 읽으면 비교를 건너뛴다 — 새로 쓰는 게 낫다
 
     _rank_history_push(themes_out)
     idx = _fetch_kr_indices_live() or {}
