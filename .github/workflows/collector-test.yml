@@ -6,7 +6,6 @@ name: 수집기 검증
 on:
   workflow_dispatch:
   push:
-    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
     paths:
       - 'server.py'
       - 'scripts/test_collectors.py'
