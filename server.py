@@ -2656,7 +2656,13 @@ def api_screener():
                 "volume_mn":  int(vol_mn),
                 "close":      s.get("close"),
                 "per": per, "pbr": pbr,
-                "market_cap": f.get("market_cap"),
+                # 시총은 fundamentals 캐시가 1순위지만, 그 캐시는 Render 에
+                # 영속 디스크가 없어 재시작마다 사라진다. 없다고 null 을
+                # 내보내면 화면 시총이 통째로 빈다 — 실제로 그랬다.
+                # 가격 sync 가 폴링(marketValueFullRaw)으로 받아 둔 값이
+                # universe 에 있으니 그걸 2순위로 쓴다.
+                "market_cap": f.get("market_cap") or s.get("market_cap"),
+                "market_cap_asof": s.get("market_cap_asof"),
                 "market":     "",
                 "sectors":    s.get("sectors", []),
                 "theme":      (s.get("sectors") or [None])[0],
@@ -3064,7 +3070,27 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
         return {"ok": False, "error": f"종목 조회 실패: {exc}"}
 
     if not codes:
-        _note_collect_error("flow_batch", "대상 종목 0개 — stocks 테이블이 비었다")
+        # Render 는 영속 디스크가 없어 재시작 직후 stocks 가 비어 있다.
+        # 첫 가격 sync 전에 배치가 돌면 여기에 걸린다 — 실제로 배포 직후
+        # 'stocks 테이블이 비었다' 로 한 번 죽었다. 그때는 메모리에 이미
+        # 올라와 있는 naver_universe 로 대상을 고른다.
+        uni = _load_naver_universe()
+        umap = (uni or {}).get("stocks") or {}
+        if umap:
+            ranked = sorted(
+                (v for v in umap.values()
+                 if str(v.get("code") or "").isdigit()
+                 and float(v.get("close") or 0) >= 1000),
+                key=lambda v: float(v.get("market_cap") or 0) or float(v.get("volume_mn") or 0),
+                reverse=True)
+            codes = [v["code"] for v in ranked[:top_n]]
+            log.warning("[flow batch] stocks 비어 있음 — naver_universe 로 %d종목 선정", len(codes))
+            _note_collect_error(
+                "flow_batch",
+                f"stocks 비어 있어 naver_universe 로 대체 선정 ({len(codes)}종목)")
+
+    if not codes:
+        _note_collect_error("flow_batch", "대상 종목 0개 — stocks 와 naver_universe 둘 다 비었다")
         return {"ok": False, "error": "대상 종목 0개"}
 
     ok = 0; fail = 0
@@ -14407,8 +14433,17 @@ def _check_market_data_health() -> dict:
                 from datetime import datetime as _dt
                 try:
                     upd = _dt.fromisoformat(row[0])
-                    out["stocks_age_min"] = round(
-                        (now_kst().replace(tzinfo=None) - upd).total_seconds() / 60, 1)
+                    # **stocks.updated_at 은 UTC 다.** UPSERT 가 SQLite 의
+                    # datetime('now') 로 쓰는데 그건 UTC 를 준다. 그걸 여태
+                    # now_kst() 에서 빼고 있어서 경과시간이 늘 +540분(9시간)
+                    # 부풀었다. 임계값이 120분이라 **갱신 직후에도 항상
+                    # '정체' 로 판정**됐고, 2026-09-29 의 "stocks 갱신 정체
+                    # (540분 전)" 경보가 바로 이것이다. 데이터가 아니라
+                    # 시간대 계산이 틀린 것이었다.
+                    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                    age = (now_utc - upd).total_seconds() / 60
+                    # 혹시 KST 로 쓰인 행이 섞여 있으면 음수가 나온다. 0 으로 본다.
+                    out["stocks_age_min"] = round(max(age, 0.0), 1)
                 except Exception:
                     pass
             frow = conn.execute(

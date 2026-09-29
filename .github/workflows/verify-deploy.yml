@@ -48,11 +48,11 @@ jobs:
       - name: 수집 트리거 (배포 직후엔 아직 안 돌았다)
         run: |
           set -u
-          echo "수급 배치 수동 트리거 (top_n=40)"
-          curl -s -X POST --max-time 60 "$URL/api/flow/refresh-batch?top_n=40" | head -c 300
+          echo "수급 배치 수동 트리거 (top_n=80)"
+          curl -s -X POST --max-time 60 "$URL/api/flow/refresh-batch?top_n=80" | head -c 300
           echo
-          echo "백그라운드 수집 대기 (40종목 x 0.4s + 여유)"
-          sleep 100
+          echo "백그라운드 수집 대기 (80종목 x 0.4s + 여유)"
+          sleep 150
 
       - name: 실측
         run: python3 scripts/verify_deploy.py "$URL"
