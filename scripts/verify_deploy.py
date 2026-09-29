@@ -211,6 +211,10 @@ if isinstance(d, dict):
     check("data.json 이 서버 생성본", d.get("source") == "server", str(d.get("source")))
     check("24시간 이내", d.get("stale") is False, f"{d.get('age_min')}분 전")
     check("테마 10개 이상", (d.get("themes") or 0) >= 10, str(d.get("themes")))
+    # 이게 비어도 예외가 안 나서 조용히 지나갔다(2026-09-29 yfinance 경합).
+    # 값이 아니라 '없음' 이 정상처럼 보이는 자리라 명시적으로 따진다.
+    mk = d.get("market_overview_keys") or []
+    check("market_overview 4개 키", len(mk) >= 4, f"{mk}")
 
 head("6. /api/ops/diag/collect_errors — 최근 수집 실패")
 st, d = get("/api/ops/diag/collect_errors?limit=10")
