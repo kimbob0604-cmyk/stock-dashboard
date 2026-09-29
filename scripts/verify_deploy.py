@@ -39,6 +39,33 @@ def head(t):
     print("=" * 64)
 
 
+def wait_for_deploy(max_min=20):
+    """배포 완료를 '값' 으로 감지한다.
+
+    엔드포인트 존재 여부로는 구분이 안 되는 배포가 있다(이미 있던 경로를
+    고치는 경우). 구 코드는 stocks.updated_at(UTC)을 now_kst() 에서 빼서
+    경과시간이 항상 540분 이상으로 나왔으므로, 그 값이 400분 아래로
+    내려오는 것이 새 코드의 신호다.
+    """
+    import time
+    tries = max(1, int(max_min * 2))
+    for i in range(1, tries + 1):
+        st, d = get("/api/ops/watchdog", timeout=60)
+        age = (d or {}).get("stocks_age_min")
+        print(f"  시도 {i}/{tries} — HTTP {st}  stocks_age_min={age}")
+        if st == 200 and isinstance(age, (int, float)) and age < 400:
+            print("  새 코드 배포 확인 (경과시간이 정상 범위)")
+            return True
+        time.sleep(30)
+    print("::error::배포가 시간 안에 반영되지 않았다.")
+    return False
+
+
+if "--wait" in sys.argv:
+    head("0. 배포 대기")
+    sys.exit(0 if wait_for_deploy() else 1)
+
+
 def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""))
     if not cond:

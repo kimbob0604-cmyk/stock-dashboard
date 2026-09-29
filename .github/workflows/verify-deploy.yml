@@ -30,20 +30,7 @@ jobs:
           python-version: '3.11'
 
       - name: 새 코드가 떴는지 기다린다
-        run: |
-          set -u
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
-                   "$URL/api/ops/diag/sources" || echo 000)
-            echo "시도 $i — /api/ops/diag/sources HTTP $code"
-            if [ "$code" = "200" ]; then
-              echo "새 코드 배포 확인"
-              exit 0
-            fi
-            sleep 30
-          done
-          echo "::error::20분 동안 새 엔드포인트가 200 을 주지 않았다. 배포 실패 또는 지연."
-          exit 1
+        run: python3 scripts/verify_deploy.py "$URL" --wait
 
       - name: 수집 트리거 (배포 직후엔 아직 안 돌았다)
         run: |
