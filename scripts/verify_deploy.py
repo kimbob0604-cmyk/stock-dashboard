@@ -107,32 +107,42 @@ def wait_for_flow(target=50, max_min=8):
     return last
 
 
-def wait_for_data_json(max_min=10):
+def wait_for_data_json(max_min=12):
     """data.json 이 서버 생성본이 될 때까지 기다린다.
 
-    배포 직후엔 컨테이너가 막 떠서 유니버스가 아직 안 채워졌고, 빌더는
-    (일부러) 그 상태에서 만들기를 거부한다. 한 번 찔러 보고 끝내면 늘
-    git 에 있는 낡은 판을 재게 된다 — 측정이 이른 것이지 고장이 아니다.
-    주기적으로 재생성을 트리거하면서 될 때까지 본다.
+    **재생성은 한 번만 찌른다.** 매 회차마다 POST 하면 빌드가 끝나기 전에
+    다음 요청이 겹쳐 서로 락을 기다리다 전부 타임아웃한다 — 2026-09-29
+    실측에서 그렇게 17분을 태웠다. 서버 안에서도 부팅 빌더가 돌고 있으니,
+    한 번 찌른 뒤로는 상태만 본다.
+
+    벽시계로 끊는다. 회차로 세면 요청 하나가 길어질 때 예산을 넘긴다.
     """
     import time
     import urllib.request
-    for i in range(1, int(max_min * 2) + 1):
-        st, d = get("/api/ops/data_json/status", timeout=60)
-        src = (d or {}).get("source")
-        themes = (d or {}).get("themes")
-        print(f"  {i:2d}) source={src}  테마={themes}  age={(d or {}).get('age_min')}")
-        if src == "server" and (themes or 0) >= 20:
+    deadline = time.time() + max_min * 60
+    poked = False
+    i = 0
+    while time.time() < deadline:
+        i += 1
+        st, d = get("/api/ops/data_json/status", timeout=45)
+        d = d or {}
+        print(f"  {i:2d}) source={d.get('source')} 테마={d.get('themes')} "
+              f"live={d.get('universe_live')} mapped={d.get('mapped_live')}/"
+              f"{d.get('mapped_total')}(need {d.get('mapped_need')}) "
+              f"building={d.get('build_in_progress')}")
+        if d.get("source") == "server" and (d.get("themes") or 0) >= 20:
             print("  서버 생성본 확인")
             return True
-        try:                       # 재생성 시도 (아직 이르면 서버가 스스로 보류한다)
-            req = urllib.request.Request(BASE + "/api/ops/data_json/rebuild", method="POST")
-            with urllib.request.urlopen(req, timeout=180) as r:
-                body = r.read().decode("utf-8")[:200]
-            print(f"      rebuild → {body}")
-        except Exception as e:
-            print(f"      rebuild → {type(e).__name__}: {str(e)[:120]}")
-        time.sleep(30)
+        if not poked and not d.get("build_in_progress"):
+            poked = True
+            try:
+                req = urllib.request.Request(
+                    BASE + "/api/ops/data_json/rebuild", method="POST")
+                with urllib.request.urlopen(req, timeout=240) as r:
+                    print(f"      rebuild → {r.read().decode('utf-8')[:200]}")
+            except Exception as e:
+                print(f"      rebuild → {type(e).__name__}: {str(e)[:120]}")
+        time.sleep(20)
     print("  시간 안에 서버 생성본이 되지 않았다")
     return False
 

@@ -7862,8 +7862,11 @@ def _build_data_json(write: bool = True) -> dict:
     실패해도 **기존 파일을 망가뜨리지 않는다**. 테마를 하나도 못 만들면
     쓰지 않고 그대로 둔다 — 낡은 데이터가 빈 데이터보다 낫다.
     """
-    if not _DATA_JSON_LOCK.acquire(timeout=120):
-        return {"ok": False, "error": "다른 생성이 진행 중 (120초 대기 초과)"}
+    # **락을 오래 기다리지 않는다.** 예전엔 120초를 기다렸는데, 호출이 몇 개만
+    # 겹쳐도 서로가 서로를 막아 전부 타임아웃으로 끝났다(2026-09-29 실측에서
+    # 재현). 진행 중이면 그렇게 말하고 바로 돌아가는 편이 훨씬 낫다.
+    if not _DATA_JSON_LOCK.acquire(timeout=5):
+        return {"ok": False, "error": "다른 생성이 진행 중", "busy": True}
     try:
         return _build_data_json_inner(write)
     finally:
@@ -18368,6 +18371,26 @@ def api_ops_data_json_status():
             out["error"] = _mask_secrets(str(exc))[:200]
     age = out.get("age_min")
     out["stale"] = (age is None) or (age > 24 * 60)
+
+    # 왜 아직 서버 생성본이 아닌지를 밖에서 볼 수 있어야 한다.
+    # 빌더가 보는 것과 같은 수치를 그대로 싣는다.
+    try:
+        umap = (_load_naver_universe() or {}).get("stocks") or {}
+        out["universe_stocks"] = len(umap)
+        out["universe_live"] = _universe_live_count(umap)
+        mf = BASE_DIR / "themes_mapping.json"
+        if mf.exists():
+            mapping = json.loads(mf.read_text(encoding="utf-8"))
+            codes = {(x["code"] if isinstance(x, dict) else x)
+                     for t in mapping for x in t.get("stocks", [])}
+            out["mapped_total"] = len(codes)
+            out["mapped_live"] = sum(
+                1 for c in codes
+                if float((umap.get(c) or {}).get("volume_mn") or 0) > 0)
+            out["mapped_need"] = max(1, int(len(codes) * 0.6))
+        out["build_in_progress"] = _DATA_JSON_LOCK.locked()
+    except Exception as exc:
+        out["diag_error"] = _mask_secrets(str(exc))[:200]
     return jsonify(out)
 
 
