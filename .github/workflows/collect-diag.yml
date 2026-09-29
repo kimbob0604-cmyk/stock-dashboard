@@ -1,0 +1,93 @@
+name: 수집 정지 진단
+
+# 대시보드가 실시간 값을 못 받는 원인을 좁히기 위한 일회성 진단이다.
+# 개발 컨테이너에서는 onrender.com·naver·KIS·KRX 로 나가는 연결이 프록시에
+# 막혀 있다. 러너는 열려 있으므로 여기서 대신 받아 본다.
+#
+# 아무것도 고치지 않는다. 읽기만 한다 (POST 로 뭔가 트리거하지 않는다).
+# 결과는 잡 로그로 읽는다 — 아티팩트를 만들지 않는다.
+
+on:
+  workflow_dispatch:
+  # 기본 브랜치에 없는 워크플로는 dispatch 목록에 안 뜬다. 진단 브랜치에
+  # push 로도 돌게 해서 main 을 건드리지 않고 한 번 받아 본다.
+  push:
+    branches: ['claude/kospi-investor-trading-analysis-fwq0oe']
+    paths:
+      - '.github/workflows/collect-diag.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+    steps:
+      - name: 깨우기
+        run: |
+          set -u
+          for i in $(seq 1 16); do
+            code=$(curl -s -o /tmp/h.json -w '%{http_code}' --max-time 60 "$URL/api/health" || echo 000)
+            echo "깨우기 시도 $i — HTTP $code"
+            [ "$code" = "200" ] && break
+            sleep 20
+          done
+          echo "--- /api/health ---"
+          python3 -m json.tool /tmp/h.json 2>/dev/null || head -c 800 /tmp/h.json
+
+      - name: 서버 진단 엔드포인트
+        if: always()
+        run: |
+          set -u
+          for p in \
+            "/api/ops/watchdog" \
+            "/api/ops/ohlcv/status" \
+            "/api/ops/cron/jobs" \
+            "/api/ops/diag/stocks_schema" \
+            "/api/ops/diag/kr_universe" \
+            "/api/ops/health" \
+            "/api/status" \
+            "/api/krx_status" \
+          ; do
+            echo "=============================================================="
+            echo "GET $p"
+            code=$(curl -s -o /tmp/r.json -w '%{http_code}' --max-time 90 "$URL$p" || echo 000)
+            echo "HTTP $code"
+            python3 -m json.tool /tmp/r.json 2>/dev/null | head -c 6000 || head -c 2000 /tmp/r.json
+            echo
+          done
+
+      - name: 화면이 실제로 받는 데이터
+        if: always()
+        run: |
+          set -u
+          for p in "/api/index_kr" "/api/screener?limit=3" "/api/sectors"; do
+            echo "=============================================================="
+            echo "GET $p"
+            code=$(curl -s -o /tmp/d.json -w '%{http_code}' --max-time 90 "$URL$p" || echo 000)
+            echo "HTTP $code  bytes=$(wc -c < /tmp/d.json)"
+            head -c 2500 /tmp/d.json
+            echo
+          done
+
+      - name: 러너에서 네이버가 열리는가
+        if: always()
+        run: |
+          set -u
+          echo "--- 네이버 금융 모바일 API (러너 IP) ---"
+          code=$(curl -s -o /tmp/n.json -w '%{http_code}' --max-time 30 \
+            -H 'User-Agent: Mozilla/5.0' \
+            'https://m.stock.naver.com/api/stock/005930/basic' || echo 000)
+          echo "HTTP $code  bytes=$(wc -c < /tmp/n.json)"
+          head -c 600 /tmp/n.json
+          echo
+          echo "--- 네이버 시세 (러너 IP) ---"
+          code=$(curl -s -o /tmp/n2.json -w '%{http_code}' --max-time 30 \
+            -H 'User-Agent: Mozilla/5.0' \
+            'https://api.stock.naver.com/stock/005930/integration' || echo 000)
+          echo "HTTP $code  bytes=$(wc -c < /tmp/n2.json)"
+          head -c 600 /tmp/n2.json
+          echo
