@@ -3,8 +3,9 @@ name: 배포 후 실측
 # 머지 → Render 자동 배포 후, 실제로 값이 채워졌는지 숫자로 확인한다.
 # "고쳤다" 는 이 워크플로 출력으로만 말한다.
 #
-# 배포 완료 감지는 '값' 으로 한다 — 엔드포인트 존재 여부로는 이미 있는
-# 경로를 고친 배포를 구분할 수 없다. verify_deploy.py --wait 참조.
+# 배포 완료 감지는 /api/health 의 git_commit 을 github.sha 와 맞춰 본다.
+# 엔드포인트 존재 여부나 특정 값의 변화로 짐작하던 방식은 '이미 있던 경로를
+# 고친 배포' 에서 통하지 않았다. verify_deploy.py --wait 참조.
 
 on:
   workflow_dispatch:
@@ -25,7 +26,7 @@ jobs:
           python-version: '3.11'
 
       - name: 새 코드가 떴는지 기다린다
-        run: python3 scripts/verify_deploy.py "$URL" --wait
+        run: python3 scripts/verify_deploy.py "$URL" --wait "${{ github.sha }}"
 
       - name: 수집 트리거 (배포 직후엔 아직 안 돌았다)
         run: |
