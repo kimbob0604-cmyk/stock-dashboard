@@ -21,6 +21,8 @@ jobs:
     timeout-minutes: 20
     env:
       URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+      # diag/stocks_schema 는 시험 행을 넣었다 지워서 운영 토큰을 요구한다.
+      OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
     steps:
       - name: 깨우기
         run: |
@@ -50,7 +52,8 @@ jobs:
           ; do
             echo "=============================================================="
             echo "GET $p"
-            code=$(curl -s -o /tmp/r.json -w '%{http_code}' --max-time 90 "$URL$p" || echo 000)
+            code=$(curl -s -o /tmp/r.json -w '%{http_code}' --max-time 90 \
+                        -H "X-Ops-Token: $OPS_TOKEN" "$URL$p" || echo 000)
             echo "HTTP $code"
             python3 -m json.tool /tmp/r.json 2>/dev/null | head -c 6000 || head -c 2000 /tmp/r.json
             echo
