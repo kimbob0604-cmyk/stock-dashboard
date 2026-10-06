@@ -15,6 +15,8 @@ server.py  —  테마 트리맵 Flask 서버
 
 from __future__ import annotations
 
+import functools
+import hmac
 import json
 import logging
 import math
@@ -145,6 +147,45 @@ try:
 except ImportError:
     socketio = None
     _SOCKETIO_OK = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 운영 엔드포인트 인증 (X-Ops-Token)
+# ─────────────────────────────────────────────────────────────────────────────
+# 텔레그램을 보내거나 잡을 돌리거나 DB 를 덮어쓰는 경로는 주소만 알면 누구나
+# 부를 수 있었다(2026-10-06 점검). 헤더 X-Ops-Token 을 환경변수 OPS_TOKEN 과
+# 맞춰 본다. **OPS_TOKEN 이 비어 있으면 전부 거절한다** — 설정을 빠뜨린 배포가
+# 열린 채로 뜨는 것보다 운영 버튼이 막히는 편이 낫다.
+OPS_TOKEN_HEADER = "X-Ops-Token"
+
+
+def _ops_auth_denied():
+    """운영 토큰 검사. 통과면 None, 아니면 (응답, 상태코드)."""
+    expected = os.environ.get("OPS_TOKEN") or ""
+    if not expected:
+        log.warning("[ops-auth] OPS_TOKEN 미설정 — %s %s 거절",
+                    request.method, request.path)
+        return jsonify({"ok": False,
+                        "error": "ops endpoints disabled: OPS_TOKEN not set"}), 403
+    given = request.headers.get(OPS_TOKEN_HEADER) or ""
+    if not given or not hmac.compare_digest(given.encode("utf-8"),
+                                            expected.encode("utf-8")):
+        log.warning("[ops-auth] 토큰 불일치 — %s %s (%s)", request.method,
+                    request.path, request.headers.get("X-Forwarded-For")
+                    or request.remote_addr)
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return None
+
+
+def require_ops_token(fn):
+    """운영(발송·잡 실행·DB 변경) 라우트에 붙인다. @app.route 아래에 둔다."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        denied = _ops_auth_denied()
+        if denied is not None:
+            return denied
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4554,15 +4595,42 @@ def _save_chart_to_sqlite(code, days, cache_date, result):
         log.debug("[SQLite] chart write fail %s: %s", code, exc)
 
 
-# 정적 파일 (themes_mapping.json, cache/ 등) 서빙
+# 정적 파일 (themes_mapping.json 등) 서빙.
+# 앱 디렉터리를 통째로 여는 경로라 내보내면 안 되는 것을 먼저 거른다 —
+# SQLite DB(포트폴리오·매매일지), 런타임 캐시(KIS 토큰 포함), .env·.git.
+_STATIC_DENY_DIRS = {"db", "cache", "logs"}
+_STATIC_DENY_RE = re.compile(
+    r"(\.(db|sqlite3?)([-.].*)?$)"        # dashboard.db, -wal/-shm, .db.bak_*
+    r"|(\.env$)"                           # prod.env 등
+    r"|(token[^/]*\.json$)",                # kis_token.json 같은 토큰 캐시
+    re.IGNORECASE)
+
+
+def _static_path_denied(filename: str) -> bool:
+    parts = [p for p in filename.replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    if parts[0].lower() in _STATIC_DENY_DIRS:
+        return True
+    # .env · .git/ · .github/ 등 점으로 시작하는 경로 전부 (.. 포함)
+    if any(p.startswith(".") for p in parts):
+        return True
+    return bool(_STATIC_DENY_RE.search(parts[-1]))
+
+
 @app.route("/<path:filename>")
 def static_file(filename: str):
-    target = BASE_DIR / filename
+    # 존재 여부보다 먼저 거른다 — 404/403 차이로 파일 유무가 새지 않게.
+    if _static_path_denied(filename):
+        return Response("Forbidden", status=403)
+    base = BASE_DIR.resolve()
+    target = (BASE_DIR / filename).resolve()
+    if not target.is_relative_to(base):          # 심볼릭 링크·경로 탈출
+        return Response("Forbidden", status=403)
+    if _static_path_denied(target.relative_to(base).as_posix()):
+        return Response("Forbidden", status=403)
     if not target.exists() or not target.is_file():
         return Response("Not Found", status=404)
-    # cache/ 폴더 직접 접근은 보안상 차단
-    if filename.startswith("cache/") or filename.startswith("cache\\"):
-        return Response("Forbidden", status=403)
     return send_file(target)
 
 
@@ -4621,6 +4689,7 @@ def api_health():
 
 
 @app.route("/api/db/backup", methods=["POST", "GET"])
+@require_ops_token
 def api_db_backup():
     """수동 DB 백업 (Gist). GET·POST 모두 허용."""
     try:
@@ -4631,6 +4700,7 @@ def api_db_backup():
 
 
 @app.route("/api/db/restore", methods=["POST"])
+@require_ops_token
 def api_db_restore():
     """수동 DB 복원 (Gist 가장 최신). POST만."""
     try:
@@ -4641,6 +4711,7 @@ def api_db_restore():
 
 
 @app.route("/api/test_telegram")
+@require_ops_token
 def api_test_telegram_get():
     """텔레그램 전송 테스트 (GET — 브라우저로 바로 호출 가능)."""
     try:
@@ -5705,6 +5776,7 @@ def check_alert_rules():
 
 
 @app.route("/api/telegram/test", methods=["POST"])
+@require_ops_token
 def api_telegram_test():
     """테스트 메시지 전송."""
     ok = send_telegram(
@@ -5716,6 +5788,7 @@ def api_telegram_test():
 
 
 @app.route("/api/telegram/briefing_test", methods=["POST"])
+@require_ops_token
 def api_briefing_test():
     """새벽 브리핑 수동 테스트. 데이터 갱신 후 브리핑 발송."""
     try:
@@ -5729,9 +5802,14 @@ def api_briefing_test():
 # ── 텔레그램 양방향 봇 (webhook 명령 처리) ───────────────────────────────────
 # push 전용 → 온디맨드 조회 지원. 보안: 소유자 chat_id 만 응답 + 시크릿 헤더.
 def _telegram_secret() -> str:
-    """webhook 시크릿 토큰 (봇 토큰 파생 — 별도 설정 불필요)."""
+    """webhook 시크릿 토큰 (봇 토큰 파생 — 별도 설정 불필요).
+
+    봇 토큰이 없으면 빈 문자열 — webhook 은 그때 전부 거절한다. 예전엔
+    'no-token' 에서 파생해 누구나 계산할 수 있는 값이 됐다."""
     import hashlib
-    tok = os.getenv("TELEGRAM_BOT_TOKEN") or "no-token"
+    tok = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    if not tok:
+        return ""
     return hashlib.sha256(("wh:" + tok).encode()).hexdigest()[:32]
 
 
@@ -5860,9 +5938,12 @@ def _handle_telegram_command(text: str) -> None:
 @app.route("/api/telegram/webhook", methods=["POST"])
 def api_telegram_webhook():
     """텔레그램 webhook — 소유자 chat 명령만 처리."""
-    # 시크릿 검증 (Telegram 이 setWebhook 의 secret_token 을 헤더로 재전송)
+    # 시크릿 검증 (Telegram 이 setWebhook 의 secret_token 을 헤더로 재전송).
+    # 텔레그램은 임의 헤더를 못 붙이므로 X-Ops-Token 대신 이것으로 막는다.
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if secret != _telegram_secret():
+    expected = _telegram_secret()
+    if not expected or not hmac.compare_digest(secret.encode("utf-8"),
+                                               expected.encode("utf-8")):
         return jsonify({"ok": False}), 403
     try:
         upd = request.get_json(force=True, silent=True) or {}
@@ -5902,6 +5983,7 @@ def _telegram_setup_webhook() -> None:
 
 
 @app.route("/api/telegram/setup_webhook", methods=["POST"])
+@require_ops_token
 def api_telegram_setup_webhook():
     """webhook 수동 등록 트리거."""
     _telegram_setup_webhook()
@@ -8480,6 +8562,7 @@ def _fill_ohlcv_job_inner(force: bool = False) -> dict:
 
 
 @app.route("/api/ops/ohlcv/fill", methods=["POST"])
+@require_ops_token
 def api_ops_ohlcv_fill():
     """일봉 수동 채움 (백그라운드). `?force=1` 이면 최신이어도 다시 받는다."""
     force = (request.args.get("force") or "").strip() in ("1", "true", "yes")
@@ -8490,6 +8573,7 @@ def api_ops_ohlcv_fill():
 
 
 @app.route("/api/ops/brief/closing", methods=["POST"])
+@require_ops_token
 def api_ops_brief_closing():
     """장마감 시황을 지금 보낸다. `?force=1` 이면 오늘 이미 보냈어도 다시 보낸다.
 
@@ -12486,6 +12570,7 @@ _agent_running = [False]
 
 
 @app.route("/api/agent/run", methods=["POST"])
+@require_ops_token
 def api_agent_run():
     """에이전트 파이프라인 백그라운드 실행. market=kr|us|all"""
     if _agent_running[0]:
@@ -15062,8 +15147,11 @@ def _market_watchdog():
 
 @app.route("/api/ops/watchdog", methods=["GET", "POST"])
 def api_ops_watchdog():
-    """워치독 수동 점검(GET) / 복구 실행(POST)."""
+    """워치독 수동 점검(GET) / 복구 실행(POST — 운영 토큰 필요)."""
     if request.method == "POST":
+        denied = _ops_auth_denied()
+        if denied is not None:
+            return denied
         threading.Thread(target=_market_watchdog, daemon=True,
                          name="watchdog-manual").start()
         return jsonify({"ok": True, "message": "워치독 백그라운드 실행"})
@@ -18367,6 +18455,7 @@ def api_ops_cron_jobs():
 
 
 @app.route("/api/ops/cron/trigger/<job_id>", methods=["POST"])
+@require_ops_token
 def api_ops_cron_trigger(job_id: str):
     """수동 트리거 — 등록된 잡의 함수를 별도 thread 에서 즉시 호출.
 
@@ -18399,6 +18488,7 @@ def api_ops_cron_trigger(job_id: str):
 
 
 @app.route("/api/ops/data_json/rebuild", methods=["POST"])
+@require_ops_token
 def api_ops_data_json_rebuild():
     """data.json 수동 재생성. 맥북 cron 을 대신하는 경로를 손으로 돌려 본다.
 
@@ -18554,6 +18644,7 @@ def api_ops_diag_sources():
 
 
 @app.route("/api/ops/diag/stocks_schema", methods=["GET"])
+@require_ops_token
 def api_ops_diag_stocks_schema():
     """stocks 테이블 schema 진단 (Render 환경에서 ALTER 컬럼 부재 의심 시)."""
     try:
@@ -18663,6 +18754,7 @@ def api_ops_diag_kr_universe():
 
 
 @app.route("/api/ops/recover/kr_stocks", methods=["POST"])
+@require_ops_token
 def api_ops_recover_kr_stocks():
     """수동 KR 가격 회복: stale lock 정리 → universe 동기 빌드 → 가격 갱신.
 

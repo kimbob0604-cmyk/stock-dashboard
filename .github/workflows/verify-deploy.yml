@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 30
     env:
       URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
+      # verify_deploy.py 가 data.json 재생성(POST)을 찌를 때 쓴다.
+      OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

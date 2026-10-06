@@ -37,9 +37,15 @@ jobs:
         env:
           URL: ${{ vars.DASHBOARD_URL || 'https://stock-dashboard-kc23.onrender.com' }}
           FORCE: ${{ inputs.force }}
+          # 발송 경로는 운영 토큰을 요구한다 (서버 env OPS_TOKEN 과 같은 값).
+          OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
         run: |
           set -u
           echo "대상 $URL"
+          if [ -z "$OPS_TOKEN" ]; then
+            echo "::error::저장소 시크릿 OPS_TOKEN 이 없습니다 — Settings → Secrets and variables → Actions 에 Render 의 OPS_TOKEN 과 같은 값을 넣으세요."
+            exit 1
+          fi
 
           # ── 1) 깨우기 ──
           # **재배포 중이면 Render 가 503 을 준다.** 이걸 못 기다리고 포기한
@@ -84,8 +90,15 @@ jobs:
           q=''
           [ "$FORCE" = "true" ] && q='?force=1'
           echo "POST /api/ops/brief/closing$q"
-          curl -s --max-time 60 -X POST "$URL/api/ops/brief/closing$q" | head -c 600
+          code=$(curl -s -o /tmp/kick.json -w '%{http_code}' --max-time 60 -X POST \
+                      -H "X-Ops-Token: $OPS_TOKEN" "$URL/api/ops/brief/closing$q" || echo 000)
+          echo "HTTP $code"
+          head -c 600 /tmp/kick.json || true
           echo
+          if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+            echo "::error::발송 요청이 거절됐습니다(HTTP $code). 401 = 시크릿 OPS_TOKEN 이 서버 값과 다름, 403 = Render 에 OPS_TOKEN 미설정."
+            exit 1
+          fi
 
           # ── 3) 일봉이 차는 것을 지켜본다 (동시에 인스턴스를 깨워 둔다) ──
           # 300종목 약 5분. 넉넉히 20분을 본다. 행이 늘다가 2분 넘게 멈추고

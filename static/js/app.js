@@ -793,7 +793,13 @@ document.getElementById('sm-tg-test').addEventListener('click', async () => {
   result.textContent = '전송 중…';
   result.style.color = 'var(--text-muted)';
   try {
-    const r = await fetch('/api/telegram/test', { method: 'POST' });
+    const r = await opsFetch('/api/telegram/test', { method: 'POST' });
+    const authErr = opsAuthError(r);
+    if (authErr) {
+      result.textContent = '❌ ' + authErr;
+      result.style.color = '#FF3333';
+      return;
+    }
     const d = await r.json();
     if (d.ok) {
       result.textContent = '✅ 전송 성공 — 텔레그램을 확인하세요';

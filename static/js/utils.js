@@ -39,6 +39,41 @@ function fmtVol(v) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 운영 API (X-Ops-Token) — 텔레그램 발송·잡 실행·에이전트 실행 같은 운영 경로는
+// 서버가 토큰을 요구한다. 토큰은 Render 환경변수 OPS_TOKEN 과 같은 값이고
+// 이 브라우저의 localStorage 에만 둔다. 처음 쓸 때 한 번 묻는다.
+// ─────────────────────────────────────────────────────────────────────────────
+const _OPS_TOKEN_KEY = 'ops_token';
+
+function _getOpsToken(ask) {
+  let t = '';
+  try { t = localStorage.getItem(_OPS_TOKEN_KEY) || ''; } catch {}
+  if (!t && ask) {
+    t = (window.prompt('운영 토큰(OPS_TOKEN)을 입력하세요.\n이 브라우저에만 저장됩니다.') || '').trim();
+    if (t) { try { localStorage.setItem(_OPS_TOKEN_KEY, t); } catch {} }
+  }
+  return t;
+}
+
+async function opsFetch(url, opts = {}) {
+  const token = _getOpsToken(true);
+  if (!token) throw new Error('운영 토큰을 입력하지 않아 요청하지 않았습니다');
+  const headers = new Headers(opts.headers || {});
+  headers.set('X-Ops-Token', token);
+  const r = await fetch(url, { ...opts, headers });
+  // 틀린 토큰은 지워 두고 다음 시도에서 다시 묻는다
+  if (r.status === 401) { try { localStorage.removeItem(_OPS_TOKEN_KEY); } catch {} }
+  return r;
+}
+
+// 인증 실패면 사람이 읽을 문구, 아니면 null
+function opsAuthError(r) {
+  if (r.status === 401) return '운영 토큰이 틀렸습니다 — 다시 시도하면 새로 묻습니다';
+  if (r.status === 403) return '서버에 OPS_TOKEN 이 설정되지 않아 운영 기능이 꺼져 있습니다';
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SVG SPARKLINE
 // ─────────────────────────────────────────────────────────────────────────────
 function createSparkline(container, data, changePct, width = 88, height = 36) {
