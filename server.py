@@ -10,12 +10,15 @@ server.py  —  테마 트리맵 Flask 서버
   · /            → index.html 즉시 반환 (수집 완료 전에도 더미 데이터로 동작)
   · /data.json   → 수집 완료된 data.json 반환 (미완료 시 503)
   · /api/status  → 수집 상태 JSON  {"state": "running"|"idle"|"error", ...}
-  · /api/refresh → 수동 재수집 트리거 (GET/POST)
+  · /api/refresh → 수동 재수집 트리거 (GET/POST, 인증 필요)
+  · /api/ 쓰기 요청·개인 데이터 → 운영 토큰(X-Ops-Token) 또는 로그인 쿠키 필요
+    (환경변수 OPS_TOKEN, 아래 '인증' 절)
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import hmac
 import json
 import logging
@@ -60,7 +63,7 @@ def now_kst() -> datetime:
     return datetime.now(KST)
 
 try:
-    from flask import Flask, Response, jsonify, request, send_file
+    from flask import Flask, Response, g, jsonify, request, send_file
 except ImportError:
     raise SystemExit(
         "Flask 설치 필요: pip install flask\n"
@@ -150,35 +153,165 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 운영 엔드포인트 인증 (X-Ops-Token)
+# 인증 — 운영 토큰(X-Ops-Token 헤더) 또는 로그인 쿠키
 # ─────────────────────────────────────────────────────────────────────────────
 # 텔레그램을 보내거나 잡을 돌리거나 DB 를 덮어쓰는 경로는 주소만 알면 누구나
-# 부를 수 있었다(2026-10-06 점검). 헤더 X-Ops-Token 을 환경변수 OPS_TOKEN 과
-# 맞춰 본다. **OPS_TOKEN 이 비어 있으면 전부 거절한다** — 설정을 빠뜨린 배포가
-# 열린 채로 뜨는 것보다 운영 버튼이 막히는 편이 낫다.
+# 부를 수 있었다(2026-10-06 점검). 비밀값은 환경변수 OPS_TOKEN 하나다.
+# **OPS_TOKEN 이 비어 있으면 전부 거절한다** — 설정을 빠뜨린 배포가 열린 채로
+# 뜨는 것보다 쓰기·운영 버튼이 막히는 편이 낫다.
+#
+# 들고 오는 방법은 둘이다.
+#   · 헤더 X-Ops-Token — 워크플로·curl.
+#   · 로그인 쿠키 — 브라우저. 토큰을 한 번 입력하면(POST /api/auth/login)
+#     HttpOnly 쿠키를 준다. 토큰 원문은 브라우저에 남지 않는다. 쿠키는
+#     OPS_TOKEN 에서 파생한 키로 서명하므로 SECRET_KEY 를 따로 두지 않고,
+#     OPS_TOKEN 을 바꾸면 모든 로그인이 그 자리에서 풀린다.
+#
+# 어디에 거는가.
+#   · /api/ 아래 GET 이 아닌 요청 전부 — _auth_gate(before_request). 새 쓰기
+#     경로를 만들면 할 일 없이 막혀 있다. 예외는 _AUTH_OPEN_ENDPOINTS.
+#   · 개인 데이터(매매일지·분석일지·알림·포트폴리오)를 돌려주는 GET 과 GET 으로도
+#     받는 수집 트리거 — 라우트에 @require_ops_token.
 OPS_TOKEN_HEADER = "X-Ops-Token"
+AUTH_COOKIE = "dash_auth"
+_AUTH_COOKIE_MAX_AGE = 30 * 86400      # 마지막으로 쓴 때부터 30일
+_AUTH_COOKIE_RENEW_AFTER = 86400       # 하루 넘은 쿠키는 쓸 때 새로 준다(만료 연장)
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# 인증 없이 받는 쓰기 경로. 텔레그램 webhook 은 임의 헤더를 못 붙여서
+# 자체 시크릿(X-Telegram-Bot-Api-Secret-Token)으로 막는다.
+_AUTH_OPEN_ENDPOINTS = frozenset({"api_auth_login", "api_auth_logout",
+                                  "api_telegram_webhook"})
+
+# 틀린 토큰 연속 입력 제한 — IP 당 10분에 10번. 진짜 방어는 토큰 길이다
+# (무작위 32자 이상). X-Forwarded-For 첫 값은 위조할 수 있어 이것으로
+# 공격을 막지는 못하지만, 남의 IP 를 모르면 주인을 잠글 수도 없다.
+_AUTH_FAIL_WINDOW = 600
+_AUTH_FAIL_MAX = 10
+_auth_fails: dict[str, deque] = {}
+_auth_fails_lock = threading.Lock()
+
+
+def _ops_token() -> str:
+    return os.environ.get("OPS_TOKEN") or ""
+
+
+def _client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For") or ""
+    return xff.split(",")[0].strip() or (request.remote_addr or "?")
+
+
+def _auth_throttled(ip: str) -> bool:
+    now = time.time()
+    with _auth_fails_lock:
+        q = _auth_fails.get(ip)
+        while q and now - q[0] > _AUTH_FAIL_WINDOW:
+            q.popleft()
+        if q is not None and not q:
+            del _auth_fails[ip]
+        return bool(q) and len(q) >= _AUTH_FAIL_MAX
+
+
+def _auth_record_fail(ip: str) -> None:
+    with _auth_fails_lock:
+        if len(_auth_fails) > 10000:        # 위조 IP 로 표가 끝없이 자라지 않게
+            _auth_fails.clear()
+        _auth_fails.setdefault(ip, deque()).append(time.time())
+
+
+def _auth_cookie_value(token: str, issued: int) -> str:
+    key = hashlib.sha256(("dash-auth-cookie:" + token).encode("utf-8")).digest()
+    sig = hmac.new(key, f"v1:{issued}".encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{issued}.{sig}"
+
+
+def _auth_cookie_issued(token: str) -> int | None:
+    """요청의 로그인 쿠키가 유효하면 발급 시각, 아니면 None."""
+    raw = request.cookies.get(AUTH_COOKIE) or ""
+    issued_s, _, _sig = raw.partition(".")
+    if not issued_s.isdigit():
+        return None
+    issued = int(issued_s)
+    age = time.time() - issued
+    if age > _AUTH_COOKIE_MAX_AGE or age < -60:
+        return None
+    want = _auth_cookie_value(token, issued)
+    if not hmac.compare_digest(raw.encode("utf-8"), want.encode("utf-8")):
+        return None
+    return issued
+
+
+def _request_is_https() -> bool:
+    proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    return request.is_secure or proto == "https"
+
+
+def _set_auth_cookie(resp, token: str) -> None:
+    resp.set_cookie(AUTH_COOKIE, _auth_cookie_value(token, int(time.time())),
+                    max_age=_AUTH_COOKIE_MAX_AGE, path="/", httponly=True,
+                    samesite="Strict", secure=_request_is_https())
+
+
+def _cross_site_request() -> bool:
+    """다른 출처에서 온 요청인가 (쿠키로 들어온 쓰기 요청의 CSRF 확인).
+
+    SameSite=Strict 가 1차 방어고 이것은 2차다 — 같은 '사이트' 의 다른 출처
+    (예: 같은 상위 도메인의 남의 앱)는 SameSite 로 걸러지지 않는다."""
+    sfs = request.headers.get("Sec-Fetch-Site")
+    if sfs:
+        return sfs not in ("same-origin", "none")
+    origin = request.headers.get("Origin")
+    if origin:
+        return urllib.parse.urlparse(origin).netloc != request.host
+    return False
+
+
+def _auth_required_response(status: int, error: str):
+    resp = jsonify({"ok": False, "error": error})
+    # 프론트(utils.js)는 이 헤더가 붙은 401 에만 로그인 창을 띄운다
+    if status == 401:
+        resp.headers["X-Auth-Required"] = "1"
+    return resp, status
 
 
 def _ops_auth_denied():
-    """운영 토큰 검사. 통과면 None, 아니면 (응답, 상태코드)."""
-    expected = os.environ.get("OPS_TOKEN") or ""
+    """인증 검사. 통과면 None, 아니면 (응답, 상태코드).
+
+    헤더 X-Ops-Token 이 있으면 그것만 본다. 없으면 로그인 쿠키를 보고,
+    쓰기 요청이면 같은 출처에서 왔는지까지 본다."""
+    expected = _ops_token()
     if not expected:
-        log.warning("[ops-auth] OPS_TOKEN 미설정 — %s %s 거절",
+        log.warning("[auth] OPS_TOKEN 미설정 — %s %s 거절",
                     request.method, request.path)
         return jsonify({"ok": False,
-                        "error": "ops endpoints disabled: OPS_TOKEN not set"}), 403
+                        "error": "인증이 꺼져 있습니다: 서버에 OPS_TOKEN 미설정"}), 403
     given = request.headers.get(OPS_TOKEN_HEADER) or ""
-    if not given or not hmac.compare_digest(given.encode("utf-8"),
-                                            expected.encode("utf-8")):
-        log.warning("[ops-auth] 토큰 불일치 — %s %s (%s)", request.method,
-                    request.path, request.headers.get("X-Forwarded-For")
-                    or request.remote_addr)
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    if given:
+        ip = _client_ip()
+        if _auth_throttled(ip):
+            return jsonify({"ok": False, "error": "실패가 너무 많습니다 — 10분 뒤 다시"}), 429
+        if hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8")):
+            return None
+        _auth_record_fail(ip)
+        log.warning("[auth] 토큰 불일치 — %s %s (%s)", request.method,
+                    request.path, ip)
+        return _auth_required_response(401, "운영 토큰이 틀렸습니다")
+    issued = _auth_cookie_issued(expected)
+    if issued is None:
+        return _auth_required_response(401, "로그인이 필요합니다 (운영 토큰)")
+    if request.method not in _SAFE_METHODS and _cross_site_request():
+        log.warning("[auth] 다른 출처발 쓰기 거절 — %s %s (Origin=%s)",
+                    request.method, request.path, request.headers.get("Origin"))
+        return jsonify({"ok": False, "error": "다른 출처의 요청은 받지 않습니다"}), 403
+    if time.time() - issued > _AUTH_COOKIE_RENEW_AFTER:
+        g.auth_cookie_renew = True
     return None
 
 
 def require_ops_token(fn):
-    """운영(발송·잡 실행·DB 변경) 라우트에 붙인다. @app.route 아래에 둔다."""
+    """인증(운영 토큰 헤더 또는 로그인 쿠키)을 요구한다. @app.route 아래에 둔다.
+
+    GET 이 아닌 /api 요청은 _auth_gate 가 이미 막으니, 이것은 운영 라우트와
+    개인 데이터 GET·GET 으로도 받는 수집 트리거에 붙인다."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         denied = _ops_auth_denied()
@@ -186,6 +319,64 @@ def require_ops_token(fn):
             return denied
         return fn(*args, **kwargs)
     return wrapper
+
+
+@app.before_request
+def _auth_gate():
+    """/api 쓰기 요청은 기본으로 인증을 요구한다 (예외: _AUTH_OPEN_ENDPOINTS)."""
+    if request.method in _SAFE_METHODS or not request.path.startswith("/api/"):
+        return None
+    if request.endpoint in _AUTH_OPEN_ENDPOINTS:
+        return None
+    return _ops_auth_denied()
+
+
+@app.after_request
+def _auth_cookie_renew(resp):
+    if g.get("auth_cookie_renew") and _ops_token():
+        _set_auth_cookie(resp, _ops_token())
+    return resp
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    """운영 토큰으로 로그인 → HttpOnly 쿠키. body: {"token": "..."}"""
+    expected = _ops_token()
+    if not expected:
+        return jsonify({"ok": False,
+                        "error": "인증이 꺼져 있습니다: 서버에 OPS_TOKEN 미설정"}), 403
+    ip = _client_ip()
+    if _auth_throttled(ip):
+        return jsonify({"ok": False, "error": "실패가 너무 많습니다 — 10분 뒤 다시"}), 429
+    given = str((request.get_json(silent=True) or {}).get("token") or "").strip()
+    if not given or not hmac.compare_digest(given.encode("utf-8"),
+                                            expected.encode("utf-8")):
+        _auth_record_fail(ip)
+        log.warning("[auth] 로그인 실패 (%s)", ip)
+        # X-Auth-Required 를 붙이지 않는다 — 로그인 창이 자기 자신을 다시 띄우지 않게
+        return jsonify({"ok": False, "error": "토큰이 틀렸습니다"}), 401
+    resp = jsonify({"ok": True})
+    _set_auth_cookie(resp, expected)
+    return resp
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    if _cross_site_request():
+        return jsonify({"ok": False, "error": "다른 출처의 요청은 받지 않습니다"}), 403
+    resp = jsonify({"ok": True})
+    resp.delete_cookie(AUTH_COOKIE, path="/", httponly=True, samesite="Strict",
+                       secure=_request_is_https())
+    return resp
+
+
+@app.route("/api/auth/status")
+def api_auth_status():
+    expected = _ops_token()
+    return jsonify({
+        "configured":    bool(expected),
+        "authenticated": bool(expected) and _auth_cookie_issued(expected) is not None,
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -998,6 +1189,7 @@ def api_status():
 
 
 @app.route("/api/refresh", methods=["GET", "POST"])
+@require_ops_token
 def api_refresh():
     if _get()["state"] == "running":
         return jsonify({"ok": False, "message": "이미 수집 중입니다."}), 409
@@ -1737,12 +1929,14 @@ def sync_us_market_to_db_from_cache() -> dict:
 
 
 @app.route("/api/us/sync_db", methods=["POST", "GET"])
+@require_ops_token
 def api_us_sync_db():
     """수동 트리거: us_market 캐시 → DB 동기화."""
     return jsonify(sync_us_market_to_db_from_cache())
 
 
 @app.route("/api/refresh_all", methods=["POST", "GET"])
+@require_ops_token
 def api_refresh_all():
     """수동 트리거: 모든 글로벌 데이터(매크로·야간선물·옵션·F&G·밸류체인) 즉시 갱신."""
     try:
@@ -5617,6 +5811,7 @@ def api_alerts_sync():
 
 
 @app.route("/api/alerts/list")
+@require_ops_token
 def api_alerts_list():
     f = BASE_DIR / "cache" / "alert_rules.json"
     if not f.exists():
@@ -13071,6 +13266,7 @@ def _compute_correlation(closes_by_code: dict, codes: list) -> dict:
 
 
 @app.route("/api/correlation")
+@require_ops_token
 def api_correlation():
     """포트폴리오 + 관심종목 기반 상관관계 매트릭스 (최근 60일 OHLCV).
     source=portfolio|watchlist|both (기본 both)."""
@@ -15691,6 +15887,7 @@ def api_journal_add():
 
 
 @app.route("/api/journal/list")
+@require_ops_token
 def api_journal_list():
     """매매 이력 조회 — period 일수 (기본 30)."""
     if not (_SQLITE_OK and USE_SQLITE):
@@ -15714,6 +15911,7 @@ def api_journal_list():
 
 
 @app.route("/api/journal/summary")
+@require_ops_token
 def api_journal_summary():
     """수익률 요약 (overall / 그룹별 / 누적 곡선)."""
     if not (_SQLITE_OK and USE_SQLITE):
@@ -16677,6 +16875,7 @@ def api_vc2_review_compare():
 # ============================================================
 
 @app.route('/api/journal/recent', methods=['GET'])
+@require_ops_token
 def api_analysis_journal_recent():
     """최근 분석 (전체 종목 통합). limit (기본 30, 최대 100)."""
     try:
@@ -16690,6 +16889,7 @@ def api_analysis_journal_recent():
 
 
 @app.route('/api/journal/stock/<stock_code>', methods=['GET'])
+@require_ops_token
 def api_analysis_journal_by_stock(stock_code):
     """종목별 분석 이력 (최신순)."""
     try:
@@ -16707,6 +16907,7 @@ def api_analysis_journal_by_stock(stock_code):
 
 
 @app.route('/api/journal/<int:journal_id>', methods=['GET'])
+@require_ops_token
 def api_analysis_journal_read(journal_id):
     """단일 분석 조회."""
     try:
@@ -16772,6 +16973,7 @@ def api_analysis_journal_delete(journal_id):
 
 
 @app.route('/api/journal/<int:journal_id>/export/markdown', methods=['GET'])
+@require_ops_token
 def api_analysis_journal_export_markdown(journal_id):
     """단일 분석 Markdown export (5분 피치)."""
     try:
@@ -16812,6 +17014,7 @@ def api_analysis_journal_prefill(stock_code):
 
 
 @app.route('/api/journal/stats', methods=['GET'])
+@require_ops_token
 def api_analysis_journal_stats():
     """분석 메타 통계 + 미분석 종목 일부."""
     try:
@@ -17390,6 +17593,7 @@ def _next_quarter_label(latest_year, latest_quarter):
 
 
 @app.route('/api/verification/<code>/composite', methods=['GET'])
+@require_ops_token
 def api_verification_composite(code):
     """종합 신호 패널.
     점수(0~100) = 자동 50% + 검토 30% + 갭 페널티 20%
@@ -17721,6 +17925,7 @@ def _build_gap_for_tp(scenario: str, auto_tp, review_tp):
 
 
 @app.route('/api/verification/<code>/gap-analysis', methods=['GET'])
+@require_ops_token
 def api_verification_gap_analysis(code):
     """자동 vs 검토 갭 분석.
     Returns:

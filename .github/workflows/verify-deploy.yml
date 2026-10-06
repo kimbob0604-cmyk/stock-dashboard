@@ -34,8 +34,16 @@ jobs:
         run: |
           set -u
           echo "수급 배치 수동 트리거 (top_n=80)"
-          curl -s -X POST --max-time 60 "$URL/api/flow/refresh-batch?top_n=80" | head -c 300
+          # /api 쓰기 요청은 전부 운영 토큰을 요구한다 (서버 env OPS_TOKEN 과 같은 값).
+          code=$(curl -s -o /tmp/flow.json -w '%{http_code}' --max-time 60 -X POST \
+                      -H "X-Ops-Token: $OPS_TOKEN" "$URL/api/flow/refresh-batch?top_n=80" || echo 000)
+          echo "HTTP $code"
+          head -c 300 /tmp/flow.json || true
           echo
+          if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+            echo "::error::수급 배치 요청이 거절됐습니다(HTTP $code). 401 = 시크릿 OPS_TOKEN 이 서버 값과 다름, 403 = Render 에 OPS_TOKEN 미설정."
+            exit 1
+          fi
       - name: 수급 배치 완료 대기
         run: python3 scripts/verify_deploy.py "$URL" --wait-flow
 

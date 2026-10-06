@@ -39,37 +39,112 @@ function fmtVol(v) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 운영 API (X-Ops-Token) — 텔레그램 발송·잡 실행·에이전트 실행 같은 운영 경로는
-// 서버가 토큰을 요구한다. 토큰은 Render 환경변수 OPS_TOKEN 과 같은 값이고
-// 이 브라우저의 localStorage 에만 둔다. 처음 쓸 때 한 번 묻는다.
+// 로그인 — 쓰기 요청과 개인 데이터(매매일지·분석일지·알림·포트폴리오), 운영
+// 경로는 서버가 인증을 요구한다. 운영 토큰(Render 환경변수 OPS_TOKEN)을 한 번
+// 입력하면 서버가 HttpOnly 쿠키를 준다(쓸 때마다 30일 연장). 토큰 원문은 이
+// 브라우저에 남기지 않는다.
+//
+// fetch 를 감싸서 /api/ 응답이 401 + X-Auth-Required 이면 로그인 창을 띄우고
+// 한 번 다시 보낸다 — 호출부는 평소처럼 fetch 를 쓰면 된다. 사람이 누르지 않았는데
+// 나가는 요청은 init.authPrompt 로 창을 띄우지 않게 한다.
+//   authPrompt: false  — 창을 띄우지 않는다 (자동 갱신 타이머·자동 저장)
+//   authPrompt: 'once' — 이 페이지에서 한 번 취소했으면 다시 묻지 않는다 (서버 동기화)
 // ─────────────────────────────────────────────────────────────────────────────
-const _OPS_TOKEN_KEY = 'ops_token';
+// 예전 방식(토큰 원문을 localStorage 에 저장)의 흔적을 지운다
+try { localStorage.removeItem('ops_token'); } catch {}
 
-function _getOpsToken(ask) {
-  let t = '';
-  try { t = localStorage.getItem(_OPS_TOKEN_KEY) || ''; } catch {}
-  if (!t && ask) {
-    t = (window.prompt('운영 토큰(OPS_TOKEN)을 입력하세요.\n이 브라우저에만 저장됩니다.') || '').trim();
-    if (t) { try { localStorage.setItem(_OPS_TOKEN_KEY, t); } catch {} }
-  }
-  return t;
+const _nativeFetch = window.fetch.bind(window);
+let _loginPromise = null;
+let _loginDeclined = false;
+
+function _isOwnApi(input) {
+  try {
+    const raw = typeof input === 'string' ? input
+              : (input instanceof URL ? input.href : input.url);
+    const u = new URL(raw, location.href);
+    return u.origin === location.origin && u.pathname.startsWith('/api/');
+  } catch { return false; }
 }
 
-async function opsFetch(url, opts = {}) {
-  const token = _getOpsToken(true);
-  if (!token) throw new Error('운영 토큰을 입력하지 않아 요청하지 않았습니다');
-  const headers = new Headers(opts.headers || {});
-  headers.set('X-Ops-Token', token);
-  const r = await fetch(url, { ...opts, headers });
-  // 틀린 토큰은 지워 두고 다음 시도에서 다시 묻는다
-  if (r.status === 401) { try { localStorage.removeItem(_OPS_TOKEN_KEY); } catch {} }
-  return r;
+window.fetch = async function (input, init) {
+  // Request 객체는 본문을 한 번만 읽을 수 있어 재시도용으로 복제해 둔다
+  const retryInput = (input instanceof Request) ? input.clone() : input;
+  const r = await _nativeFetch(input, init);
+  if (r.status !== 401 || !r.headers.get('X-Auth-Required') || !_isOwnApi(input)) return r;
+  const mode = init && init.authPrompt;
+  if (mode === false || (mode === 'once' && _loginDeclined)) return r;
+  if (!(await ensureLogin())) return r;
+  return _nativeFetch(retryInput, init);
+};
+
+// 로그인 창. 동시에 여러 요청이 401 을 받아도 창은 하나 — 모두 같은 결과를 기다린다.
+function ensureLogin() {
+  if (!_loginPromise) {
+    _loginPromise = _showLoginDialog().finally(() => { _loginPromise = null; });
+  }
+  return _loginPromise;
+}
+
+function _showLoginDialog() {
+  return new Promise(resolve => {
+    const ov = document.createElement('div');
+    ov.className = 'pf-modal-overlay';
+    ov.style.zIndex = '20000';   // 설정 모달 위에서도 보이게
+    ov.innerHTML = `<form class="pf-modal" style="max-width:360px;width:100%" autocomplete="on">
+      <div style="font-size:15px;font-weight:700;margin-bottom:6px">🔐 로그인</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        운영 토큰(OPS_TOKEN)을 입력하세요. 이 브라우저는 30일 동안 로그인 상태로 남습니다.</div>
+      <input type="password" class="bt-input" name="token" autocomplete="current-password"
+             placeholder="OPS_TOKEN" style="width:100%;box-sizing:border-box" required>
+      <div class="login-err" style="color:#FF3333;font-size:12px;min-height:16px;margin:8px 0"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button type="button" class="sm-cancel-btn" data-act="cancel">취소</button>
+        <button type="submit" class="pj-add-btn">로그인</button>
+      </div>
+    </form>`;
+    const form = ov.querySelector('form');
+    const input = ov.querySelector('input');
+    const err = ov.querySelector('.login-err');
+    const done = ok => {
+      if (!ok) _loginDeclined = true;
+      document.removeEventListener('keydown', onKey, true);
+      ov.remove();
+      resolve(ok);
+    };
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); done(false); } };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-act=cancel]').addEventListener('click', () => done(false));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      err.textContent = '확인 중…';
+      try {
+        const r = await _nativeFetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: input.value }),
+        });
+        if (r.ok) { _loginDeclined = false; done(true); return; }
+        const d = await r.json().catch(() => ({}));
+        err.textContent = d.error || ('HTTP ' + r.status);
+        input.select();
+      } catch (ex) {
+        err.textContent = '네트워크 오류: ' + ex.message;
+      }
+    });
+    document.body.appendChild(ov);
+    input.focus();
+  });
+}
+
+async function logout() {
+  await _nativeFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
 }
 
 // 인증 실패면 사람이 읽을 문구, 아니면 null
 function opsAuthError(r) {
-  if (r.status === 401) return '운영 토큰이 틀렸습니다 — 다시 시도하면 새로 묻습니다';
-  if (r.status === 403) return '서버에 OPS_TOKEN 이 설정되지 않아 운영 기능이 꺼져 있습니다';
+  if (r.status === 401) return '로그인이 필요합니다 — 운영 토큰을 입력해야 실행됩니다';
+  if (r.status === 403) return '서버가 거절했습니다 (OPS_TOKEN 미설정이거나 다른 출처의 요청)';
+  if (r.status === 429) return '로그인 실패가 너무 많습니다 — 10분 뒤 다시 시도하세요';
   return null;
 }
 

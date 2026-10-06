@@ -1708,6 +1708,7 @@ function _savePortfolio(d) {
     fetch('/api/portfolio/sync', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ positions: d.positions || [] }),
+      authPrompt: 'once',
     }).catch(() => {});
   } catch {}
 }
@@ -2744,6 +2745,7 @@ function _saveAlerts(d) {
   fetch('/api/alerts/sync', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rules: d.rules }),
+    authPrompt: 'once',
   }).catch(() => {});
 }
 
@@ -3868,7 +3870,7 @@ async function _runAgent() {
   if (btn) { btn.textContent = '실행 중...'; btn.disabled = true; }
   const mkt = _agentMarket || 'kr';
   try {
-    const r = await opsFetch(`/api/agent/run?market=${mkt}`, { method: 'POST' });
+    const r = await fetch(`/api/agent/run?market=${mkt}`, { method: 'POST' });
     const authErr = opsAuthError(r);
     if (authErr) throw new Error(authErr);
   } catch (e) {
@@ -8411,6 +8413,7 @@ async function _verifSaveJournal(opts) {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      authPrompt: !!opts.verbose,
     });
     const j = await r.json();
     if (!r.ok || j.success === false) {
@@ -8838,8 +8841,8 @@ async function renderOpsCronPlaceholder() {
           ev.target.disabled = true;
           ev.target.textContent = '실행 중…';
           try {
-            const rr = await opsFetch(`/api/ops/cron/trigger/${encodeURIComponent(id)}`,
-                                      { method: 'POST' });
+            const rr = await fetch(`/api/ops/cron/trigger/${encodeURIComponent(id)}`,
+                                   { method: 'POST' });
             const authErr = opsAuthError(rr);
             if (authErr) throw new Error(authErr);
             const jd = await rr.json();
