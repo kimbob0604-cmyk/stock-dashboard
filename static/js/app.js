@@ -217,6 +217,7 @@ function _saveWatchlist(list) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ items: list }),
+      authPrompt: 'once',
     }).catch(() => {});
   } catch {}
 }
@@ -604,6 +605,7 @@ function openSettingsModal() {
     .then(themes => {
       MODAL_THEMES = JSON.parse(JSON.stringify(themes));
       renderModalList();
+      _renderAuthStatus();
       document.getElementById('settings-overlay').classList.add('open');
     })
     .catch(() => alert('테마 목록을 불러올 수 없습니다.\n서버가 실행 중인지 확인하세요.'));
@@ -787,6 +789,29 @@ function _modalAddStock(ti, code, name) {
   _reExpandTheme(ti);
 }
 
+// ── 로그인 상태 (설정 모달) ──
+let _authState = null;
+async function _renderAuthStatus() {
+  const btn = document.getElementById('sm-auth-btn');
+  const st  = document.getElementById('sm-auth-status');
+  try {
+    _authState = await fetch('/api/auth/status').then(r => r.json());
+  } catch { _authState = null; }
+  if (!_authState || !_authState.configured) {
+    btn.style.display = 'none';
+    st.textContent = _authState ? '서버에 OPS_TOKEN 이 없어 쓰기·개인 데이터가 막혀 있습니다' : '상태 확인 실패';
+    return;
+  }
+  btn.style.display = '';
+  btn.textContent = _authState.authenticated ? '로그아웃' : '로그인';
+  st.textContent  = _authState.authenticated ? '✅ 로그인됨' : '로그인하지 않음 — 쓰기·매매일지는 로그인 후 동작';
+}
+document.getElementById('sm-auth-btn').addEventListener('click', async () => {
+  if (_authState && _authState.authenticated) await logout();
+  else await ensureLogin();
+  _renderAuthStatus();
+});
+
 // ── Modal buttons ──
 document.getElementById('sm-tg-test').addEventListener('click', async () => {
   const result = document.getElementById('sm-tg-result');
@@ -794,6 +819,12 @@ document.getElementById('sm-tg-test').addEventListener('click', async () => {
   result.style.color = 'var(--text-muted)';
   try {
     const r = await fetch('/api/telegram/test', { method: 'POST' });
+    const authErr = opsAuthError(r);
+    if (authErr) {
+      result.textContent = '❌ ' + authErr;
+      result.style.color = '#FF3333';
+      return;
+    }
     const d = await r.json();
     if (d.ok) {
       result.textContent = '✅ 전송 성공 — 텔레그램을 확인하세요';
@@ -836,7 +867,7 @@ document.getElementById('sm-save').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(MODAL_THEMES),
     });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) throw new Error(opsAuthError(r) || ('HTTP ' + r.status));
     closeSettingsModal();
     // 저장 후 데이터 재수집 트리거
     try { await fetch('/api/refresh', { method: 'POST' }); } catch { /* ignore */ }
@@ -1053,7 +1084,7 @@ init();
     autoTimer = setTimeout(async () => {
       if (!document.hidden) {
         try {
-          const r = await fetch('/api/refresh', { method: 'POST' });
+          const r = await fetch('/api/refresh', { method: 'POST', authPrompt: false });
           if (r.ok) { clearTimeout(statusTimer); prevState = null; poll(); }
         } catch {}
       }
