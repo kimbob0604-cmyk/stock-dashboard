@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import re
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -4595,27 +4596,31 @@ def _self_keep_alive():
 @app.route("/api/health")
 def api_health():
     """헬스체크 — 외부 cron(cron-job.org/UptimeRobot)이 5분 간격 호출 권장."""
-    sched_running = False
+    # 스케줄러가 도는 프로세스 기준(_scheduler_view) — 워커의 fork 사본을 보지 않는다.
+    try:
+        view = _scheduler_view()
+    except Exception:                                      # noqa: BLE001
+        view = {}
     job_count = 0
     try:
-        if _scheduler is not None:
-            sched_running = bool(_scheduler.running)
+        if view.get("process") == "this":
             job_count = len(_scheduler.get_jobs())
+        elif view.get("process") == "other":
+            job_count = None if view.get("jobs") is None else len(view["jobs"])
     except Exception:
         pass
-    try:
-        overdue = len(_scheduler_overdue())
-    except Exception:                                      # noqa: BLE001
-        overdue = None
+    ov = view.get("overdue")
     return jsonify({
         "status": "ok",
-        "scheduler_overdue": overdue,
-        "scheduler_thread_alive": (_scheduler_thread_alive() if _scheduler is not None else None),
+        "scheduler_overdue": None if ov is None else len(ov),
+        "scheduler_thread_alive": view.get("thread_alive"),
+        "scheduler_process": view.get("process"),
+        "scheduler_heartbeat_age_sec": view.get("heartbeat_age_sec"),
         "rss_mb": _rss_mb(),
         "uptime_sec": round(time.time() - _start_time),
         "uptime_hours": round((time.time() - _start_time) / 3600, 2),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "scheduler_running": sched_running,
+        "scheduler_running": view.get("running"),
         "scheduler_jobs": job_count,
         # **지금 도는 코드가 어느 커밋인지.** 이게 없어서 배포 완료를 매번
         # 다른 방법으로 짐작해야 했다 — 새 엔드포인트의 404→200 이나
@@ -4678,11 +4683,12 @@ def api_test_telegram_get():
 #
 # 그래서 **스케줄러 밖의 스레드**가 1분마다 본다: 다음 실행 시각을 5분 넘게
 # 지난 잡이 있거나 스케줄러 스레드가 죽었으면 '멈춤 의심'. 먼저 깨워 보고
-# (wakeup), 3번 연속이면 워커 프로세스를 끝낸다 — gunicorn 이 새 워커를 띄우고,
-# 새 워커는 부팅 직후 closing_brief_catchup 으로 그날 못 보낸 시황·알림을 보낸다.
-# 같은 컨테이너라 DB 파일은 그대로다.
+# (wakeup), 3번 연속이면 스케줄러가 도는 프로세스를 끝낸다. 운영 gunicorn 은
+# preload 라 그게 마스터다(아래 '스케줄러 심장박동') — 서비스가 통째로 다시 뜨고,
+# 부팅 직후 closing_brief_catchup 이 그날 못 보낸 시황·알림을 보낸다(발송 표시는
+# 보낼 때마다 Gist 로 백업되므로 이미 보낸 것은 다시 안 보낸다).
 _SCHED_STALL_SEC = 300       # 예정 시각을 이만큼 넘긴 잡이 하나라도 있으면 의심
-_SCHED_STALL_STRIKES = 3     # 연속 의심 횟수(1분 간격) — 이만큼이면 워커를 끝낸다
+_SCHED_STALL_STRIKES = 3     # 연속 의심 횟수(1분 간격) — 이만큼이면 프로세스를 끝낸다
 
 
 def _scheduler_overdue(now_ts: float | None = None) -> list:
@@ -4725,7 +4731,7 @@ def _scheduler_liveness_check(strikes: int, *, exit_fn=None) -> int:
     except Exception:                                      # noqa: BLE001
         log.exception("[스케줄러 감시] wakeup 실패")
     if strikes >= _SCHED_STALL_STRIKES:
-        log.critical("[스케줄러 감시] %d분째 멈춤 — 워커를 끝낸다(gunicorn 이 새 워커를 띄운다)",
+        log.critical("[스케줄러 감시] %d분째 멈춤 — 프로세스를 끝낸다(다시 떠야 스케줄러가 산다)",
                      strikes)
         for h in logging.getLogger().handlers:
             try:
@@ -4739,11 +4745,98 @@ def _scheduler_liveness_check(strikes: int, *, exit_fn=None) -> int:
 def _scheduler_liveness_loop(interval: float = 60.0) -> None:
     strikes = 0
     while True:
+        _scheduler_heartbeat_write()
         time.sleep(interval)
         try:
             strikes = _scheduler_liveness_check(strikes)
         except Exception:                                  # noqa: BLE001
             log.exception("[스케줄러 감시] 점검 실패")
+
+
+# ── 스케줄러 심장박동 (2026-10-08) ───────────────────────────────────────────
+# **운영에서는 스케줄러가 요청을 받는 프로세스에 없다.** gunicorn 이 앱을 마스터에서
+# 먼저 import 한 뒤(preload) 워커를 fork 한다. 스케줄러·백그라운드 스레드는 마스터에서
+# 돌고, 워커에는 fork 순간의 스케줄러 사본만 남는다 — 스레드는 없고 다음 실행 시각은
+# 부팅 때 값 그대로다. /api/health · /api/ops/cron/jobs 가 그 사본을 읽어 같은 날
+# '10:55 부터 멈춤' 으로 보였다. 실제로는 마스터에서 잡이 돌며 DB 를 채우고 있었다.
+#
+# 그래서 스케줄러를 띄운 프로세스(_SCHED_PID)의 감시 스레드가 1분마다 실제 상태를
+# 파일에 적고, 다른 프로세스는 그 파일을 읽는다. 같은 프로세스면 예전처럼 직접 본다.
+# **다른 프로세스는 fork 사본을 아예 건드리지 않는다** — 사본의 잡 저장소 잠금은
+# fork 순간 마스터 스레드가 쥐고 있었다면 영원히 잠겨 있어 get_jobs() 가 멈춘다.
+_SCHED_PID: int | None = None
+_SCHED_HEARTBEAT = Path(tempfile.gettempdir()) / "sd_scheduler_heartbeat.json"
+_SCHED_HEARTBEAT_STALE_SEC = 180   # 1분마다 적으니 3분 넘게 묵었으면 감시 스레드가 멈춘 것
+
+
+def _scheduler_is_local() -> bool:
+    """스케줄러가 이 프로세스에서 도는가(시작 전·단일 프로세스면 True)."""
+    return _SCHED_PID is None or _SCHED_PID == os.getpid()
+
+
+def _job_meta(j) -> dict:
+    """잡 하나를 JSON 으로 — 다음 실행 시각(epoch 초, 일시정지면 None)과 표시용 정보."""
+    nrt = getattr(j, "next_run_time", None)
+    return {"next": nrt.timestamp() if nrt is not None else None,
+            "name": getattr(j, "name", None) or j.id,
+            "func": (getattr(j.func_ref, "__name__", str(j.func_ref))
+                     if hasattr(j, "func_ref") else str(getattr(j, "func", ""))),
+            "trigger": _trigger_summary(getattr(j, "trigger", None)),
+            "max_instances": getattr(j, "max_instances", None)}
+
+
+def _scheduler_heartbeat_write() -> None:
+    if _scheduler is None:
+        return
+    try:
+        jobs = {j.id: _job_meta(j) for j in _scheduler.get_jobs()}
+        data = {"pid": os.getpid(), "boot": _start_time, "at": time.time(),
+                "running": bool(_scheduler.running),
+                "thread_alive": _scheduler_thread_alive(), "overdue": _scheduler_overdue(),
+                "jobs": jobs}
+        tmp = _SCHED_HEARTBEAT.with_name(f"{_SCHED_HEARTBEAT.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, _SCHED_HEARTBEAT)
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[스케줄러 감시] 심장박동 기록 실패: %s", exc)
+
+
+def _scheduler_heartbeat_read() -> dict | None:
+    """스케줄러 프로세스가 남긴 상태. 없거나 다른 부팅의 것이면 None.
+
+    다른 부팅은 pid 만으로는 못 가린다(pid 재사용) — fork 로 물려받는 _start_time 도 맞춘다.
+    """
+    try:
+        d = json.loads(_SCHED_HEARTBEAT.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get("pid") != _SCHED_PID or d.get("boot") != _start_time:
+        return None
+    d["age_sec"] = round(time.time() - float(d.get("at") or 0))
+    return d
+
+
+def _scheduler_view() -> dict:
+    """스케줄러가 **실제로 도는 프로세스** 기준의 상태.
+
+    process: "this"(이 프로세스) | "other"(마스터 — 심장박동으로 읽음) | None(스케줄러 없음)
+    other 인데 심장박동이 없거나 묵었으면 running·overdue·thread_alive 는 None(모름).
+    """
+    if _scheduler is None:
+        return {"process": None, "running": False, "overdue": None, "thread_alive": None,
+                "heartbeat_age_sec": None, "jobs": None}
+    if _scheduler_is_local():
+        return {"process": "this", "running": bool(_scheduler.running),
+                "overdue": _scheduler_overdue(), "thread_alive": _scheduler_thread_alive(),
+                "heartbeat_age_sec": None, "jobs": None}
+    hb = _scheduler_heartbeat_read()
+    if hb is None or hb["age_sec"] > _SCHED_HEARTBEAT_STALE_SEC:
+        return {"process": "other", "running": None, "overdue": None, "thread_alive": None,
+                "heartbeat_age_sec": hb and hb["age_sec"], "jobs": None}
+    return {"process": "other", "running": bool(hb.get("running")),
+            "overdue": [tuple(x) for x in hb.get("overdue") or []],
+            "thread_alive": bool(hb.get("thread_alive")),
+            "heartbeat_age_sec": hb["age_sec"], "jobs": hb.get("jobs") or {}}
 
 
 # ── 스레드 진단 (2026-10-08) ─────────────────────────────────────────────────
@@ -4800,9 +4893,11 @@ def api_ops_diag_threads():
         out.append({"name": th.name, "daemon": th.daemon, "alive": th.is_alive(), "stack": stack})
     sched = None
     if _scheduler is not None:
-        sched = {"running": bool(_scheduler.running),
-                 "thread_alive": _scheduler_thread_alive(),
-                 "overdue": _scheduler_overdue()[:10]}
+        view = _scheduler_view()
+        sched = {"process": view["process"], "pid": os.getpid(), "scheduler_pid": _SCHED_PID,
+                 "running": view["running"], "thread_alive": view["thread_alive"],
+                 "overdue": None if view["overdue"] is None else view["overdue"][:10],
+                 "heartbeat_age_sec": view["heartbeat_age_sec"]}
     return jsonify({"checked_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     "rss_mb": _rss_mb(), "scheduler": sched,
                     "thread_errors": _THREAD_ERRORS, "threads": out})
@@ -4818,6 +4913,9 @@ def _check_scheduler_health():
             return
         _last_scheduler_check = now
         if _scheduler is None:
+            return
+        # fork 된 워커의 사본을 살리면 스케줄러가 둘이 되어 텔레그램이 두 번 나간다.
+        if not _scheduler_is_local():
             return
         if not _scheduler.running:
             log.warning("[Scheduler] 멈춤 감지 — 재시작 시도")
@@ -7207,7 +7305,7 @@ def _price_broadcaster():
 
 
 def _startup():
-    global _startup_done, _scheduler
+    global _startup_done, _scheduler, _SCHED_PID
     if _startup_done:
         return
     _startup_done = True
@@ -7796,6 +7894,7 @@ def _startup():
         log.info("[컨센서스 스냅샷] 평일 14:30 cron 등록 (리비전 계산까지)")
 
         _scheduler.start()
+        _SCHED_PID = os.getpid()
         log.info("APScheduler 시작 — %d분 간격", interval)
         # 스케줄러 밖에서 스케줄러가 실제로 도는지 본다(위 _scheduler_liveness_check).
         threading.Thread(target=_scheduler_liveness_loop, daemon=True,
@@ -18815,7 +18914,10 @@ def api_ops_cron_jobs():
     Query: category=<key>, status=running|paused
     """
     try:
-        if _scheduler is None or not getattr(_scheduler, "running", False):
+        # 잡 목록은 스케줄러가 도는 프로세스의 것이다(_scheduler_view). 다른 프로세스면
+        # 심장박동에서 읽고, 그게 없으면 비워 둔다 — fork 사본은 값도 틀리고 잠길 수 있다.
+        view = _scheduler_view()
+        if view["process"] is None or (view["process"] == "this" and not view["running"]):
             return jsonify({
                 "scheduler_running": False,
                 "jobs": [],
@@ -18825,10 +18927,17 @@ def api_ops_cron_jobs():
         category_filter = request.args.get("category")
         status_filter = request.args.get("status")
         now = now_kst()
+        if view["process"] == "this":
+            items, next_run_source = {j.id: _job_meta(j) for j in _scheduler.get_jobs()}, "this_process"
+        elif view["jobs"] is not None:
+            items, next_run_source = view["jobs"], "heartbeat"
+        else:
+            items, next_run_source = {}, "unavailable"
         rows = []
-        for j in _scheduler.get_jobs():
-            cat_key, cat_label = _classify_cron_job(j.id)
-            nrt = getattr(j, "next_run_time", None)
+        for jid, meta in items.items():
+            cat_key, cat_label = _classify_cron_job(jid)
+            ts = meta.get("next")
+            nrt = None if ts is None else datetime.fromtimestamp(ts, tz=timezone.utc)
             next_run_iso = None
             sec_until = None
             if nrt is not None:
@@ -18838,17 +18947,16 @@ def api_ops_cron_jobs():
                 "due" if sec_until is not None and sec_until <= 0 else "scheduled"
             )
             rows.append({
-                "id": j.id,
-                "name": j.name or j.id,
-                "func": getattr(j.func_ref, "__name__", str(j.func_ref))
-                        if hasattr(j, "func_ref") else str(getattr(j, "func", "")),
-                "trigger": _trigger_summary(j.trigger),
+                "id": jid,
+                "name": meta.get("name") or jid,
+                "func": meta.get("func"),
+                "trigger": meta.get("trigger"),
                 "category": cat_key,
                 "category_label": cat_label,
                 "next_run_at": next_run_iso,
                 "next_run_in_sec": sec_until,
                 "status": job_status,
-                "max_instances": getattr(j, "max_instances", None),
+                "max_instances": meta.get("max_instances"),
             })
         if category_filter:
             rows = [r for r in rows if r["category"] == category_filter]
@@ -18861,7 +18969,10 @@ def api_ops_cron_jobs():
         for r in rows:
             cat_dist[r["category"]] = cat_dist.get(r["category"], 0) + 1
         return jsonify({
-            "scheduler_running": True,
+            "scheduler_running": view["running"],
+            "scheduler_process": view["process"],
+            "next_run_source": next_run_source,
+            "heartbeat_age_sec": view["heartbeat_age_sec"],
             "jobs": rows,
             "count": len(rows),
             "categories": cat_dist,
@@ -18870,6 +18981,34 @@ def api_ops_cron_jobs():
     except Exception as exc:
         log.exception("ops/cron/jobs")
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/ops/post_close/status", methods=["GET"])
+def api_ops_post_close_status():
+    """오늘 16:00 텔레그램(장마감 시황 + 장 끝난 뒤 알림)을 어디까지 보냈는지.
+
+    발송 표시(ops_state, SQLite)를 읽으므로 스케줄러가 다른 프로세스에서 돌아도 맞다.
+    날짜와 알림 이름만 싣는다.
+    """
+    today = now_kst().strftime("%Y-%m-%d")
+    done = _post_close_done(today)
+    marks: dict = {}
+    try:
+        with _get_db() as conn:
+            for r in conn.execute(
+                    "SELECT key, value, updated_at FROM ops_state WHERE key IN (?,?)",
+                    (_closing_brief_key(), _POST_CLOSE_KEY)):
+                marks[r[0]] = {"value": r[1], "updated_at": r[2]}
+    except Exception as exc:                               # noqa: BLE001
+        marks = {"error": _mask_secrets(str(exc))[:200]}
+    return jsonify({
+        "today": today,
+        "closing_brief_sent": str(_ops_get(_closing_brief_key(), "")) == today,
+        "post_close_done": [k for k in _POST_CLOSE_STEP_KEYS if k in done],
+        "post_close_left": [k for k in _POST_CLOSE_STEP_KEYS if k not in done],
+        "marks": marks,
+        "checked_at": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+    })
 
 
 @app.route("/api/ops/cron/trigger/<job_id>", methods=["POST"])
@@ -19272,14 +19411,22 @@ def api_ops_health():
 
         # 2) 스케줄러
         try:
-            sched_running = bool(_scheduler and _scheduler.running)
-            jobs = _scheduler.get_jobs() if sched_running else []
-            paused = sum(1 for j in jobs if getattr(j, "next_run_time", None) is None)
+            view = _scheduler_view()        # 다른 프로세스면 fork 사본 대신 심장박동
+            if view["process"] == "this":
+                sched_running = bool(_scheduler.running)
+                nexts = ([getattr(j, "next_run_time", None) for j in _scheduler.get_jobs()]
+                         if sched_running else [])
+            else:
+                sched_running = view["running"]
+                nexts = [m.get("next") for m in (view["jobs"] or {}).values()]
+            paused = sum(1 for n in nexts if n is None)
             result["scheduler"] = {
                 "running": sched_running,
-                "jobs_total": len(jobs),
+                "process": view["process"],
+                "overdue": None if view["overdue"] is None else len(view["overdue"]),
+                "jobs_total": len(nexts),
                 "jobs_paused": paused,
-                "jobs_active": len(jobs) - paused,
+                "jobs_active": len(nexts) - paused,
             }
         except Exception as exc:
             result["scheduler"] = {"error": str(exc)}
