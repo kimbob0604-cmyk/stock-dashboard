@@ -271,6 +271,10 @@ def compute_all(windows: Optional[List[int]] = None, verbose: bool = True) -> Di
              'by_signal': {}}
     for code in codes:
         s = compute_revisions_for_stock(code, windows, conn=conn, save=True)
+        # 종목마다 커밋한다. 평일 14:30 스냅샷 직후(장중)에 돌기 때문에, 전 종목을
+        # 한 트랜잭션으로 묶으면 그동안 쓰기 락을 쥐어 장중 가격 sync·공시 폴링 등
+        # 다른 쓰기(timeout 10초)가 'database is locked' 로 떨어진다.
+        conn.commit()
         total['computed'] += s['computed']
         total['alerts_new'] += s['alerts_new']
         total['neutral'] += s['neutral']
