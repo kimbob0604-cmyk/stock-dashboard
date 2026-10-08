@@ -236,3 +236,19 @@ CREATE TABLE IF NOT EXISTS ops_state (
     value      TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 신고가 '역사적=상장 이후' 의 기준값 (newhigh.py). 종목당 1행.
+-- ohlcv 는 52주 + 여유만 받아 두므로 상장 이후 최고 종가는 여기 따로 둔다.
+-- 그날 역사적일 수 있는 종목만 상장 이후 이력을 받아 채우고, 이후 ohlcv 새 봉으로
+-- 앞으로 굴린다. db_backup.CORE_TABLES 에 넣어 재시작에도 남긴다.
+CREATE TABLE IF NOT EXISTS alltime_high (
+    code         TEXT PRIMARY KEY,
+    max_close    REAL NOT NULL,
+    max_date     TEXT,
+    first_date   TEXT,
+    through_date TEXT NOT NULL,
+    ref_close    REAL,
+    source       TEXT,
+    complete     INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT
+);

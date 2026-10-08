@@ -9,6 +9,7 @@ db_backup.py — Render 재배포 대비 DB 백업/복원 (GitHub Gist)
   - recommendation_history  (과거 추천 스냅샷 — 시점 데이터)
   - disclosure_history      (공시 + 매겨진 점수 — 점수 재계산 비용)
   - alert_rules             (사용자 알림 규칙)
+  - alltime_high            (신고가 '역사적=상장 이후' 기준값 — 네트워크 재수집 비용)
 
 ▶ 백업 대상 — JSON 파일 (cache/):
   - server_watchlist.json   (관심종목)
@@ -31,6 +32,12 @@ db_backup.py — Render 재배포 대비 DB 백업/복원 (GitHub Gist)
                   이 문장이 비로소 참이 됐다.
     - flow_cache: _refresh_flow_batch (15:40 배치 + 저녁 시황 직전)
     - chart_cache: /api/chart 호출 시 채워짐 (요청 주도)
+
+  alltime_high 는 파생 표지만 **백업한다.** 상장 이후 전 구간을 네트워크로 다시
+  받아야 만들어지는 값이고(종목당 1행이라 작다), 재시작 직후 시황이 그날 후보
+  수십 종목의 이력을 한꺼번에 다시 받다가 시간 예산을 넘겨 '역사적 판정 보류'
+  로 나가는 일을 막는다. 복원이 안 돼도 틀린 값이 나가지는 않는다 — 그날 후보만
+  다시 받고, 못 받으면 보류로 적는다(newhigh.py).
 
   ohlcv 를 계속 백업에서 빼 두는 판단 자체는 유지한다 — 300종목 x 252행이면
   Gist 에 넣기엔 크고 16:10 잡이 매일 다시 만든다. 다만 **그 잡이 멎으면
@@ -77,6 +84,8 @@ CORE_TABLES = [
     "consensus_snapshot",       # 컨센서스 시계열 스냅샷
     "revision_alerts",          # 리비전 시그널 알림 이력
     "ops_state",                # 운영 상태 (워치독 알림 중복 방지 — 재시작 대비)
+    # ↓↓ 신고가 '역사적=상장 이후' (2026-10-08) ↓↓
+    "alltime_high",             # 종목별 상장 이후 최고 종가 (newhigh.py) — 종목당 1행
 ]
 
 # 사용자 설정/입력이 들어있는 JSON 캐시 파일도 함께 백업

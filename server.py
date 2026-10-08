@@ -10832,11 +10832,24 @@ def _extract_econ_time(event: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────
 # PHASE 19 — 52주 신고가 (KR/US)
 # ─────────────────────────────────────────────────────────────────────────
+try:
+    import newhigh as _newhigh_mod
+    _NH_W52_CALENDAR_DAYS = _newhigh_mod.W52_LOOKBACK_CALENDAR_DAYS
+except Exception:                                          # noqa: BLE001
+    _NH_W52_CALENDAR_DAYS = 364
+
+
 def _kr_new_highs_from_charts(top_by_volume: int = 200,
                               ratio_threshold: float = 0.95) -> list[dict]:
     """
-    거래대금 상위 top_by_volume 종목에 대해 /api/chart?days=252 호출,
-    52주(≈252영업일) 고점 대비 현재가 비율이 threshold 이상인 종목 반환.
+    거래대금 상위 top_by_volume 종목에 대해 /api/chart?days=364 호출,
+    52주 고점 대비 현재가 비율이 threshold 이상인 종목 반환.
+
+    52주 = **달력 52주**(오늘 − 364일 ~ 오늘). 시황의 신고가 52주 축과 같은
+    창이다(newhigh.W52_LOOKBACK_CALENDAR_DAYS). /api/chart 의 days 는 **달력일**
+    이라(start = 오늘 − days) 예전 days=252 는 52주가 아니라 약 8개월이었다.
+    이 화면은 '근접' 비율(현재가/고점)이라 오늘 봉도 창에 넣는다 — 100% 가
+    '오늘이 52주 고점' 이다. 고가 기준인 것도 근접 화면의 원래 정의라 그대로 둔다.
     """
     uni = _load_naver_universe()
     stocks_map = (uni or {}).get("stocks") or {}
@@ -10858,7 +10871,8 @@ def _kr_new_highs_from_charts(top_by_volume: int = 200,
         if not code:
             continue
         try:
-            chart = _call_api_internal(f"/api/chart/{code}?days=252")
+            chart = _call_api_internal(
+                f"/api/chart/{code}?days={_NH_W52_CALENDAR_DAYS}")
             if not chart or chart.get("error"):
                 continue
             highs  = chart.get("high")  or []
@@ -10941,8 +10955,38 @@ def _new_highs_cached_or_build(market: str, cache_file, builder) -> dict:
             "market": market, "count": 0, "items": [], "building": True}
 
 
+def _prewarm_newhigh_hist() -> dict | None:
+    """시황 신고가의 '역사적' 이력(alltime_high)을 시황 전에 채워 둔다.
+
+    16:00 시황 빌드는 이력 조회에 짧은 예산(newhigh.HIST_BUDGET_BRIEF_S)만 쓴다.
+    15:48 에 같은 판정을 더 긴 예산으로 한 번 돌려 두면, 그날 52주를 뚫은
+    종목의 상장 이후 이력이 미리 표에 들어가 시황은 표만 읽는다.
+    장 마감(15:35 가격 sync) 전에는 종가가 미확정이라 후보가 달라지므로 하지 않는다.
+    """
+    now = now_kst()
+    if now.weekday() >= 5 or (now.hour, now.minute) < (15, 35):
+        return None
+    if not (_SQLITE_OK and USE_SQLITE):
+        return None
+    try:
+        import newhigh as _nh
+        import ohlcv_autofill as _oa
+        with _get_db() as conn:
+            r = _nh.compute(conn, now.strftime("%Y-%m-%d"), _oa.MIN_MARKET_CAP_WON,
+                            budget_s=_nh.HIST_BUDGET_PREWARM_S)
+        log.info("[신고가 프리워밍] 역사적 %d · 52주 %d · 120일 %d · 보류 %d%s",
+                 len(r["buckets"]["hist"]), len(r["buckets"]["w52"]),
+                 len(r["buckets"]["d120"]), len(r["hist_pending"]),
+                 f" · {r['error']}" if r["error"] else "")
+        return r
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[신고가 프리워밍] 역사적 이력 실패: %s", exc)
+        return None
+
+
 def _prewarm_new_highs():
     """신고가 캐시 프리워밍 (장 마감 후 cron + 부팅). 첫 진입 즉시 응답 보장."""
+    _prewarm_newhigh_hist()
     today = _get_trading_date()
     for market, builder in (("kr", _kr_new_highs_from_charts),
                             ("us", _us_new_highs_from_yinfo)):
@@ -13289,7 +13333,8 @@ _CAP_STALE_DAYS = 7
 # **세 등급 모두 전부 적는다.** 사용자가 이 메시지를 읽는 이유가 종목 이름이고,
 # '외 N종목' 으로 접으면 접힌 쪽을 확인할 방법이 메시지 안에 없다.
 #
-# 60일만 5종목으로 접어 뒀다가 2026-09-18 에 풀었다. 접은 이유는 '등급이 가장
+# 60일만 5종목으로 접어 뒀다가 2026-09-18 에 풀었다(60일 축은 2026-10-08 에
+# 120일로 바뀌었다 — newhigh.py). 접은 이유는 '등급이 가장
 # 낮아 하루에 수백 종목이 설 수 있다' 였는데, 그건 길이 걱정이었지 내용 판단이
 # 아니었다. 길이는 `_split_telegram_lines` 가 줄 경계에서 나눠 조각 번호를 붙여
 # 보내므로 이미 해결돼 있다 — 줄이 잘리지도, 종목이 사라지지도 않는다.
@@ -13298,18 +13343,18 @@ _CAP_STALE_DAYS = 7
 #
 # 다시 접고 싶으면 그 등급에 숫자를 넣으면 된다. 접기 코드는 그대로 살아 있고
 # (`cap_n is None` 분기), 검사도 두 경우를 다 돌린다.
-_NH_LIST_MAX = {"hist": None, "w52": None, "d60": None}
+_NH_LIST_MAX = {"hist": None, "w52": None, "d120": None}
 
 
 # 신고가 등급별로 **상위 몇 종목에 수급을 붙이는가.** 0 = 안 붙인다.
 #
 # 52주만 5종목이다. 사용자가 보는 자리가 거기다 — 역사적은 하루 한두 종목이라
-# 따로 셀 것이 없고, 60일은 수십~수백 종목이라 다 붙이면 줄이 두 배가 된다.
+# 따로 셀 것이 없고, 120일은 수십~수백 종목이라 다 붙이면 줄이 두 배가 된다.
 # 다른 등급도 켜고 싶으면 숫자만 올리면 된다.
 #
 # '상위' 는 목록과 같은 기준, 즉 거래대금 순이다. 다른 기준으로 자르면 화면의
 # 1~5번째 줄과 수급이 붙은 줄이 어긋난다.
-_NH_FLOW_MAX = {"hist": 0, "w52": 5, "d60": 0}
+_NH_FLOW_MAX = {"hist": 0, "w52": 5, "d120": 0}
 
 
 def _newhigh_flow(conn, codes: list) -> tuple[dict, str | None]:
@@ -13627,12 +13672,16 @@ def _kospi200_futures_section() -> dict:
     return sec
 
 
-def build_market_summary(dry_run: bool = False) -> dict:
+def build_market_summary(dry_run: bool = False,
+                         nh_hist_budget_s: float | None = None) -> dict:
     """매크로·섹터·특징주·수급·공시·AI 섹션을 DB/캐시에서 집계.
 
     Args:
         dry_run: True면 summary["debug"] 에 빌더별 elapsed_ms / error 기록.
                  (기존 cron/api 호출 호환을 위해 기본값 False)
+        nh_hist_budget_s: 신고가 '역사적' 의 상장 이후 이력을 네트워크로 받는 데
+                 쓸 시간(초). None 이면 시황 예산(newhigh.HIST_BUDGET_BRIEF_S).
+                 0 이면 표(alltime_high)만 읽는다 — 대시보드 API 가 그렇게 부른다.
     """
     summary = {
         "generated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -13856,15 +13905,23 @@ def build_market_summary(dry_run: bool = False) -> dict:
         debug_info["feat_error"] = feat_section["error"]
         debug_info["feat_subsections"] = len(feat_section["subsections"])
 
-    # ── 5-2. 신고가 (역사적 · 52주 · 60일) ──
-    # 오늘 종가(stocks.close, 라이브)를 **직전 거래일까지의 고가**와 견준다.
-    # 오늘 행까지 최고가에 넣으면 모든 종목이 제 고가와 비겨 늘 신고가가 된다.
+    # ── 5-2. 신고가 (역사적 · 52주 · 120일) ──
+    # 정의는 newhigh.py 머리말에 있다(사용자 요청 2026-10-08 — '특정일 기준이
+    # 아니라 당일 기준'). 요약:
+    #   120일 = 판정일 직전 120 **거래일**(KRX 거래일 달력 — krx_calendar).
+    #           종목이 거래정지였던 날로 창이 늘어나지 않는다.
+    #   52주  = **달력 52주** (판정일 − 364일 ≤ 봉 날짜 < 판정일)
+    #   역사적 = **상장 이후 전체**. ohlcv 는 52주 + 여유만 받아 두므로 상장 이후
+    #           최고 종가는 alltime_high 표에서 읽는다. 그날 역사적일 수 있는 몇
+    #           종목만 상장 이후 이력을 받아 채운다. 못 받으면 '역사적' 이라 부르지
+    #           않고 52주(또는 120일)에 둔 채 '역사적 판정 보류 N종목' 을 적는다.
     #
-    # 구간은 달력일이 아니라 ohlcv 에 실제로 있는 거래일로 센다 — 공휴일이 끼면
-    # 달력 60일이 거래일 40일이 되기도 한다.
+    # 오늘 종가(stocks.close, 라이브)를 **전 거래일까지의 종가**와 견준다. 오늘 행을
+    # 창에 넣으면 모든 종목이 제 종가와 비겨 늘 신고가가 된다.
     #
-    # '역사적' 은 **보유한 일봉 전 구간**이다(수집기가 5년). 상장 이후 전부가
-    # 아니므로 기준 구간을 함께 적는다. 안 적으면 5년 최고가가 사상 최고가로 읽힌다.
+    # **엄격히 초과('>')** 다 — 창 최고와 같은 가격은 신고가가 아니다. 예전엔
+    # '>=' 였는데, 그러면 거래가 없거나 가격이 묶여 종가가 그대로인 날마다 같은
+    # 종목이 신고가로 찍힌다. ETF-Traker 원본도 '>' 다(2026-10-08 통일).
     #
     # **종가 기준이다** — 오늘 종가를 과거 **종가**들의 최고와 견준다. 과거 고가와
     # 견주면 기준이 섞여(오늘은 종가, 과거는 장중 고가) 판정이 보수적으로 치우치고,
@@ -13872,102 +13929,47 @@ def build_market_summary(dry_run: bool = False) -> dict:
     # '등락률 마이너스인데 신고가' 가 나온다. 신고가 보드(ETF-Traker)도 종가 기준
     # (board/config/settings.yaml default_basis: close)이라 두 화면이 같은 말을 한다.
     #
-    # 한 종목은 가장 센 줄에만 담는다. 역사적 신고가면 52주·60일도 당연히 뚫은
-    # 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
+    # 한 종목은 가장 센 줄에만 담는다(hist > w52 > d120). 역사적 신고가면 52주·
+    # 120일도 당연히 뚫은 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
     #
     # 오늘 거래가 없던 종목(volume_mn=0)은 뺀다. 체결이 없으면 종가가 어제
-    # 그대로라 '오늘 신고가' 라고 부를 것이 없고, 5년치 일봉을 훑는 이 쿼리의
-    # 대상만 늘린다.
+    # 그대로라 '오늘 신고가' 라고 부를 것이 없다.
     _t_nh = time.time()
     nh_section = {"title": "🏔 신고가", "subsections": [], "error": None}
     if _SQLITE_OK and USE_SQLITE:
-        _KRG = "[0-9][0-9][0-9][0-9][0-9][0-9]"
         try:
+            import newhigh as _nh
+            import ohlcv_autofill as _oa
             today_ymd = now_kst().strftime("%Y-%m-%d")
             with _get_db() as conn:
-                days = [r[0] for r in conn.execute(
-                    f"""SELECT DISTINCT date FROM ohlcv
-                        WHERE code GLOB '{_KRG}' AND date < ?
-                        ORDER BY date DESC LIMIT 252""", (today_ymd,)).fetchall()]
-                if len(days) < 60:
-                    # 왜 모자란지까지 적는다. '0일' 만 보면 고칠 데를 못 찾는다.
-                    # ohlcv 는 16:10 잡과 부팅 스레드가 채운다(_fill_ohlcv_job).
-                    nh_section["error"] = (
-                        f"일봉 거래일이 {len(days)}일뿐 — 60일 구간을 못 만든다"
-                        f" · {_ohlcv_fill_hint()}")
+                # 모집단: ETF 가 아닌 시총 1,000억(원 단위 1e11) 이상.
+                # 일봉은 그보다 넓게(800억~) 받아 두지만 판정은 여기서 자른다.
+                nh = _nh.compute(conn, today_ymd, _oa.MIN_MARKET_CAP_WON,
+                                 budget_s=(_nh.HIST_BUDGET_BRIEF_S
+                                           if nh_hist_budget_s is None
+                                           else nh_hist_budget_s))
+                if nh["error"]:
+                    # 왜 모자란지까지 적는다. ohlcv 는 16:10 잡과 부팅 스레드가
+                    # 채운다(_fill_ohlcv_job).
+                    nh_section["error"] = f"{nh['error']} · {_ohlcv_fill_hint()}"
                 else:
-                    last_day, cut60, cut252 = days[0], days[59], days[-1]
-                    first_day = conn.execute(
-                        f"SELECT MIN(date) FROM ohlcv WHERE code GLOB '{_KRG}'"
-                    ).fetchone()[0]
-                    # 두 번에 나눠 묻는다. 한 번에 MAX(o.close) 를 같이 구하면
-                    # 전 종목 5년 일봉(수천 종목 x 1,250봉)을 통째로 훑는다.
-                    # 52주를 못 뚫은 종목은 역사적일 수 없으므로, 전 구간
-                    # 최고 종가는 **52주를 뚫은 몇 종목에만** 물으면 된다.
-                    # 모집단: ETF 가 아닌 시총 1,000억(원 단위 1e11) 이상.
-                    # 일봉은 그보다 넓게(800억~) 받아 두지만 판정은 여기서 자른다.
-                    import ohlcv_autofill as _oa
-                    min_cap = _oa.MIN_MARKET_CAP_WON
-                    rows = conn.execute("""
-                        SELECT s.code AS code, s.name AS name, s.sector AS sector,
-                               s.change_pct AS change_pct, s.close AS close,
-                               s.volume_mn AS volume_mn, s.market_cap AS market_cap,
-                               s.market_cap_updated AS market_cap_updated,
-                               MAX(CASE WHEN o.date >= ? THEN o.close END) AS h60,
-                               MAX(o.close) AS h252
-                        FROM stocks s
-                        JOIN ohlcv o ON o.code = s.code
-                                    AND o.date >= ? AND o.date < ?
-                        WHERE (s.market = '' OR s.market LIKE 'KOS%')
-                          AND COALESCE(s.is_etf, 0) = 0
-                          AND s.close >= 1000 AND s.change_pct IS NOT NULL
-                          AND COALESCE(s.volume_mn, 0) > 0
-                          AND COALESCE(s.market_cap, 0) >= ?
-                        GROUP BY s.code
-                    """, (cut60, cut252, today_ymd, min_cap)).fetchall()
-                    # 같은 조건에서 일봉만 뺀 수 — 모집단. `rows` 가 이보다 적으면
-                    # 그만큼 일봉이 없어 판정하지 못한 것이다(채우는 중·수집
-                    # 실패·신규 상장 직후). 그 차이를 머리말에 그대로 적는다.
-                    universe_n = conn.execute("""
-                        SELECT COUNT(*) FROM stocks s
-                        WHERE (s.market = '' OR s.market LIKE 'KOS%')
-                          AND COALESCE(s.is_etf, 0) = 0
-                          AND s.close >= 1000 AND s.change_pct IS NOT NULL
-                          AND COALESCE(s.volume_mn, 0) > 0
-                          AND COALESCE(s.market_cap, 0) >= ?
-                    """, (min_cap,)).fetchone()[0]
-                    scope = _ohlcv_scope_note(len(rows), universe_n)
-
-                    over52 = [r for r in rows
-                              if r["close"] and r["h252"] and r["close"] >= r["h252"]]
-                    hall_of = {}
-                    if over52:
-                        codes = [r["code"] for r in over52]
-                        qs = ",".join("?" * len(codes))
-                        hall_of = {x[0]: x[1] for x in conn.execute(
-                            f"""SELECT code, MAX(close) FROM ohlcv
-                                WHERE code IN ({qs}) AND date < ?
-                                GROUP BY code""", (*codes, today_ymd)).fetchall()}
-
-                    buckets = {"hist": [], "w52": [], "d60": []}
-                    for r in rows:
-                        c = r["close"]
-                        if not c:
-                            continue
-                        hall = hall_of.get(r["code"])
-                        if hall and c >= hall:
-                            buckets["hist"].append(r)
-                        elif r["h252"] and c >= r["h252"]:
-                            buckets["w52"].append(r)
-                        elif r["h60"] and c >= r["h60"]:
-                            buckets["d60"].append(r)
+                    # 판정한 수(일봉이 있는 종목)와 모집단 수를 함께 적는다 —
+                    # 그 차이만큼 일봉이 없어 판정하지 못한 것이다.
+                    scope = _ohlcv_scope_note(nh["scanned"], nh["universe_n"])
+                    if nh["hist_pending"]:
+                        log.warning("[신고가] 역사적 판정 보류 %d종목 — 예: %s",
+                                    len(nh["hist_pending"]),
+                                    "; ".join(f"{n}({c}) {why}" for c, n, why
+                                              in nh["hist_pending"][:3]))
+                    if nh["calendar_corrections"]:
+                        log.info("[신고가] 받아 둔 일봉이 휴장일 표를 바로잡음: %s",
+                                 nh["calendar_corrections"][:5])
 
                     # 수급을 붙인 줄들의 기준일. 오늘이 아니면 섹션 머리말이
                     # 그 사실을 적는다 — 16:00 시황에서는 대개 전일 값이다.
                     nh_flow_dates: set = set()
-                    for key, label, icon in (("hist", "역사적", "🏔"),
-                                             ("w52", "52주", "📈"),
-                                             ("d60", "60일", "📊")):
+                    buckets = nh["buckets"]
+                    for key, label, icon in _nh.AXES:
                         got = sorted(buckets[key],
                                      key=lambda x: -(x["volume_mn"] or 0))
                         if not got:
@@ -14003,9 +14005,9 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         # **모집단을 반드시 밝힌다** — 시총 1,000억 이상만 보고,
                         # 그중 일봉이 없는 종목은 판정하지 못했다. 안 적으면
                         # "신고가 3종목" 을 전 종목 기준으로 읽는다.
-                        basis = (f"  <i>{scope} · "
-                                 f"종가 기준 · 오늘 종가 vs {last_day}까지 종가 · "
-                                 f"역사적=일봉 {first_day}~")
+                        # '받아 둔 일봉 첫날 이후' 같은 특정일은 적지 않는다 —
+                        # 세 창 모두 판정일 기준이다(newhigh.BASIS_TEXT).
+                        basis = "  <i>" + _nh.basis_line(scope, nh)
                         # `*` 를 쓴 줄이 하나라도 있으면 그 뜻을 여기서 밝힌다.
                         # 범례 없는 기호는 읽는 사람에게 오타로 보인다.
                         if any("*]" in it
@@ -14027,8 +14029,11 @@ def build_market_summary(dry_run: bool = False) -> dict:
                         # 없다는 말도 무엇을 훑고 없는지 밝힌다 — 절반만 훑고
                         # '없음' 이면 그건 없는 게 아니라 모르는 것이다.
                         nh_section["error"] = (
-                            f"오늘 신고가 종목 없음 ({scope} · "
-                            f"{last_day}까지 종가 기준)")
+                            f"오늘 신고가 종목 없음 ({_nh.basis_line(scope, nh)})")
+                if dry_run:
+                    debug_info["newhigh_windows"] = nh.get("windows")
+                    debug_info["newhigh_hist_pending"] = [
+                        f"{n}({c}): {why}" for c, n, why in nh.get("hist_pending") or []]
         except sqlite3.OperationalError as exc:
             nh_section["error"] = f"DB locked/timeout: {str(exc)[:150]}"
             log.warning("[summary] newhigh DB OperationalError: %s", exc)
@@ -14257,7 +14262,12 @@ def build_market_summary(dry_run: bool = False) -> dict:
 
 @app.route("/api/market_summary")
 def api_market_summary():
-    return jsonify(build_market_summary())
+    # 대시보드가 페이지를 열 때마다 부른다(캐시 없음). 신고가 '역사적' 의 상장 이후
+    # 이력은 여기서 받지 않는다(예산 0 — 표만 읽는다). 받게 두면 장중 요청이
+    # 종목마다 수 초짜리 네트워크 조회로 요청 스레드(gunicorn 1 worker · 4 threads)를
+    # 최대 60초 붙잡고, 그 락을 16:00 시황이 기다리다 예산을 다 쓴다. 이력은 15:48
+    # 프리워밍과 16:00 시황이 받아 표에 둔다 — 표에 없는 후보는 '판정 보류' 로 적힌다.
+    return jsonify(build_market_summary(nh_hist_budget_s=0))
 
 
 def build_us_market_summary() -> dict:

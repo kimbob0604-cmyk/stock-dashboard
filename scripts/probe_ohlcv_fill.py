@@ -59,24 +59,27 @@ with tempfile.TemporaryDirectory() as td:
     print(f"  테이블: {st.get('rows', 0):,}행 / {st.get('codes', 0)}종목 "
           f"· {st.get('first')} ~ {st.get('last')}")
 
-    # 신고가 쿼리가 이 데이터로 성립하는가 — 거래일이 60일 넘게 잡히는지.
+    # 신고가 판정이 이 데이터로 성립하는가 — 받은 첫날이 120거래일 창의 첫날
+    # (KRX 거래일 달력으로 센 날)보다 앞서는지. newhigh.compute 와 같은 기준이다.
+    import newhigh
     cx = sqlite3.connect(db)
     today = datetime.now().strftime('%Y-%m-%d')
-    days = [r[0] for r in cx.execute(
-        "SELECT DISTINCT date FROM ohlcv WHERE code GLOB "
-        "'[0-9][0-9][0-9][0-9][0-9][0-9]' AND date < ? "
-        "ORDER BY date DESC LIMIT 252", (today,)).fetchall()]
+    w = newhigh.windows(today)
+    first, last = cx.execute(
+        "SELECT MIN(date), MAX(date) FROM ohlcv WHERE code GLOB "
+        "'[0-9][0-9][0-9][0-9][0-9][0-9]' AND date < ?", (today,)).fetchone()
     sample = cx.execute(
         "SELECT code, date, close FROM ohlcv ORDER BY date DESC LIMIT 3").fetchall()
     cx.close()
 
     print()
-    print('── 신고가 쿼리 성립 여부')
-    print(f"  거래일 {len(days)}일 (60일 이상이어야 섹션이 산다)")
-    if days:
-        print(f"  최근 {days[0]} · 252번째 {days[-1]}")
+    print('── 신고가 판정 성립 여부')
+    print(f"  일봉 {first} ~ {last} · 120거래일 창 {w['d120_start']}~ · "
+          f"52주 창 {w['w52_start']}~")
+    print(f"  (첫날이 120거래일 창의 첫날 이전이어야 섹션이 산다. 52주 창까지 덮으면 "
+          f"52주도 판정된다)")
     print(f"  표본: {sample}")
-    good = len(days) >= 60 and res['ok'] > 0
+    good = bool(first) and first <= w['d120_start'] and res['ok'] > 0
     print()
     print('판정:', '성립 — 신고가 섹션이 채워진다' if good
           else '불성립 — 이 데이터로는 섹션이 빈다')

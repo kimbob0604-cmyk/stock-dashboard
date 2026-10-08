@@ -7,7 +7,7 @@ server.py 는 Flask 앱이라 import 하지 않는다(다른 check_*.py 와 같�
   2. '상위' 는 목록과 같은 거래대금 순이다. 화면의 1~5번째 줄과 겹쳐야 한다.
   3. 수급을 못 받은 종목은 '수급 없음' 이라 적는다 — 0 으로 채우지 않는다.
   4. 수급 기준일이 오늘이 아니면 머리말이 그 사실을 적는다.
-  5. 역사적·60일은 기본으로 안 붙는다(_NH_FLOW_MAX 가 0).
+  5. 역사적·120일은 기본으로 안 붙는다(_NH_FLOW_MAX 가 0).
 """
 import re
 import sys
@@ -36,7 +36,9 @@ _NH_FLOW_MAX = ns['_NH_FLOW_MAX']
 print(f'_NH_FLOW_MAX = {_NH_FLOW_MAX}')
 want(_NH_FLOW_MAX.get('w52') == 5, f"52주가 {_NH_FLOW_MAX.get('w52')}종목이다 — 5 여야 한다")
 want(not _NH_FLOW_MAX.get('hist'), '역사적에 기본으로 수급이 붙는다')
-want(not _NH_FLOW_MAX.get('d60'), '60일에 기본으로 수급이 붙는다')
+want(not _NH_FLOW_MAX.get('d120'), '120일에 기본으로 수급이 붙는다')
+want(set(_NH_FLOW_MAX) == {'hist', 'w52', 'd120'},
+     f'_NH_FLOW_MAX 의 축이 신고가 3축과 다르다: {sorted(_NH_FLOW_MAX)}')
 
 # ── _fmt_nh_flow 본문을 그대로 떼어 온다 ────────────────────────────────
 fmt = grab(r'\ndef _fmt_nh_flow\(.*?\n(?=\ndef )', '_fmt_nh_flow')
