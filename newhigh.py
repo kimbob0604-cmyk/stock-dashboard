@@ -11,8 +11,10 @@ newhigh.py — 국내 신고가 3축(역사적 · 52주 · 120일) 판정.
   w52   | **달력 52주** — 판정일 − 364일 ≤ 봉 날짜 < 판정일
   hist  | **상장 이후 전체**(판정일 전까지). '받아 둔 일봉의 첫날' 이 아니다.
 
-  - **종가 기준**이다(이 저장소의 원래 기준 — 그대로 둔다). 오늘 종가 ≥ 창 안
-    최고 종가면 그 축의 신고가.
+  - **종가 기준**이다(이 저장소의 원래 기준 — 그대로 둔다). 오늘 종가 **>** 창 안
+    최고 종가면 그 축의 신고가 — **엄격히 초과**다(ETF-Traker 원본도 '>').
+    같은 가격을 신고가로 치면 거래가 없거나 상한가에 묶여 종가가 그대로인
+    날마다 같은 종목이 신고가로 찍힌다. 예전 이 저장소는 '>=' 였다.
   - 라벨은 가장 센 축 하나: hist > w52 > d120. 한 종목은 한 줄에만 나온다.
   - 창을 다 채우지 못한 종목(상장이 창보다 늦다 등)은 그 축을 판정하지 않는다
     (None). 신규상장은 hist 로만 판정될 수 있다.
@@ -38,9 +40,13 @@ ohlcv 는 52주 + 여유만 받아 둔다(ohlcv_autofill.LOOKBACK_CALENDAR_DAYS,
     보류로 돌린다. 15:48 프리워밍이 더 긴 예산으로 먼저 채워 두므로 16:00
     시황은 대개 표만 읽는다.
 
-  한계: 소스가 가진 가장 오래된 날보다 먼저 상장한 종목은 '소스의 첫날 이후' 가
-  된다. 네이버 일봉은 1990-01-03 부터다(2026-10-08 삼성전자로 확인 — 9,483봉,
-  한 번에 2초). 받은 이력의 첫날은 표의 first_date 에 남는다.
+  '상장일까지 닿았다' 의 판정: 받은 이력이 받아 둔 일봉보다 앞서야 하고(아니면
+  보류), 그 첫날이 상장일이거나 **원천의 바닥(`HIST_SOURCE_FLOOR`)** 이면 닿은
+  것으로 본다. 네이버 siseJson 은 1990-01-03 보다 이른 봉을 주지 않는다
+  (2026-10-08 삼성전자로 확인 — 9,483봉, 한 번에 2초). 그래서 1990 년 이전 상장
+  종목의 '역사적' 은 1990-01-03 이후 최고가이고, 그런 종목이 그날 역사적 줄에
+  있으면 기준 줄이 그 사실을 한 번 적는다. 받은 이력의 첫날은 표의 first_date 에
+  남는다.
 """
 from __future__ import annotations
 
@@ -62,6 +68,10 @@ SCAN_MARGIN_DAYS = 45
 
 # 상장 이후 이력을 받을 때의 시작일 — 소스가 가진 첫날부터 돌려준다.
 HIST_FETCH_START = "19800101"
+# 원천(네이버 siseJson)이 주는 가장 이른 봉. 이력의 첫날이 이 날 이하면 상장일이
+# 그보다 앞서더라도 '받을 수 있는 전부' 에 닿은 것으로 본다.
+HIST_SOURCE_FLOOR = "1990-01-03"
+HIST_FLOOR_NOTE = f"1990년 이전 상장은 {HIST_SOURCE_FLOOR} 이후 최고가"
 HIST_FETCH_WORKERS = 4
 HIST_BUDGET_BRIEF_S = 60                  # 16:00 시황 빌드 안에서 쓰는 예산
 HIST_BUDGET_PREWARM_S = 240               # 15:48 프리워밍 예산
@@ -174,7 +184,7 @@ def axis_flags(row, w: dict) -> dict:
         if not c or not start or not first or first > start or h is None:
             out[key] = None
         else:
-            out[key] = c >= h
+            out[key] = c > h           # 엄격히 초과 — 같은 가격은 신고가가 아니다
     return out
 
 
@@ -189,7 +199,7 @@ def is_hist_candidate(row, flags: dict) -> bool:
         return True
     if flags.get("w52") is None:
         return bool(row["close"] and row["h_scan"] is not None
-                    and row["close"] >= row["h_scan"])
+                    and row["close"] > row["h_scan"])
     return False
 
 
@@ -379,7 +389,8 @@ def compute(conn, today, min_cap: float, *, fetch=None,
         if "max" in got:
             # 받아 둔 일봉은 상장 이후 이력의 일부라 그 최고도 함께 본다.
             hist_max = max(got["max"], r["h_scan"] or 0)
-            r["hist"] = r["close"] >= hist_max
+            r["hist"] = r["close"] > hist_max
+            r["hist_first_date"] = got.get("first_date")
         else:
             res["hist_pending"].append((r["code"], r["name"], got["pending"]))
     if cands:
@@ -412,6 +423,10 @@ def basis_line(scope: str, res: dict) -> str:
     # 일봉이 전 거래일까지 안 차 있으면 '전 거래일까지' 가 거짓이 된다. 그 날을 적는다.
     if res.get("last_bar") and w.get("prev_day") and res["last_bar"] < w["prev_day"]:
         s += f" · 일봉은 {res['last_bar']}까지"
+    # 1990 년 이전 상장 종목이 그날 역사적 줄에 있을 때만, 한 번.
+    if any((r.get("hist_first_date") or "9999") <= HIST_SOURCE_FLOOR
+           for r in (res.get("buckets") or {}).get("hist") or []):
+        s += f" · {HIST_FLOOR_NOTE}"
     pend = res.get("hist_pending") or []
     if pend:
         s += f" · 역사적 판정 보류 {len(pend)}종목(상장 이후 이력 미확인)"

@@ -37,6 +37,12 @@ assert 'MAX(o.close)' in nh.SCAN_SQL and 'THEN o.close END' in nh.SCAN_SQL, \
     '신고가 창 쿼리가 종가 기준이 아니다'
 assert 'o.high' not in nh.SCAN_SQL, '고가가 아직 판정에 쓰인다'
 assert 'o.date < :today' in nh.SCAN_SQL, '오늘 봉이 창에 섞인다'
+# 비교는 엄격히 '>' — 같은 가격은 신고가가 아니다(ETF-Traker 원본과 같음).
+import inspect                                                   # noqa: E402
+_src_nh = inspect.getsource(nh)
+assert 'out[key] = c > h' in _src_nh and 'r["close"] > hist_max' in _src_nh, \
+    "신고가 비교가 엄격한 '>' 가 아니다"
+assert 'c >= h' not in _src_nh and '>= hist_max' not in _src_nh, "'>=' 비교가 남아 있다"
 
 # server.py 가 이 모듈로 판정한다 — 옛 '특정일' 경로가 남아 있지 않다.
 blk = SRC[SRC.index('# ── 5-2. 신고가'):SRC.index('# ── 6. 수급')]
@@ -112,6 +118,8 @@ add('000003', '백이십일', 9500,
     series(lambda d: 20000 if d < W['d120_start'] else 9000), older=older('000003', 7000))
 # 아무것도 못 뚫음
 add('000004', '평범', 5000, series(lambda d: 20000), older=older('000004', 7000))
+# 52주 최고와 **같은** 가격 — 엄격히 '>' 라 신고가가 아니다
+add('000012', '같은값', 9000, series(lambda d: 9000), older=older('000012', 7000))
 # 오늘 자기 행이 이미 들어와 있는 종목 — 그 행을 최고가에 넣으면 늘 신고가가 된다
 add('000005', '오늘행', 5000, series(lambda d: 20000), older=older('000005', 7000))
 conn.execute("INSERT INTO ohlcv VALUES ('000005',?,5000,5000,5000,5000,1)", (TODAY,))
@@ -165,14 +173,15 @@ want(b['d120'] == ['백이십일', '경계회사'], f"120일 줄이 {b['d120']}"
 want('작은회사' not in everyone, '시총 1,000억 미만이 신고가에 들어갔다')
 want('KODEX 200' not in everyone, 'ETF 가 신고가에 들어갔다')
 # 모집단 = 1,000억 이상·ETF 아님·오늘 거래 — 일봉 없는 종목까지 센다.
-# 000001~000005, 000008, 000010, 000011 → 8. 판정한 수는 일봉이 있는 7.
-want(res['universe_n'] == 8, f"모집단 수가 {res['universe_n']} 이다 (기대 8)")
-want(res['scanned'] == 7, f"판정한 수가 {res['scanned']} 이다 (기대 7)")
+# 000001~000005, 000008, 000010, 000011, 000012 → 9. 판정한 수는 일봉이 있는 8.
+want(res['universe_n'] == 9, f"모집단 수가 {res['universe_n']} 이다 (기대 9)")
+want(res['scanned'] == 8, f"판정한 수가 {res['scanned']} 이다 (기대 8)")
 note = oa.coverage_note(res['scanned'], res['universe_n'])
 print('범위 문구:', note)
-want(note == '시총 1,000억 이상 8종목 중 7종목 대상 · 일봉 미수집 1종목',
+want(note == '시총 1,000억 이상 9종목 중 8종목 대상 · 일봉 미수집 1종목',
      f'범위 문구가 모자란 수를 안 밝힌다: {note}')
 want('평범' not in everyone, '못 뚫은 종목이 들어갔다')
+want('같은값' not in everyone, "창 최고와 같은 가격을 신고가로 쳤다 — '>' 가 아니라 '>=' 다")
 want('오늘행' not in everyone, '오늘 자기 행을 최고가에 넣어 제 고가와 비겼다')
 # 상장 이후 이력은 52주를 뚫은 종목에만 묻는다 — 첫 판정에서 받고, 둘째 판정은
 # 표(alltime_high)에서 읽어 다시 묻지 않는다.
