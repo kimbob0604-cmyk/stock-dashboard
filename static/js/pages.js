@@ -8768,7 +8768,7 @@ async function renderOpsCronPlaceholder() {
     const cats = d.categories || {};
 
     document.getElementById('ops-cron-ts').textContent =
-      `검사: ${d.checked_at || '—'} · 스케줄러: ${d.scheduler_running ? '✅ 실행 중' : '❌ 정지'}`;
+      `검사: ${d.checked_at || '—'} · 스케줄러: ${d.scheduler_running == null ? '❔ 확인 불가' : d.scheduler_running ? '✅ 실행 중' : '❌ 정지'}`;
 
     const dueCount = jobs.filter(j => (j.next_run_in_sec ?? 999) <= 60).length;
     const pausedCount = jobs.filter(j => j.status === 'paused').length;
@@ -8776,7 +8776,7 @@ async function renderOpsCronPlaceholder() {
       <div class="ops-score-card">
         <div class="ops-score-label">등록된 잡</div>
         <div class="ops-score-value">${jobs.length}</div>
-        <div class="ops-score-sub">${d.scheduler_running ? '실행 중' : '정지'}</div>
+        <div class="ops-score-sub">${d.scheduler_running == null ? '확인 불가' : d.scheduler_running ? '실행 중' : '정지'}</div>
       </div>
       <div class="ops-score-card">
         <div class="ops-score-label">1분 내 실행</div>
@@ -8908,7 +8908,7 @@ async function renderOpsHealthPlaceholder() {
       </div>
       <div class="ops-score-card">
         <div class="ops-score-label">스케줄러</div>
-        <div class="ops-score-value ${sc.running ? 'ok' : 'bad'}">${sc.running ? '실행' : '정지'}</div>
+        <div class="ops-score-value ${sc.running == null ? '' : sc.running ? 'ok' : 'bad'}">${sc.running == null ? '확인 불가' : sc.running ? '실행' : '정지'}</div>
         <div class="ops-score-sub">활성 ${sc.jobs_active ?? 0} / 정지 ${sc.jobs_paused ?? 0}</div>
       </div>`;
 
