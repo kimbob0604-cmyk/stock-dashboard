@@ -3029,7 +3029,7 @@ def _fetch_and_save_flow_legacy_unused(code: str) -> bool:
 
 def _refresh_flow_batch(top_n: int = 200) -> dict:
     """KR 시총 상위 top_n 종목의 외인/기관 수급 일괄 갱신.
-    cron: 평일 15:40 (가격 sync 15:35 후, 시황 발송 15:50 전).
+    cron: 평일 15:40 (가격 sync 15:35 후, 16:00 시황·수급 시그널 발송 전).
     소요: ~1.5분 (200개 × 0.4s rate limit).
     """
     if not (_SQLITE_OK and USE_SQLITE):
@@ -5202,6 +5202,17 @@ def api_options_signal():
 # ─────────────────────────────────────────────────────────────────────────
 # PHASE 23 — 텔레그램 알림 / ETF 히트맵 / 배당 스크리너
 # ─────────────────────────────────────────────────────────────────────────
+# 텔레그램 발송은 프로세스 안에서 **한 줄로 세운다.** 평일 16:00 에는 장마감
+# 시황(여러 조각)과 장 끝난 뒤 알림들(send_post_close_alerts)이 같은 시각에
+# 나간다. 줄을 안 세우면 시황 (1/3)·(2/3) 사이에 다른 알림이 끼어들고, 한
+# 채팅에 1초에 여러 건을 몰아 보내면 텔레그램이 429 로 거절한다 — 그 건은
+# 재시도 없이 그대로 사라진다. 건 사이를 _TG_MIN_GAP_S 만큼 띄운다.
+# RLock 이라 send_telegram_long 이 조각 전체를 잡은 채 send_telegram 을 부른다.
+_TG_SEND_LOCK = threading.RLock()
+_TG_MIN_GAP_S = 1.0
+_TG_LAST_SENT = [0.0]
+
+
 def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
     """텔레그램 메시지 전송. 토큰 미설정 또는 알림 OFF 시 silently skip."""
     if os.getenv("TELEGRAM_ENABLED", "1").strip().lower() in ("0", "false", "no", "off"):
@@ -5214,10 +5225,17 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
     try:
         import requests as _rq
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        r = _rq.post(url, json={
-            "chat_id": chat_id, "text": message,
-            "parse_mode": parse_mode, "disable_web_page_preview": True,
-        }, timeout=10)
+        with _TG_SEND_LOCK:
+            gap = _TG_MIN_GAP_S - (time.monotonic() - _TG_LAST_SENT[0])
+            if gap > 0:
+                time.sleep(gap)
+            try:
+                r = _rq.post(url, json={
+                    "chat_id": chat_id, "text": message,
+                    "parse_mode": parse_mode, "disable_web_page_preview": True,
+                }, timeout=10)
+            finally:
+                _TG_LAST_SENT[0] = time.monotonic()
         if r.status_code != 200:
             log.warning("[텔레그램] send failed: %s %s", r.status_code, r.text[:200])
             return False
@@ -5280,11 +5298,13 @@ def send_telegram_long(message: str, parse_mode: str = "HTML") -> bool:
     if len(chunks) == 1:
         return send_telegram(chunks[0], parse_mode=parse_mode)
     ok = True
-    for i, chunk in enumerate(chunks, 1):
-        head = f"<i>({i}/{len(chunks)})</i>\n"
-        if not send_telegram(head + chunk, parse_mode=parse_mode):
-            ok = False
-            log.warning("[텔레그램] %d/%d 조각 발송 실패", i, len(chunks))
+    # 조각 전체를 한 번에 잡는다 — 그 사이에 다른 알림이 끼지 않는다.
+    with _TG_SEND_LOCK:
+        for i, chunk in enumerate(chunks, 1):
+            head = f"<i>({i}/{len(chunks)})</i>\n"
+            if not send_telegram(head + chunk, parse_mode=parse_mode):
+                ok = False
+                log.warning("[텔레그램] %d/%d 조각 발송 실패", i, len(chunks))
     log.info("[텔레그램] 본문 %d자 → %d건 분할 발송", len(message), len(chunks))
     return ok
 
@@ -5945,24 +5965,77 @@ def _fmt_revision_period(period_type, year, quarter) -> str:
     return f"{year}"
 
 
-def alert_revision_signals():
-    """Step 5-1-F: 컨센서스 리비전 STRONG 시그널 텔레 발송 (평일 18:30).
+# 컨센서스 스냅샷 → 리비전 계산은 평일 14:30 잡(consensus_snapshot_and_revisions)이
+# 한 덩어리로 끝내 둔다. 16:00 리비전 알림은 그 결과를 보내기만 한다.
+_CONSENSUS_SNAPSHOT_LOCK = threading.Lock()
+_REVISION_COMPUTED: dict = {"date": None}
+# 16:00 에 스냅샷이 아직 돌고 있으면 이만큼까지 기다린다. 넘기면 있는 것으로 보낸다.
+_REVISION_WAIT_S = 20 * 60
 
-    1. revision_calculator.compute_all() 실행 — consensus_snapshot 기반 신규 알림
+
+def _compute_revisions() -> None:
+    """consensus_snapshot → revision_alerts. 실패해도 DB 에 쌓인 알림은 그대로 보낸다."""
+    try:
+        from revision_calculator import compute_all
+        r = compute_all(verbose=False)
+        _REVISION_COMPUTED["date"] = now_kst().strftime("%Y-%m-%d")
+        log.info("[리비전] 계산 완료: %s", r)
+    except ImportError:
+        log.warning("[리비전] revision_calculator 모듈 부재 — DB 기존 알림만 발송")
+    except Exception as exc:
+        log.warning("[리비전] compute_all 실패 (DB 알림만 발송): %s", exc)
+
+
+def consensus_snapshot_and_revisions() -> None:
+    """평일 14:30 — 컨센서스 스냅샷을 받고 곧바로 리비전까지 계산해 둔다.
+
+    16:00 리비전 알림의 입력이다. 예전엔 18:00 스냅샷 → 18:30 알림이었는데,
+    2026-10-08 사용자 요청(장 끝난 뒤 텔레그램은 전부 16:00)으로 알림을 당기면서
+    입력도 16:00 전에 끝나게 당겼다.
+
+    14:30 인 이유
+      - 컨센서스(네이버 종목 메인의 FnGuide 추정치)는 장 마감과 상관이 없다.
+        리포트가 나오는 대로 바뀌고 리포트는 대개 오전에 나온다. 18:00 에 받던
+        것과 같은 날 값이고, 그날 늦게 바뀐 추정치는 다음 날 스냅샷이 잡는다.
+      - ~400종목 × 네이버 페이지 2회 + 종목당 0.5초 쉼이라 수십 분 걸릴 수 있다.
+        15:35~15:48 장마감 준비 잡(가격·수급·data.json·에이전트·신고가)과 네이버·
+        CPU 를 다투지 않고 16:00 전에 넉넉히 끝나야 한다.
+      - 계산(compute_all)도 여기서 한다. 전 종목 시계열을 한 트랜잭션으로 훑으므로
+        16:00 에 돌리면 같은 시각 장마감 시황의 가격·수급 DB 쓰기를 붙잡는다.
+    """
+    with _CONSENSUS_SNAPSHOT_LOCK:
+        try:
+            from consensus_snapshot_collector import run_daily_snapshot
+            stats = run_daily_snapshot(target_size=350, sleep_per_stock=0.5,
+                                       verbose=False)
+            log.info("[컨센서스 스냅샷] 성공 %d/%d, 신규 Q=%d NTM=%d, %ss",
+                     stats['success'], stats['total_stocks'],
+                     stats['total_quarterly_new'], stats['total_ntm_new'],
+                     stats['elapsed_sec'])
+        except Exception as exc:
+            log.warning("[컨센서스 스냅샷 에러] %s", exc)
+        _compute_revisions()
+
+
+def alert_revision_signals():
+    """Step 5-1-F: 컨센서스 리비전 STRONG 시그널 텔레 발송 (평일 16:00).
+
+    1. 14:30 스냅샷·계산이 끝났는지 본다 — 돌고 있으면 기다리고, 오늘 계산이
+       없으면(재시작·잠듦) 여기서 계산한다. 새 스냅샷이 없으면 가장 최근
+       스냅샷 기준이고, 메시지의 기준일 줄이 그 날짜를 밝힌다.
     2. alert_sent=0 인 STRONG_UP / STRONG_DOWN 만 조회 (NEUTRAL/UP/DOWN 제외)
     3. 종목별 최대 10건씩 발송 (각 방향)
     4. 발송 후 alert_sent=1 UPDATE — 중복 발송 방지
     """
     try:
-        # 사전 계산 (모듈 import 실패해도 DB 기존 알림은 발송)
-        try:
-            from revision_calculator import compute_all
-            r = compute_all(verbose=False)
-            log.info("[리비전 알림] 계산 완료: %s", r)
-        except ImportError:
-            log.warning("[리비전 알림] revision_calculator 모듈 부재 — DB 기존 알림만 발송")
-        except Exception as exc:
-            log.warning("[리비전 알림] compute_all 실패 (DB 알림만 발송): %s", exc)
+        if _CONSENSUS_SNAPSHOT_LOCK.acquire(timeout=_REVISION_WAIT_S):
+            _CONSENSUS_SNAPSHOT_LOCK.release()
+        else:
+            log.warning("[리비전 알림] 스냅샷이 %d분 넘게 안 끝났다 — 있는 스냅샷으로 보낸다",
+                        _REVISION_WAIT_S // 60)
+        if _REVISION_COMPUTED.get("date") != now_kst().strftime("%Y-%m-%d"):
+            log.info("[리비전 알림] 오늘 계산분이 없다 — 지금 계산한다")
+            _compute_revisions()
 
         # 신규 STRONG 시그널 조회
         with _get_db() as conn:
@@ -5998,7 +6071,19 @@ def alert_revision_signals():
         metric_label = {'eps': 'EPS', 'revenue': '매출', 'operating_profit': '영업익'}
 
         today_kst = now_kst().strftime("%Y-%m-%d")
-        lines = [f"📈 <b>컨센서스 리비전 알림</b> ({today_kst})", ""]
+        lines = [f"📈 <b>컨센서스 리비전 알림</b> ({today_kst})"]
+        # 기준일은 보내는 날이 아니라 **스냅샷을 받은 날**이다. 오늘 스냅샷이
+        # 없었으면(14:30 잡이 못 돈 날) 그 사실을 적는다.
+        snap_dates = sorted({str(r.get("current_date") or "")[:10]
+                             for r in rows if r.get("current_date")})
+        if snap_dates:
+            d_lbl = snap_dates[-1][5:].replace("-", "/")
+            if len(snap_dates) > 1:
+                d_lbl = f"{snap_dates[0][5:].replace('-', '/')}~{d_lbl}"
+            note = ("" if snap_dates[-1] == today_kst
+                    else " — 오늘 스냅샷 전, 가장 최근 수집분")
+            lines.append(f"<i>기준일: 컨센서스 스냅샷 {d_lbl}{note}</i>")
+        lines.append("")
 
         sent_ids: list = []
 
@@ -6486,7 +6571,7 @@ def _refresh_global_data_periodic():
     log.info("[자동갱신] 완료")
 
 
-# ── 알림 5: 장 마감 요약 (평일 15:40) ──
+# ── 알림 5: 장 마감 요약 (평일 16:00 — send_post_close_alerts 가 부른다) ──
 def alert_closing_summary():
     try:
         lines = ["🔔 <b>장 마감 요약</b>", ""]
@@ -6517,7 +6602,16 @@ def alert_closing_summary():
         if ds.exists():
             try:
                 dd = json.loads(ds.read_text(encoding="utf-8"))
-                lines.append("🔬 <b>종목 발굴 TOP5</b>")
+                # 16:00 에는 장 마감 후 스캔(stage2_auto, 16:00)이 막 시작한 참이라
+                # 파일은 마지막 장중 스캔 결과다. 언제 것인지 적는다.
+                upd = str(dd.get("updated_at") or "")
+                if upd[:10] == now_kst().strftime("%Y-%m-%d"):
+                    scan_lbl = f" ({upd[11:16]} 스캔)"
+                elif len(upd) >= 16:
+                    scan_lbl = f" ({upd[5:10].replace('-', '/')} {upd[11:16]} 스캔)"
+                else:
+                    scan_lbl = ""
+                lines.append(f"🔬 <b>종목 발굴 TOP5</b>{scan_lbl}")
                 for it in (dd.get("items") or [])[:5]:
                     chg = it.get("change_pct") or 0
                     sign = "+" if chg >= 0 else ""
@@ -7079,22 +7173,15 @@ def _startup():
             _scheduler.add_job(alert_morning_briefing, "cron",
                                day_of_week="mon-fri", hour=8, minute=30,
                                id="tg_morning")
-            # Step 5-1-F: 리비전 STRONG 시그널 알림 (평일 18:30)
-            # consensus_snapshot cron 18:00 직후 — 신규 스냅샷 기반 계산
-            _scheduler.add_job(alert_revision_signals, "cron",
-                               day_of_week="mon-fri", hour=18, minute=30,
-                               id="tg_revision_signals", max_instances=1)
             _scheduler.add_job(alert_watchlist_price, "cron",
                                day_of_week="mon-fri", hour="9-14", minute="0,30",
                                id="tg_watchlist")
             _scheduler.add_job(alert_new_reports, "cron",
                                day_of_week="mon-fri", hour=10, minute=0,
                                id="tg_reports")
-            _scheduler.add_job(alert_closing_summary, "cron",
-                               day_of_week="mon-fri", hour=15, minute=40,
-                               id="tg_closing")
-            # flow_cache 일괄 갱신 (15:40 — 가격 sync 15:35 후, 시황 15:50 전)
-            # 시총 상위 200종목 외인/기관 수급 fetch → 시황 메시지 신선도 확보.
+            # flow_cache 일괄 갱신 (15:40 — 가격 sync 15:35 후, 16:00 발송 전)
+            # 시총 상위 200종목 외인/기관 수급 fetch → 시황·수급 시그널 신선도 확보.
+            # ~1.5분이라 16:00 전에 끝난다.
             _scheduler.add_job(lambda: _refresh_flow_batch(top_n=200), "cron",
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="flow_batch", max_instances=1,
@@ -7118,11 +7205,18 @@ def _startup():
                                minute=_CLOSING_BRIEF_HHMM[1],
                                id="tg_closing_summary", max_instances=1,
                                misfire_grace_time=1800)
-            # 수급 심화 시그널 (19:30 — 저녁 확정 수급 분석 후)
-            # 쌍끌이 매수/매도 · 외국인 연속 순매수/순매도 · 수급 반전 포착.
-            _scheduler.add_job(alert_flow_signals, "cron",
-                               day_of_week="mon-fri", hour=19, minute=30,
-                               id="tg_flow_signals", max_instances=1)
+            # 장 끝난 뒤 나머지 텔레그램도 전부 같은 16:00 (2026-10-08 사용자 요청).
+            #   장 마감 요약 15:40 · 수급 시그널 19:30 · 리비전 18:30 · AI 추천 15:45
+            #   → 한 잡이 정해진 순서로 보낸다(send_post_close_alerts 설명 참고).
+            # 시각은 시황과 같은 _CLOSING_BRIEF_HHMM 에서 온다. 16:00 에는 시황·
+            # stage2·가격 sync·워치독·공시 폴링이 한꺼번에 깨어 스레드풀(10)이
+            # 찰 수 있다 — 기본 misfire 1초면 줄 서 있다가 통째로 건너뛴다.
+            _scheduler.add_job(send_post_close_alerts, "cron",
+                               day_of_week="mon-fri",
+                               hour=_CLOSING_BRIEF_HHMM[0],
+                               minute=_CLOSING_BRIEF_HHMM[1],
+                               id="tg_post_close", max_instances=1,
+                               misfire_grace_time=1800)
             # 신고가 캐시 프리워밍 (15:48 — 가격 sync 15:35 후) — 첫 진입 행 방지
             _scheduler.add_job(_prewarm_new_highs, "cron",
                                day_of_week="mon-fri", hour=15, minute=48,
@@ -7202,7 +7296,7 @@ def _startup():
         # 아무 신호 없이 파일이 굳는다(2026-09-15 에 실제로 멈췄다). 서버가 직접 만든다.
         #
         # 두 번 도는 이유:
-        #   15:45 — 15:35 가격 sync 직후. 15:50 마감 시황이 오늘 값을 쓰게 한다.
+        #   15:45 — 15:35 가격 sync 직후. 16:00 마감 시황이 오늘 값을 쓰게 한다.
         #           (맥북 18:00 체제에서는 시황이 늘 전날 data.json 을 봤다)
         #   16:20 — 16:10 일봉 채움 직후. 스파크라인에 오늘 봉이 들어간다.
         _scheduler.add_job(_refresh_data_json_job, "cron",
@@ -7269,32 +7363,25 @@ def _startup():
                     return
             log.info("⏰  자동 Stage 2 스캔 시작 (kr)")
             _stage2_scoring_worker("kr")
+        #    16:00 은 시황·장 끝난 뒤 알림과 같은 시각이라 스레드풀이 찰 수 있다.
+        #    기본 misfire 1초면 줄 서 있다 건너뛴다(끝나면 신규 진입 알림을 보낸다).
         _scheduler.add_job(_auto_stage2_scan, "cron",
                            day_of_week="mon-fri", hour="8,16", minute=0,
-                           id="stage2_auto", max_instances=1)
+                           id="stage2_auto", max_instances=1,
+                           misfire_grace_time=600)
 
-        # ── AI 에이전트 파이프라인 (장 시작 전 08:45 + 장 마감 후 15:45) ──
-        def _auto_agent_run():
-            t0 = time.time()
-            try:
-                from agents.pipeline import run_pipeline, send_agent_telegram
-                result = run_pipeline()
-                send_agent_telegram(result)
-                # 결과 요약 — picks 개수, 캐시 생성 확인
-                picks_n = len((result or {}).get("final_picks") or [])
-                cache_p = BASE_DIR / "cache" / "agent_result_latest.json"
-                cache_exists = cache_p.exists()
-                log.info("[Agent] 자동 실행 성공 (%.1fs) — picks=%d, cache=%s",
-                         time.time() - t0, picks_n,
-                         'OK' if cache_exists else 'MISSING')
-            except Exception as exc:
-                # 4-5: debug → warning 격상 (실패 흔적 보존)
-                log.warning("[Agent] 자동 실행 실패 (%.1fs): %s",
-                            time.time() - t0, exc)
-        _scheduler.add_job(_auto_agent_run, "cron",
-                           day_of_week="mon-fri", hour="8,15", minute=45,
+        # ── AI 에이전트 파이프라인 ──
+        #   08:45 장 시작 전 — 돌리고 바로 보낸다.
+        #   15:45 장 마감 후 — 돌려 두기만 한다. 발송은 16:00 send_post_close_alerts.
+        #         (예전엔 15:45 에 바로 보냈다. 장 끝난 뒤 텔레그램은 전부 16:00.)
+        _scheduler.add_job(agent_run_and_send, "cron",
+                           day_of_week="mon-fri", hour=8, minute=45,
                            id="agent_pipeline", max_instances=1)
-        log.info("[Agent] 파이프라인 자동 실행 스케줄 등록 (08:45, 15:45)")
+        _scheduler.add_job(agent_prepare_close, "cron",
+                           day_of_week="mon-fri", hour=15, minute=45,
+                           id="agent_pipeline_close", max_instances=1,
+                           misfire_grace_time=600)
+        log.info("[Agent] 파이프라인 자동 실행 스케줄 등록 (08:45 발송, 15:45 준비 → 16:00 발송)")
 
         # ── 데이터 유지보수 cron ──
         _scheduler.add_job(mark_etf_stocks, "cron",
@@ -7500,23 +7587,14 @@ def _startup():
                            id="earnings_backfill_daily", max_instances=1)
         log.info("[어닝 백필] 매일 06:30 cron 등록")
 
-        # ── Step 5-1-B: 컨센서스 스냅샷 (평일 18:00, 장마감 후) ──
-        def _scheduled_consensus_snapshot():
-            try:
-                from consensus_snapshot_collector import run_daily_snapshot
-                stats = run_daily_snapshot(target_size=350, sleep_per_stock=0.5,
-                                           verbose=False)
-                log.info("[컨센서스 스냅샷] 성공 %d/%d, 신규 Q=%d NTM=%d, %ss",
-                         stats['success'], stats['total_stocks'],
-                         stats['total_quarterly_new'], stats['total_ntm_new'],
-                         stats['elapsed_sec'])
-            except Exception as exc:
-                log.warning("[컨센서스 스냅샷 에러] %s", exc)
-        _scheduler.add_job(_scheduled_consensus_snapshot, "cron",
-                           day_of_week="mon-fri", hour=18, minute=0,
+        # ── Step 5-1-B: 컨센서스 스냅샷 + 리비전 계산 (평일 14:30) ──
+        # 16:00 리비전 알림의 입력. 18:00 이었던 것을 16:00 전에 끝나게 당겼다 —
+        # 이유는 consensus_snapshot_and_revisions 설명 참고.
+        _scheduler.add_job(consensus_snapshot_and_revisions, "cron",
+                           day_of_week="mon-fri", hour=14, minute=30,
                            id="consensus_snapshot_daily", max_instances=1,
                            misfire_grace_time=1800)
-        log.info("[컨센서스 스냅샷] 평일 18:00 cron 등록")
+        log.info("[컨센서스 스냅샷] 평일 14:30 cron 등록 (리비전 계산까지)")
 
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
@@ -14843,6 +14921,94 @@ def closing_brief_catchup() -> bool:
         return False
 
 
+# ── AI 에이전트 파이프라인 ──
+# 아침(08:45)은 돌리고 바로 보낸다. 장 마감 뒤에는 15:45 에 돌려 두기만 하고
+# 16:00 에 send_post_close_alerts 가 보낸다 — 장 끝난 뒤 텔레그램은 전부 16:00.
+# 동시에 둘이 돌지 않게 락을 건다(16:00 에 15:45 실행이 아직 안 끝났으면 기다린다).
+_AGENT_RUN_LOCK = threading.Lock()
+_AGENT_CLOSE_PICKS: dict = {"date": None, "result": None}
+
+
+def _run_agent_pipeline() -> dict | None:
+    t0 = time.time()
+    with _AGENT_RUN_LOCK:
+        try:
+            from agents.pipeline import run_pipeline
+            result = run_pipeline()
+        except Exception as exc:                              # noqa: BLE001
+            # 4-5: debug → warning 격상 (실패 흔적 보존)
+            log.warning("[Agent] 자동 실행 실패 (%.1fs): %s", time.time() - t0, exc)
+            return None
+    # 결과 요약 — picks 개수, 캐시 생성 확인
+    picks_n = len((result or {}).get("final_picks") or [])
+    cache_ok = (BASE_DIR / "cache" / "agent_result_latest.json").exists()
+    log.info("[Agent] 자동 실행 성공 (%.1fs) — picks=%d, cache=%s",
+             time.time() - t0, picks_n, 'OK' if cache_ok else 'MISSING')
+    return result
+
+
+def _send_agent_picks(result) -> None:
+    if not result:
+        return
+    try:
+        from agents.pipeline import send_agent_telegram
+        send_agent_telegram(result)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("[Agent] 텔레그램 발송 실패: %s", exc)
+
+
+def agent_run_and_send() -> None:
+    """평일 08:45 — 장 시작 전 추천. 돌리고 바로 보낸다."""
+    _send_agent_picks(_run_agent_pipeline())
+
+
+def agent_prepare_close() -> None:
+    """평일 15:45 — 장 마감 후 추천을 **만들어만 둔다.** 발송은 16:00."""
+    result = _run_agent_pipeline()
+    if result is not None:
+        _AGENT_CLOSE_PICKS.update(date=now_kst().strftime("%Y-%m-%d"),
+                                  result=result)
+
+
+def _send_agent_close_picks() -> None:
+    """16:00 — 15:45 에 만들어 둔 추천을 보낸다. 없으면(그 시각에 자고 있었거나
+    재시작) 지금 돌려서 보낸다."""
+    today = now_kst().strftime("%Y-%m-%d")
+    with _AGENT_RUN_LOCK:                 # 15:45 실행이 아직 돌면 끝나기를 기다린다
+        result = (_AGENT_CLOSE_PICKS.get("result")
+                  if _AGENT_CLOSE_PICKS.get("date") == today else None)
+    if result is None:
+        log.info("[Agent] 15:45 준비분이 없다 — 지금 돌려서 보낸다")
+        result = _run_agent_pipeline()
+    _send_agent_picks(result)
+
+
+def send_post_close_alerts() -> None:
+    """장마감 시황 말고 **장 끝난 뒤 나가는 나머지 텔레그램을 16:00 에 보낸다.**
+
+    2026-10-08 사용자 요청: "장 끝나고 16:00 으로 바꿔. 모든 시간대가 다 16:00 으로."
+    예전 시각 — 장 마감 요약 15:40 · AI 추천 15:45 · 리비전 18:30 · 수급 시그널 19:30.
+    시각은 장마감 시황과 같은 _CLOSING_BRIEF_HHMM 에서 온다.
+
+    한 잡에서 **정해진 순서로** 보낸다. 같은 16:00 에 장마감 시황이 가격·수급을
+    다시 받고 신고가를 판정하느라 몇 분을 쓰는데, 이쪽은 가벼운 것부터 몇 초 안에
+    끝내 그 길을 막지 않는다. 무거운 준비는 전부 16:00 전에 끝나 있다
+      - 수급(flow_cache)      15:40 flow_batch
+      - 리비전 계산           14:30 consensus_snapshot_and_revisions
+      - AI 추천               15:45 agent_prepare_close
+    발송끼리 겹쳐도 send_telegram 이 한 줄로 세우므로 시황 조각 사이에 끼지 않는다.
+    하나가 실패해도 나머지는 보낸다.
+    """
+    for label, fn in (("장 마감 요약", alert_closing_summary),
+                      ("수급 시그널", alert_flow_signals),
+                      ("컨센서스 리비전", alert_revision_signals),
+                      ("AI 에이전트 추천", _send_agent_close_picks)):
+        try:
+            fn()
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("[16:00 알림] %s 실패: %s", label, exc)
+
+
 # ── 데이터 정합성 워치독 + 자가복구 ────────────────────────────────────────
 # 시황 3개 섹션(섹터/특징주/수급)이 의존하는 stocks·flow_cache 가 비거나
 # stale 해지는 사고가 반복됨 (Render 비영속 디스크 + Naver 스크랩 실패).
@@ -15204,13 +15370,30 @@ def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
 
 
 def alert_flow_signals():
-    """수급 심화 시그널 텔레그램 발송 (평일 19:30 — 저녁 확정 수급 분석)."""
+    """수급 심화 시그널 텔레그램 발송 (평일 16:00 — send_post_close_alerts 가 부른다).
+
+    19:30(저녁 확정 수급)이었던 것을 2026-10-08 사용자 요청으로 16:00 에 당겼다.
+    16:00 에는 투자자별 수급 당일 확정치가 없다(KRX ~18:00 · 네이버 ~18:30).
+    장마감 시황과 같은 원칙(2026-09-18)을 따른다 — 기다리지 않고 보내되, 실제
+    기준일을 적어 전일 값을 오늘 값인 척 내보내지 않는다. 확정치는 저녁에
+    `/시그널` 로 다시 볼 수 있다.
+    """
     sig = _analyze_flow_signals()
     if not sig.get("date"):
         log.info("[수급시그널] 데이터 없음 — 스킵")
         return
     date_lbl = sig["date"][5:].replace("-", "/")
-    lines = [f"💰 <b>{date_lbl} 수급 시그널</b>", ""]
+    _now = now_kst()
+    if sig["date"] == _now.strftime("%Y-%m-%d"):
+        # 네이버 확정 반영이 ~18:30 이다. 그 전의 오늘 값은 잠정치다.
+        basis = (f"<i>기준일 {date_lbl}(오늘) — 장 마감 직후 잠정치, "
+                 f"저녁 확정치와 다를 수 있음</i>"
+                 if _now.hour * 100 + _now.minute < 1830
+                 else f"<i>기준일 {date_lbl}(오늘)</i>")
+    else:
+        basis = (f"<i>기준일 {date_lbl} — 당일 외국인/기관 순매매는 장마감 후 "
+                 f"집계 지연, 최신 확정치 기준</i>")
+    lines = [f"💰 <b>{date_lbl} 수급 시그널</b>", basis, ""]
 
     def _fline(c, with_streak=False):
         sgn_f = "+" if c["foreign"] >= 0 else ""

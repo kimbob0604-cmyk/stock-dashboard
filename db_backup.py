@@ -30,7 +30,7 @@ db_backup.py — Render 재배포 대비 DB 백업/복원 (GitHub Gist)
                   사라지므로 재시작 한 번에 ohlcv 가 영구히 비었고, 신고가
                   섹션이 "일봉 거래일이 0일뿐" 으로 멎었다. 그 잡을 붙여
                   이 문장이 비로소 참이 됐다.
-    - flow_cache: _refresh_flow_batch (15:40 배치 + 저녁 시황 직전)
+    - flow_cache: _refresh_flow_batch (15:40 배치 + 16:00 시황 직전)
     - chart_cache: /api/chart 호출 시 채워짐 (요청 주도)
 
   alltime_high 는 파생 표지만 **백업한다.** 상장 이후 전 구간을 네트워크로 다시

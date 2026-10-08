@@ -8,6 +8,10 @@ server.py 는 Flask 앱이라 import 하지 않는다(다른 check_*.py 와 같�
   3. 밀리면 캐치업이 보낸다 — 16:00 이후 · 평일 · 아직 안 보낸 날에만.
   4. cron 에 misfire_grace_time 이 있다. 기본값 1초면 정각에 바쁜 날 통째로 날아간다.
   5. 부팅 직후에도 캐치업을 부른다. Render 무료 플랜이 자는 동안은 cron 이 없다.
+  7. 장 끝난 뒤 나머지 텔레그램(장 마감 요약 · 수급 시그널 · 리비전 · AI 추천)도
+     같은 16:00 에 한 잡이 정해진 순서로 보낸다 — 2026-10-08 사용자 요청.
+     입력(컨센서스 스냅샷 · AI 추천 실행)은 16:00 전에 끝난다.
+  8. 16:00 수급 시그널 · 리비전은 실제 기준일을 적는다(전일 값을 오늘인 척 안 함).
 """
 import re
 import sys
@@ -188,6 +192,142 @@ READY[0] = False
 NOW[0] = datetime(2026, 9, 18, DH, DM, tzinfo=KST)
 want(send_gated(catchup=True) is True, '마감 시각인데도 안 보냈다')
 want(SENT and SENT[0][2] is False, '마감 발송이 준비됨으로 기록됐다')
+
+# ── 7. 장 끝난 뒤 나머지 텔레그램도 16:00 ───────────────────────────────
+post = grab(r'_scheduler\.add_job\(send_post_close_alerts.*?\)\n', '장 끝난 뒤 알림 cron')
+pb = post.group(0)
+want('day_of_week="mon-fri"' in pb, f'장 끝난 뒤 알림 cron 이 평일이 아니다 — {pb!r}')
+want('_CLOSING_BRIEF_HHMM[0]' in pb and '_CLOSING_BRIEF_HHMM[1]' in pb,
+     '장 끝난 뒤 알림이 시각을 따로 적고 있다 — 시황과 같은 _CLOSING_BRIEF_HHMM 이어야 한다')
+mg = re.search(r'misfire_grace_time=(\d+)', pb)
+want(mg and int(mg.group(1)) >= 600,
+     f'장 끝난 뒤 알림 cron 의 misfire_grace_time 이 없거나 짧다 — {pb!r}')
+# 넷이 다른 시각에 따로 걸려 있으면 안 된다 (예전 15:40 · 15:45 · 18:30 · 19:30)
+for fn in ('alert_closing_summary', 'alert_flow_signals', 'alert_revision_signals',
+           'send_agent_telegram'):
+    want(not re.search(rf'_scheduler\.add_job\({fn}\b', SRC),
+         f'{fn} 가 따로 cron 에 걸려 있다 — 16:00 일괄 발송 밖이다')
+# 15:45 에이전트 잡은 만들어 두기만 한다(보내는 건 16:00)
+ag = grab(r'_scheduler\.add_job\(agent_prepare_close.*?\)\n', '15:45 에이전트 준비 cron')
+want('hour=15' in ag.group(0) and 'minute=45' in ag.group(0),
+     f'에이전트 준비 시각이 15:45 가 아니다 — {ag.group(0)!r}')
+prep = grab(r'\ndef agent_prepare_close\(.*?\n(?=\n\n)', 'agent_prepare_close')
+want('_send_agent_picks' not in prep.group(0) and 'send_agent_telegram' not in prep.group(0),
+     '15:45 에이전트 준비가 텔레그램을 보낸다 — 16:00 에 보내야 한다')
+am = grab(r'_scheduler\.add_job\(agent_run_and_send.*?\)\n', '08:45 에이전트 cron')
+want('hour=8,' in am.group(0) or 'hour=8\n' in am.group(0) or 'hour=8 ' in am.group(0),
+     f'바로 보내는 에이전트 잡이 아침(08시) 말고도 돈다 — {am.group(0)!r}')
+# 리비전의 입력(컨센서스 스냅샷 + 계산)은 16:00 전에 시작해 끝나야 한다
+cs = grab(r'_scheduler\.add_job\(consensus_snapshot_and_revisions.*?\)\n', '컨센서스 스냅샷 cron')
+csh = re.search(r'hour=(\d+), minute=(\d+)', cs.group(0))
+want(csh and (int(csh.group(1)), int(csh.group(2))) <= (15, 0),
+     f'컨센서스 스냅샷이 너무 늦다 — 수십 분 걸리는데 16:00 전에 끝나야 한다 {cs.group(0)!r}')
+
+# 보내는 순서와 실패 격리 — send_post_close_alerts 본문을 그대로 돌린다
+body = grab(r'\ndef send_post_close_alerts\(.*?\n(?=\n\n)', 'send_post_close_alerts').group(0)
+CALLED: list = []
+
+
+class _Log:
+    def __getattr__(self, _):
+        return lambda *a, **k: None
+
+
+def _mk(name, boom=False):
+    def f():
+        CALLED.append(name)
+        if boom:
+            raise RuntimeError('일부러')
+    return f
+
+
+ns = {'alert_closing_summary': _mk('요약'), 'alert_flow_signals': _mk('수급', boom=True),
+      'alert_revision_signals': _mk('리비전'), '_send_agent_close_picks': _mk('AI'),
+      'log': _Log()}
+exec(compile(body, 'server.py(발췌)', 'exec'), ns)
+ns['send_post_close_alerts']()
+want(CALLED == ['요약', '수급', '리비전', 'AI'],
+     f'16:00 알림 순서가 다르거나 하나가 실패해 뒤가 끊겼다 — {CALLED}')
+
+# wake.yml 은 15:35 준비 잡 전에 깨운다
+WAKE = open('/home/user/stock-dashboard/.github/workflows/wake.yml', encoding='utf-8').read()
+want(re.search(r"cron: '30,[^']* 6 \* \* 1-5'", WAKE),
+     'wake.yml 이 KST 15:30(UTC 06:30)부터 안 깨운다 — 15:35~15:48 준비 잡이 잠든 채 지나간다')
+
+# ── 8. 16:00 메시지의 기준일 ────────────────────────────────────────────
+fs = grab(r'\ndef alert_flow_signals\(.*?\n(?=\n\n)', 'alert_flow_signals').group(0)
+OUT: list = []
+SIG = {'date': '2026-10-07', 'dual_buy': [{'name': 'A', 'foreign': 120.0, 'inst': 80.0}],
+       'dual_sell': [], 'streak_buy': [], 'streak_sell': [], 'reversal': []}
+fns = {'_analyze_flow_signals': lambda: SIG, 'send_telegram': OUT.append,
+       'now_kst': now_kst, 'log': _Log()}
+exec(compile(fs, 'server.py(발췌)', 'exec'), fns)
+NOW[0] = datetime(2026, 10, 8, 16, 0, tzinfo=KST)
+fns['alert_flow_signals']()
+want(OUT and '기준일 10/07' in OUT[-1] and '최신 확정치' in OUT[-1],
+     f'16:00 수급 시그널이 전일 기준일을 안 밝힌다 — {OUT[-1][:200] if OUT else None!r}')
+SIG['date'] = '2026-10-08'
+fns['alert_flow_signals']()
+want('기준일 10/08(오늘)' in OUT[-1] and '잠정' in OUT[-1],
+     f'16:00 의 오늘 수급을 잠정이라고 안 적는다 — {OUT[-1][:200]!r}')
+NOW[0] = datetime(2026, 10, 8, 19, 30, tzinfo=KST)
+fns['alert_flow_signals']()
+want('잠정' not in OUT[-1], f'저녁 확정 뒤인데 잠정이라고 적는다 — {OUT[-1][:200]!r}')
+
+# 리비전 — 기준일은 보낸 날이 아니라 스냅샷 날
+import contextlib  # noqa: E402
+import sqlite3  # noqa: E402
+import threading  # noqa: E402
+
+rv = grab(r'\ndef alert_revision_signals\(.*?\n(?=\n\n)', 'alert_revision_signals').group(0)
+fp = grab(r'\ndef _fmt_revision_period\(.*?\n(?=\n\n)', '_fmt_revision_period').group(0)
+MEM = sqlite3.connect(':memory:', check_same_thread=False)
+MEM.row_factory = sqlite3.Row
+MEM.executescript('''
+    CREATE TABLE stocks (code TEXT, name TEXT);
+    CREATE TABLE revision_alerts (id INTEGER PRIMARY KEY, stock_code TEXT, metric TEXT,
+        signal TEXT, revision_pct REAL, window_days INT, period_type TEXT,
+        period_year INT, period_quarter INT, "current_date" TEXT, priority INT,
+        alert_sent INT DEFAULT 0, sent_at TEXT);
+    INSERT INTO stocks VALUES ('005930', '삼성전자');
+''')
+
+
+@contextlib.contextmanager
+def _mem_db():
+    yield MEM
+
+
+COMPUTED: list = []
+RV_OUT: list = []
+rns = {'_get_db': _mem_db, 'send_telegram': RV_OUT.append, 'now_kst': now_kst,
+       'log': _Log(), '_CONSENSUS_SNAPSHOT_LOCK': threading.Lock(),
+       '_REVISION_WAIT_S': 1, '_REVISION_COMPUTED': {'date': '2026-10-08'},
+       '_compute_revisions': lambda: COMPUTED.append(1)}
+exec(compile(fp + rv, 'server.py(발췌)', 'exec'), rns)
+
+
+def _add_alert(day):
+    MEM.execute('INSERT INTO revision_alerts (stock_code, metric, signal, revision_pct, '
+                'window_days, period_type, period_year, period_quarter, "current_date", '
+                "priority) VALUES ('005930','eps','STRONG_UP',20.0,7,'NTM',2026,0,?,1)", (day,))
+    MEM.commit()
+
+
+NOW[0] = datetime(2026, 10, 8, 16, 0, tzinfo=KST)
+_add_alert('2026-10-07')
+rns['alert_revision_signals']()
+want(RV_OUT and '기준일: 컨센서스 스냅샷 10/07 — 오늘 스냅샷 전' in RV_OUT[-1],
+     f'오늘 스냅샷이 없는데 기준일을 안 밝힌다 — {RV_OUT[-1][:200] if RV_OUT else None!r}')
+want(not COMPUTED, '14:30 에 계산해 둔 날인데 16:00 에 또 계산했다 — 시황 DB 쓰기를 붙잡는다')
+_add_alert('2026-10-08')
+rns['alert_revision_signals']()
+want('기준일: 컨센서스 스냅샷 10/08</i>' in RV_OUT[-1],
+     f'오늘 스냅샷 기준일이 이상하다 — {RV_OUT[-1][:200]!r}')
+# 오늘 계산분이 없으면(재시작·잠듦) 16:00 에 계산한다
+rns['_REVISION_COMPUTED']['date'] = '2026-10-07'
+rns['alert_revision_signals']()
+want(COMPUTED == [1], '오늘 계산분이 없는데 계산 없이 보냈다')
 
 # ── 옛 이름이 남아 있지 않은지 ───────────────────────────────────────────
 want('send_evening_market_summary' not in SRC,
