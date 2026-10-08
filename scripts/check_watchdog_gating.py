@@ -11,6 +11,7 @@ server.py 는 Flask 앱이라 import 하지 않는다. 대신 판정에 쓰이�
   5. 건강도 함수가 실제로 이 게이트를 거쳐 간다
 """
 import re
+import sys
 import datetime as _dt
 
 SRC = open('/home/user/stock-dashboard/server.py', encoding='utf-8').read()
@@ -23,11 +24,12 @@ def grab(pattern, what):
 src = '\n\n'.join([
     grab(r'^_WD_STALE_FROM.*?^_WD_FLOW_FROM = \d+.*?$', '워치독 시간대 상수'),
     grab(r'^def _watchdog_checks_due\(.*?\n    \}\n', '_watchdog_checks_due'),
-    grab(r'^_KR_HOLIDAYS_2026 = \{.*?^\}\n', '휴장일 표'),
-    grab(r'^def _is_kr_holiday\(.*?return dt\.strftime\("%Y-%m-%d"\) in _KR_HOLIDAYS_2026\n',
+    grab(r'^def _is_kr_holiday\(.*?return not _krx_cal\.is_table_trading_day\(dt\)\n',
          '_is_kr_holiday'),
 ])
-ns = {'datetime': _dt.datetime, 'now_kst': lambda: None}
+sys.path.insert(0, '/home/user/stock-dashboard')
+import krx_calendar  # noqa: E402  — server.py 가 쓰는 휴장일 표 그대로
+ns = {'datetime': _dt.datetime, 'now_kst': lambda: None, '_krx_cal': krx_calendar}
 exec(compile(src, 'server.py(발췌)', 'exec'), ns)
 due = ns['_watchdog_checks_due']
 
@@ -58,6 +60,15 @@ for day in ((2026, 9, 24), (2026, 10, 9), (2026, 9, 19), (2026, 9, 20)):
     d = at(*day, 16, 30)
     assert d['trading_day'] is False, f'{day} 를 거래일로 본다'
     assert d['stocks_stale'] is False and d['flow_rows'] is False
+
+# 4-1. 휴장일 표는 krx_calendar 하나 — 예전 server.py 표가 틀렸던 날들과 2027
+for day, trading in (((2026, 9, 28), True),     # 예전 표는 휴장으로 적었다(실제 거래일)
+                     ((2026, 10, 5), False),    # 개천절 대체 — 예전 표에 없었다
+                     ((2026, 5, 1), False), ((2026, 6, 3), False),
+                     ((2026, 7, 17), False), ((2026, 8, 17), False),
+                     ((2027, 2, 8), False),     # 2027 설날 대체 — 예전엔 2027 표가 없었다
+                     ((2027, 1, 4), True), ((2026, 10, 8), True)):
+    assert at(*day, 16, 30)['trading_day'] is trading, f'{day} 거래일={trading} 이어야 한다'
 
 # 5. 건강도 함수가 이 게이트를 실제로 쓴다
 health = grab(r'^def _check_market_data_health\(.*?\n    return out\n', '_check_market_data_health')
