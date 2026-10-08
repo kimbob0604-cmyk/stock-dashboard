@@ -1,7 +1,8 @@
 """
 Step 5-1-B: 컨센서스 스냅샷 수집기
 
-매일 18:00 (장마감 후) 실행:
+평일 14:30 실행 (server.py consensus_snapshot_and_revisions — 끝나면 리비전 계산까지):
+   16:00 리비전 알림 전에 끝나야 한다. 18:00 이었던 것을 2026-10-08 에 당겼다.
 1. 확장 유니버스 350종목 선정 (시총 상위 비-ETF + valuechain KR, union)
 2. 각 종목 fresh fetch:
    - collect_one(code)               → consensus_quarterly 갱신 (분기 추정)
@@ -236,7 +237,7 @@ def run_daily_snapshot(
     verbose: bool = True,
     max_stocks: Optional[int] = None
 ) -> Dict:
-    """매일 18:00 실행: 확장 유니버스 컨센서스 스냅샷.
+    """평일 14:30 실행: 확장 유니버스 컨센서스 스냅샷.
 
     max_stocks: 지정 시 최종 유니버스를 앞에서부터 N개로 제한 (테스트용).
     """

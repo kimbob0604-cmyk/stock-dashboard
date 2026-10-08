@@ -987,15 +987,16 @@ def run_kr_pipeline():
 # 텔레그램 추천 발송
 # ============================================================
 def send_agent_telegram(result):
-    """에이전트 추천 결과 텔레그램 발송"""
+    """에이전트 추천 결과 텔레그램 발송. 보냈으면 True, 못 보냈으면 False,
+    보낼 추천이 없으면 None."""
     try:
         from server import send_telegram
     except ImportError:
-        return
+        return False
 
     picks = result.get("final_picks", [])
     if not picks:
-        return
+        return None
 
     macro = result.get("agents", {}).get("macro", {})
     news = result.get("agents", {}).get("news", {})
@@ -1029,7 +1030,7 @@ def send_agent_telegram(result):
             msg += f"   사유: {', '.join(reasons[:3])}\n"
 
     msg += "\n⚠️ 본 추천은 기술적 지표 기반 참고용입니다."
-    send_telegram(msg)
+    return send_telegram(msg)
 
 
 if __name__ == "__main__":
