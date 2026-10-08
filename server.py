@@ -4603,8 +4603,13 @@ def api_health():
             job_count = len(_scheduler.get_jobs())
     except Exception:
         pass
+    try:
+        overdue = len(_scheduler_overdue())
+    except Exception:                                      # noqa: BLE001
+        overdue = None
     return jsonify({
         "status": "ok",
+        "scheduler_overdue": overdue,
         "uptime_sec": round(time.time() - _start_time),
         "uptime_hours": round((time.time() - _start_time) / 3600, 2),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -4660,6 +4665,83 @@ def api_test_telegram_get():
                         "scheduler_jobs": job_count})
     except Exception as exc:
         return jsonify({"status": "failed", "error": str(exc)}), 500
+
+
+# ── 스케줄러 생존 감시 (2026-10-08) ─────────────────────────────────────────
+# 그날 10:55 부터 APScheduler 가 '실행 중(running=True)' 이라고 답하면서 잡을
+# 하나도 돌리지 않았다 — 모든 잡의 다음 실행 시각이 10:55~16:20 에 멈춰 있었고,
+# 그래서 16:00 시황·장 끝난 뒤 알림·시간마다 백업·감시까지 전부 빠졌다.
+# `running` 은 상태 깃발일 뿐이라 스케줄러 스레드가 죽거나 멈춰도 True 로 남는다.
+# 아래 `_check_scheduler_health` 는 그 깃발만 보고, 그 자체도 요청이 와야 돈다.
+#
+# 그래서 **스케줄러 밖의 스레드**가 1분마다 본다: 다음 실행 시각을 5분 넘게
+# 지난 잡이 있거나 스케줄러 스레드가 죽었으면 '멈춤 의심'. 먼저 깨워 보고
+# (wakeup), 3번 연속이면 워커 프로세스를 끝낸다 — gunicorn 이 새 워커를 띄우고,
+# 새 워커는 부팅 직후 closing_brief_catchup 으로 그날 못 보낸 시황·알림을 보낸다.
+# 같은 컨테이너라 DB 파일은 그대로다.
+_SCHED_STALL_SEC = 300       # 예정 시각을 이만큼 넘긴 잡이 하나라도 있으면 의심
+_SCHED_STALL_STRIKES = 3     # 연속 의심 횟수(1분 간격) — 이만큼이면 워커를 끝낸다
+
+
+def _scheduler_overdue(now_ts: float | None = None) -> list:
+    """다음 실행 시각을 `_SCHED_STALL_SEC` 넘게 지난 잡 [(id, 밀린 초)]."""
+    if _scheduler is None:
+        return []
+    now_ts = time.time() if now_ts is None else now_ts
+    out = []
+    for job in _scheduler.get_jobs():
+        nrt = getattr(job, "next_run_time", None)
+        if nrt is None:                  # 일시정지된 잡
+            continue
+        lag = now_ts - nrt.timestamp()
+        if lag > _SCHED_STALL_SEC:
+            out.append((job.id, round(lag)))
+    return sorted(out, key=lambda x: -x[1])
+
+
+def _scheduler_thread_alive() -> bool:
+    thread = getattr(_scheduler, "_thread", None)
+    return True if thread is None else bool(thread.is_alive())
+
+
+def _scheduler_liveness_check(strikes: int, *, exit_fn=None) -> int:
+    """한 번 본다. 새 연속 의심 횟수를 돌려준다(정상이면 0)."""
+    if _scheduler is None or not _scheduler.running:
+        return 0
+    overdue = _scheduler_overdue()
+    alive = _scheduler_thread_alive()
+    if alive and not overdue:
+        if strikes:
+            log.info("[스케줄러 감시] 회복 — 밀린 잡 없음")
+        return 0
+    strikes += 1
+    log.error("[스케줄러 감시] 멈춤 의심 %d/%d — 스레드 %s · 밀린 잡 %d개 %s",
+              strikes, _SCHED_STALL_STRIKES, "살아 있음" if alive else "죽음",
+              len(overdue), overdue[:5])
+    try:
+        _scheduler.wakeup()
+    except Exception:                                      # noqa: BLE001
+        log.exception("[스케줄러 감시] wakeup 실패")
+    if strikes >= _SCHED_STALL_STRIKES:
+        log.critical("[스케줄러 감시] %d분째 멈춤 — 워커를 끝낸다(gunicorn 이 새 워커를 띄운다)",
+                     strikes)
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:                              # noqa: BLE001
+                pass
+        (exit_fn or os._exit)(1)
+    return strikes
+
+
+def _scheduler_liveness_loop(interval: float = 60.0) -> None:
+    strikes = 0
+    while True:
+        time.sleep(interval)
+        try:
+            strikes = _scheduler_liveness_check(strikes)
+        except Exception:                                  # noqa: BLE001
+            log.exception("[스케줄러 감시] 점검 실패")
 
 
 @app.before_request
@@ -7651,6 +7733,9 @@ def _startup():
 
         _scheduler.start()
         log.info("APScheduler 시작 — %d분 간격", interval)
+        # 스케줄러 밖에서 스케줄러가 실제로 도는지 본다(위 _scheduler_liveness_check).
+        threading.Thread(target=_scheduler_liveness_loop, daemon=True,
+                         name="scheduler-liveness").start()
     else:
         log.info("APScheduler 미설치 — 자동 갱신 비활성  (pip install apscheduler)")
 
