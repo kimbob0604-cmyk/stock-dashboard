@@ -86,9 +86,11 @@ def build_items(key, n):
     return got, items
 
 
-# 세 등급 모두 전 종목이다. 60일은 2026-09-18 에 접기를 풀었다 — 접힌 이름은
+# 세 등급 모두 전 종목이다. 60일(지금은 120일)은 2026-09-18 에 접기를 풀었다 — 접힌 이름은
 # 메시지 어디에서도 볼 수 없었고, 길이는 줄 경계 분할이 이미 감당한다.
-for key, label in (('hist', '역사적'), ('w52', '52주'), ('d60', '60일')):
+want(set(_NH_LIST_MAX) == {'hist', 'w52', 'd120'},
+     f'_NH_LIST_MAX 의 축이 신고가 3축과 다르다: {sorted(_NH_LIST_MAX)}')
+for key, label in (('hist', '역사적'), ('w52', '52주'), ('d120', '120일')):
     want(_NH_LIST_MAX.get(key) is None,
          f'{label}: 상한이 {_NH_LIST_MAX.get(key)} 다 — 전 종목이어야 한다')
     got, items = build_items(key, 37)
@@ -100,17 +102,17 @@ for key, label in (('hist', '역사적'), ('w52', '52주'), ('d60', '60일')):
 
 # 접기 코드는 지웠지 않고 쉬고 있다. 상한을 다시 넣으면 접히고 접은 수를 적어야
 # 한다 — 안 그러면 '다시 접으면 된다' 는 주석이 거짓말이 된다.
-_saved = _NH_LIST_MAX.get('d60')
-_NH_LIST_MAX['d60'] = 5
+_saved = _NH_LIST_MAX.get('d120')
+_NH_LIST_MAX['d120'] = 5
 try:
-    got, items = build_items('d60', 30)
+    got, items = build_items('d120', 30)
     want(len(items) == 6, f'상한 5를 넣었는데 {len(items)}줄이다')
     want(items[-1] == '  … 외 25종목', f'접은 수를 안 적었다 — {items[-1]!r}')
-    _, few = build_items('d60', 3)
+    _, few = build_items('d120', 3)
     want(len(few) == 3 and not any('외 ' in it for it in few),
          '3종목뿐인데 요약 줄이 붙었다')
 finally:
-    _NH_LIST_MAX['d60'] = _saved
+    _NH_LIST_MAX['d120'] = _saved
 
 # ── 3. 시총 신선도 ───────────────────────────────────────────────────────
 fresh = TODAY_STR
@@ -227,10 +229,10 @@ if _m:
 print('---')
 _, hist_items = build_items('hist', 3)
 _, w52_items = build_items('w52', 11)
-_, d60_items = build_items('d60', 27)
+_, d120_items = build_items('d120', 27)
 print('🏔 역사적 신고가 3종목');  print('\n'.join(hist_items))
 print('📈 52주 신고가 11종목');   print('\n'.join(w52_items[:3] + ['  …(이하 생략, 실제로는 11줄 전부)']))
-print('📊 60일 신고가 27종목');   print('\n'.join(d60_items))
+print('📊 120일 신고가 27종목');  print('\n'.join(d120_items))
 print('---')
 
 print('통과' if ok else '실패')

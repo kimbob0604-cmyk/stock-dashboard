@@ -329,9 +329,11 @@ want(oa.coverage_note(222) == '222종목 대상', '모집단을 모를 때 판�
 _sn = re.search(r'def _ohlcv_scope_note\(.*?(?=\ndef )', SRC, re.S)
 want(_sn is not None and 'coverage_note(scanned, universe)' in _sn.group(0),
      'server.py 범위 문구가 coverage_note 를 모집단과 같이 부르지 않는다')
-want('_ohlcv_scope_note(len(rows), universe_n)' in SRC,
+# 판정은 newhigh.compute 가 하고(판정 수 scanned · 모집단 universe_n 을 돌려준다),
+# server.py 는 그 둘을 범위 문구에 넘긴다.
+want('_ohlcv_scope_note(nh["scanned"], nh["universe_n"])' in SRC,
      '시황이 모집단 수를 범위 문구에 안 넘긴다')
-want('오늘 신고가 종목 없음 ({scope}' in SRC,
+want('오늘 신고가 종목 없음 ({_nh.basis_line(scope, nh)})' in SRC,
      "'신고가 없음' 에 무엇을 훑고 없는지가 안 붙는다")
 
 
