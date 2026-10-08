@@ -296,6 +296,88 @@ want(nh.HIST_FLOOR_NOTE not in nh.basis_line('범위', r11b),
 r11c = run(db11)
 want(nh.HIST_FLOOR_NOTE in nh.basis_line('범위', r11c), '표에서 읽은 이력은 바닥 표기를 잃는다')
 
+# ── 12. 상장 이후 이력은 네이버만 — pykrx 폴백을 쓰지 않는다 ─────────────────
+# pykrx(KRX) 이력의 첫날은 상장일인지 원천의 바닥인지 가릴 수 없고, 그 요청에는
+# timeout 도 없다. 기본 경로(_default_fetch)가 넘기는 소스 순서를 직접 본다.
+import ohlcv_autofill as oa                                      # noqa: E402
+want(nh.HIST_SOURCE_ORDER == ('naver',), f'역사적 이력 소스: {nh.HIST_SOURCE_ORDER}')
+_seen = []
+_orig_fetch_one = oa._fetch_one
+oa._fetch_one = lambda code, s, e, order, gap: (_seen.append(tuple(order)), (code, None, [], ['x']))[1]
+try:
+    nh._default_fetch('005930', nh.HIST_FETCH_START, '20260914')
+finally:
+    oa._fetch_one = _orig_fetch_one
+want(_seen == [('naver',)], f'기본 이력 조회가 pykrx 폴백까지 쓴다: {_seen}')
+
+# ── 13. 예산 0(대시보드 API) — 표만 읽고 네트워크로 받지 않는다 ─────────────
+db13 = new_db()
+add(db13, '930000', '표에있음', 9500, flat(), with_old_peak('930000'))
+add(db13, '930001', '표에없음', 9500, flat(), with_old_peak('930001'))
+run(db13, fetch=fetch_ok)                                      # 둘 다 표에 채운다
+db13.execute("DELETE FROM alltime_high WHERE code = '930001'")
+c13 = []
+r13 = run(db13, fetch=lambda c, s, e: (c13.append(c), fetch_ok(c, s, e))[1], budget=0)
+want(c13 == [], f'예산 0 인데 이력을 받았다: {c13}')
+want(where(r13, '930000') == ['w52'], f"표에 있는 종목은 표로 판정한다: {where(r13, '930000')}")
+want(where(r13, '930001') == ['w52'] and [c for c, _, _ in r13['hist_pending']] == ['930001'],
+     f"표에 없는 종목은 보류여야 한다: {where(r13, '930001')} {r13['hist_pending']}")
+
+# ── 14. 락을 기다리는 사이 다른 호출이 채운 종목은 다시 받지 않는다 ──────────
+# 15:48 프리워밍이 늦게 깨어 16:00 시황과 겹친 날. 프리워밍이 락을 놓기 전에
+# 표에 써야 하고, 시황은 락을 얻은 뒤 표를 다시 봐야 한다.
+import os                                                        # noqa: E402,F811
+import tempfile                                                  # noqa: E402
+import threading                                                 # noqa: E402
+_p14 = os.path.join(tempfile.mkdtemp(), 't14.db')
+_a = sqlite3.connect(_p14, check_same_thread=False)
+_a.executescript("""
+CREATE TABLE stocks (code TEXT PRIMARY KEY, name TEXT, market TEXT DEFAULT '',
+  sector TEXT, market_cap REAL, close REAL, change_pct REAL, volume_mn REAL,
+  is_etf INTEGER DEFAULT 0, market_cap_updated TEXT);
+CREATE TABLE ohlcv (code TEXT, date TEXT, open REAL, high REAL, low REAL,
+  close REAL, volume REAL, PRIMARY KEY (code, date));
+""")
+add(_a, '940000', '겹침', 9500, flat(), with_old_peak('940000'))
+_a.commit()
+nh.ensure_table(_a)
+c14 = []
+first_bar = DAYS[0]
+got14 = {}
+nh._HIST_LOCK.acquire()                                          # 프리워밍이 쥐고 있다
+
+
+def _brief():
+    b = sqlite3.connect(_p14)
+    got14.update(nh.resolve_hist(
+        b, [{'code': '940000', 'first_bar': first_bar}], TODAY,
+        fetch=lambda c, s, e: (c14.append(c), fetch_ok(c, s, e))[1], budget_s=5))
+    b.close()
+
+
+_th = threading.Thread(target=_brief)
+_th.start()
+time.sleep(0.3)
+_a.execute("INSERT INTO alltime_high VALUES ('940000', 30000, '2015-01-05', '2015-01-05', ?, 9000,"
+           " 'naver', 1, 'x')", (DAYS[-1],))
+_a.commit()
+nh._HIST_LOCK.release()
+_th.join(10)
+want(c14 == [], f'락을 기다린 뒤 표를 다시 안 보고 또 받았다: {c14}')
+want(got14.get('940000', {}).get('max') == 30000, f'겹친 날 결과: {got14}')
+
+# ── 15. 표에 못 써도(잠금 등) 판정은 그대로 나간다 ──────────────────────────
+db15 = new_db()
+add(db15, '950000', '저장실패', 9500, flat(), [('950000', '2012-01-02', 1, 1, 1, 5000, 1)])
+nh.ensure_table(db15)
+db15.execute("CREATE TRIGGER nowrite BEFORE INSERT ON alltime_high "
+             "BEGIN SELECT RAISE(ABORT, 'database is locked'); END")
+try:
+    r15 = run(db15)
+    want(where(r15, '950000') == ['hist'], f"저장 실패가 판정을 바꿨다: {where(r15, '950000')}")
+except sqlite3.Error as exc:
+    want(False, f'표 저장 실패가 신고가 섹션 전체를 죽인다: {exc}')
+
 print(f'검사 {n_checks}개')
 print('통과' if ok else '실패')
 sys.exit(0 if ok else 1)

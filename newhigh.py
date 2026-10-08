@@ -26,8 +26,8 @@ ohlcv 는 52주 + 여유만 받아 둔다(ohlcv_autofill.LOOKBACK_CALENDAR_DAYS,
 무료 인스턴스 사정). 그래서 '상장 이후 최고 종가' 는 따로 둔다 —
 `alltime_high` 표. 채우는 대상은 **그날 역사적일 수 있는 몇 종목뿐**이다
 (52주를 뚫었거나, 52주를 판정할 수 없는데 받아 둔 전 구간을 뚫은 종목).
-처음 보는 종목은 상장 이후 전 구간을 한 번 받고(ohlcv_autofill 의 소스 순서
-네이버 → pykrx), 그 뒤로는 ohlcv 의 새 봉으로 앞으로만 굴린다.
+처음 보는 종목은 상장 이후 전 구간을 한 번 받고(**네이버만** — HIST_SOURCE_ORDER
+옆에 이유), 그 뒤로는 ohlcv 의 새 봉으로 앞으로만 굴린다.
 
   - 표는 db_backup.CORE_TABLES 에 실어 Gist 로 백업한다(수천 행 이하·작다).
     Render 재시작으로 DB 가 비어도 복원되고, 복원이 안 되면 그날 후보만 다시 받는다.
@@ -51,10 +51,11 @@ ohlcv 는 52주 + 여유만 받아 둔다(ohlcv_autofill.LOOKBACK_CALENDAR_DAYS,
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import krx_calendar
 
@@ -72,6 +73,14 @@ HIST_FETCH_START = "19800101"
 # 그보다 앞서더라도 '받을 수 있는 전부' 에 닿은 것으로 본다.
 HIST_SOURCE_FLOOR = "1990-01-03"
 HIST_FLOOR_NOTE = f"1990년 이전 상장은 {HIST_SOURCE_FLOOR} 이후 최고가"
+# 상장 이후 이력의 소스 — **네이버만.** ohlcv_autofill 의 폴백(pykrx)은 쓰지 않는다.
+#   1) '이력의 첫날 = 상장일(또는 HIST_SOURCE_FLOOR)' 로 읽을 수 있는 것은 바닥을
+#      확인한 네이버뿐이다. pykrx(KRX) 이력은 바닥이 다르고 확인하지 않았다 —
+#      1990 년대 중반부터만 주면 그 첫날을 상장일로 오인해 '역사적' 이라 부르게 된다.
+#   2) pykrx 의 시세 요청에는 네트워크 timeout 이 없다. 시간 예산이 지나도 그
+#      스레드는 끝나지 않는다(네이버는 urlopen timeout 20초).
+#   네이버가 막힌 날은 후보가 '역사적 판정 보류' 로 나간다 — 그게 정직한 결과다.
+HIST_SOURCE_ORDER = ("naver",)
 HIST_FETCH_WORKERS = 4
 HIST_BUDGET_BRIEF_S = 60                  # 16:00 시황 빌드 안에서 쓰는 예산
 HIST_BUDGET_PREWARM_S = 240               # 15:48 프리워밍 예산
@@ -205,13 +214,23 @@ def is_hist_candidate(row, flags: dict) -> bool:
 
 # ─────────────────────────── 역사적 캐시 ───────────────────────────
 def ensure_table(conn) -> None:
-    conn.execute(ALLTIME_DDL)
+    """표가 없으면 만든다. 이미 있으면 아무것도 안 한다(부팅 스키마가 만든다).
+
+    쓰기 잠금을 못 얻어 실패해도 표가 이미 있으면 넘어간다 — 표가 있는 날
+    16:10 일봉 잡이 쓰는 중이라고 신고가 섹션 전체가 'DB locked' 로 비면 안 된다.
+    """
+    try:
+        conn.execute(ALLTIME_DDL)
+    except sqlite3.OperationalError:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='alltime_high'").fetchone():
+            raise
 
 
 def _default_fetch(code: str, start: str, end: str):
-    """(소스, 행들, 오류들). ohlcv_autofill 의 소스 순서(네이버 → pykrx)를 그대로 쓴다."""
+    """(소스, 행들, 오류들). 상장 이후 이력은 **네이버만** 쓴다(HIST_SOURCE_ORDER)."""
     import ohlcv_autofill as oa
-    _c, src, rows, errs = oa._fetch_one(code, start, end, oa.SOURCE_ORDER, 0)
+    _c, src, rows, errs = oa._fetch_one(code, start, end, HIST_SOURCE_ORDER, 0)
     return src, rows, errs
 
 
@@ -234,6 +253,72 @@ def _summarize(rows, today_iso: str):
     return best[0], best[1], first, last, last_close
 
 
+_SELECT_CACHED = ("SELECT code, max_close, max_date, first_date, through_date, "
+                  "ref_close, source, complete FROM alltime_high WHERE code IN ({qs})")
+
+
+def _read_cached(conn, codes) -> dict:
+    out = {}
+    codes = list(codes)
+    for i in range(0, len(codes), 500):            # 바인딩 변수 상한(옛 빌드 999)
+        part = codes[i:i + 500]
+        for r in conn.execute(_SELECT_CACHED.format(qs=",".join("?" * len(part))),
+                              part).fetchall():
+            out[r[0]] = tuple(r)
+    return out
+
+
+def _from_cache(conn, code: str, row, first_bar, today_iso: str):
+    """표의 한 행으로 답할 수 있으면 (결과, 갱신할 행 | None). 다시 받아야 하면 None."""
+    if not row or not row[7]:
+        return None
+    _, mx, mxd, fd, thr, refc, src, _cp = row
+    # 받아 둔 일봉이 저장된 이력보다 앞선다 → 저장된 이력이 상장일까지 안 닿는다.
+    if first_bar and fd and fd > first_bar:
+        return None
+    # 수정주가 재조정 감지 — 같은 날 종가가 달라졌으면 처음부터 다시 받는다.
+    r2 = conn.execute("SELECT close FROM ohlcv WHERE code = ? AND date = ?",
+                      (code, thr)).fetchone()
+    if r2 and refc and r2[0] and abs(r2[0] - refc) / refc > REF_CLOSE_TOL:
+        return None
+    # 앞으로 굴린다 — ohlcv 가 through_date 를 품고 있어야 그 사이가 빈틈없다.
+    cover = conn.execute("SELECT MIN(date) FROM ohlcv WHERE code = ?",
+                         (code,)).fetchone()[0]
+    newer = conn.execute(
+        "SELECT date, close FROM ohlcv WHERE code = ? AND date > ? AND date < ? "
+        "ORDER BY date", (code, thr, today_iso)).fetchall()
+    if newer and (cover is None or cover > thr):
+        return None                              # 빈틈 — 다시 받는다
+    for d, c in newer:
+        if c and c > mx:
+            mx, mxd = c, d
+    upd = None
+    if newer:
+        thr, refc = newer[-1][0], newer[-1][1]
+        upd = (code, mx, mxd, fd, thr, refc, src, 1)
+    return {"max": mx, "max_date": mxd, "first_date": fd, "fetched": False}, upd
+
+
+def _store(conn, updates: list) -> None:
+    """표에 쓴다. 쓰기가 실패해도(잠금 등) 이번 판정은 그대로 쓴다 — 다음에 다시 받을 뿐."""
+    if not updates:
+        return
+    stamp = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO alltime_high (code, max_close, max_date, "
+            "first_date, through_date, ref_close, source, complete, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", [u + (stamp,) for u in updates])
+        conn.commit()
+    except sqlite3.Error as exc:
+        log.warning("[신고가] 역사적 표 저장 실패 %d행 — 이번 판정은 그대로: %s",
+                    len(updates), exc)
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+
+
 def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
                  budget_s: float = HIST_BUDGET_BRIEF_S,
                  workers: int = HIST_FETCH_WORKERS) -> dict:
@@ -242,6 +327,9 @@ def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
     `cands` 는 [{'code', 'first_bar'}] — first_bar 는 ohlcv 에 받아 둔 그 종목의
     첫날(훑은 구간 안). 소스가 그보다 짧은 이력을 주면 상장일까지 닿았다고 볼 수
     없으므로 보류한다.
+
+    `budget_s <= 0` 이면 표만 읽고 네트워크로 받지 않는다(대시보드 API — 요청
+    스레드를 붙잡지 않고, 16:00 시황과 락을 다투지 않는다). 표에 없는 후보는 보류.
     """
     today_iso = _iso(today)
     fetch = fetch or _default_fetch
@@ -251,47 +339,23 @@ def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
         return out
     codes = [c["code"] for c in cands]
     first_by = {c["code"]: c.get("first_bar") for c in cands}
-    qs = ",".join("?" * len(codes))
-    cached = {r[0]: r for r in conn.execute(
-        f"SELECT code, max_close, max_date, first_date, through_date, ref_close, "
-        f"source, complete FROM alltime_high WHERE code IN ({qs})", codes).fetchall()}
+    cached = _read_cached(conn, codes)
 
     need_fetch: list[str] = []
     updates: list[tuple] = []
     for code in codes:
-        row = cached.get(code)
-        if not row or not row[7]:
+        got = _from_cache(conn, code, cached.get(code), first_by.get(code), today_iso)
+        if got is None:
             need_fetch.append(code)
             continue
-        _, mx, mxd, fd, thr, refc, src, _cp = row
-        # 받아 둔 일봉이 저장된 이력보다 앞선다 → 저장된 이력이 상장일까지 안 닿는다.
-        if first_by.get(code) and fd and fd > first_by[code]:
-            need_fetch.append(code)
-            continue
-        # 수정주가 재조정 감지 — 같은 날 종가가 달라졌으면 처음부터 다시 받는다.
-        r2 = conn.execute("SELECT close FROM ohlcv WHERE code = ? AND date = ?",
-                          (code, thr)).fetchone()
-        if r2 and refc and r2[0] and abs(r2[0] - refc) / refc > REF_CLOSE_TOL:
-            need_fetch.append(code)
-            continue
-        # 앞으로 굴린다 — ohlcv 가 through_date 를 품고 있어야 그 사이가 빈틈없다.
-        cover = conn.execute("SELECT MIN(date) FROM ohlcv WHERE code = ?",
-                             (code,)).fetchone()[0]
-        newer = conn.execute(
-            "SELECT date, close FROM ohlcv WHERE code = ? AND date > ? AND date < ? "
-            "ORDER BY date", (code, thr, today_iso)).fetchall()
-        if newer and (cover is None or cover > thr):
-            need_fetch.append(code)              # 빈틈 — 다시 받는다
-            continue
-        for d, c in newer:
-            if c and c > mx:
-                mx, mxd = c, d
-        if newer:
-            thr, refc = newer[-1][0], newer[-1][1]
-            updates.append((code, mx, mxd, fd, thr, refc, src, 1))
-        out[code] = {"max": mx, "max_date": mxd, "first_date": fd, "fetched": False}
+        out[code], upd = got
+        if upd:
+            updates.append(upd)
 
-    if need_fetch:
+    if need_fetch and budget_s <= 0:
+        for code in need_fetch:
+            out[code] = {"pending": "표에 없음 — 이 호출은 이력을 받지 않는다"}
+    elif need_fetch:
         # 예산은 락을 기다리는 시간까지 포함한다 — 합쳐서 budget_s 를 넘지 않는다.
         deadline = time.monotonic() + budget_s
         end = (date.fromisoformat(today_iso) - timedelta(days=1)).strftime("%Y%m%d")
@@ -300,10 +364,23 @@ def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
                 out[code] = {"pending": "다른 이력 조회가 진행 중"}
         else:
             try:
+                # 락을 기다리는 사이 다른 호출(15:48 프리워밍 등)이 같은 종목을 막
+                # 채웠을 수 있다 — 표를 다시 보고, 그래도 없는 것만 받는다.
+                again = _read_cached(conn, need_fetch)
+                still: list[str] = []
+                for code in need_fetch:
+                    got = _from_cache(conn, code, again.get(code), first_by.get(code),
+                                      today_iso)
+                    if got is None:
+                        still.append(code)
+                        continue
+                    out[code], upd = got
+                    if upd:
+                        updates.append(upd)
                 pool = ThreadPoolExecutor(max_workers=max(1, workers),
                                           thread_name_prefix="alltime")
                 futs = {pool.submit(fetch, code, HIST_FETCH_START, end): code
-                        for code in need_fetch}
+                        for code in still}
                 done, not_done = wait(futs, timeout=max(0.0, deadline - time.monotonic()))
                 pool.shutdown(wait=False, cancel_futures=True)
                 for f in not_done:
@@ -328,16 +405,14 @@ def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
                     updates.append((code, mx, mxd, fd, last, lastc, src, 1))
                     out[code] = {"max": mx, "max_date": mxd, "first_date": fd,
                                  "fetched": True}
+                # 락을 놓기 **전에** 쓴다 — 락을 기다리던 다음 호출이 표를 다시 볼 때
+                # 이 결과가 이미 들어가 있어야 같은 종목을 또 받지 않는다.
+                _store(conn, updates)
+                updates = []
             finally:
                 _HIST_LOCK.release()
 
-    if updates:
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.executemany(
-            "INSERT OR REPLACE INTO alltime_high (code, max_close, max_date, "
-            "first_date, through_date, ref_close, source, complete, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)", [u + (stamp,) for u in updates])
-        conn.commit()
+    _store(conn, updates)
     return out
 
 
