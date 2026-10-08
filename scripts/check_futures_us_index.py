@@ -15,7 +15,7 @@ server.py 는 Flask 앱이라 import 하지 않는다(check_etf_marking.py 와 �
   4. 선물: 마스터에서 근월물(A01612)·원월물(A01703)을 고르고 실측 필드로 채운다.
   5. 'A' 를 뗀 코드처럼 rt_cd=0 에 빈 output1 이 오면 0 으로 채우지 않고 사유를 적는다.
 """
-import ast, io, os, sys, types, zipfile
+import ast, io, os, sys, threading, time, types, zipfile
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -46,15 +46,18 @@ check('_us_index_lines(' in kr and '_us_index_lines(' in body('us_market_summary
       '국장·미장 시황 모두 미국 지수를 그 자리에서 받는다')
 
 # ── server.py 에서 필요한 것만 꺼낸다 ──
+# _yf() 는 yfinance 첫 import 경합을 막는 도우미(2026-09-29). 미국 지수 함수가
+# 모듈을 그걸로 받으므로 같이 꺼내 진짜 도우미가 가짜 yfinance 를 집어 오게 한다.
 tree = ast.parse(SRC)
-want = {'_fetch_us_indices_live', '_us_index_lines', '_kospi200_futures_section'}
+want = {'_yf', '_fetch_us_indices_live', '_us_index_lines', '_kospi200_futures_section'}
+want_vars = {'_YF_LOCK', 'US_INDEX_TICKERS'}
 chunks = []
 for node in tree.body:
     if isinstance(node, ast.FunctionDef) and node.name in want:
         chunks.append(ast.get_source_segment(SRC, node))
-    if isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'US_INDEX_TICKERS' for t in node.targets):
+    if isinstance(node, ast.Assign) and any(getattr(t, 'id', '') in want_vars for t in node.targets):
         chunks.append(ast.get_source_segment(SRC, node))
-check(len(chunks) == 4, f'함수 3개 + 티커 표를 꺼냈다 ({len(chunks)})')
+check(len(chunks) == 6, f'함수 4개 + lock + 티커 표를 꺼냈다 ({len(chunks)})')
 
 
 import pandas as pd                                          # noqa: E402  yfinance 가 끌고 오는 의존성
@@ -83,7 +86,9 @@ def run_us(frames, now_ny, last_price=None):
         @classmethod
         def now(cls, tz=None):
             return now_ny.astimezone(tz) if tz else now_ny
-    ns = {'datetime': DT, 'timedelta': timedelta, 'timezone': timezone}
+    ns = {'datetime': DT, 'timedelta': timedelta, 'timezone': timezone,
+          'threading': threading, 'time': time,
+          '_note_collect_error': lambda src, detail: print(f'    [collect_error] {src}: {detail}')}
     for c in chunks:
         exec(c, ns)
     return ns
