@@ -4610,6 +4610,8 @@ def api_health():
     return jsonify({
         "status": "ok",
         "scheduler_overdue": overdue,
+        "scheduler_thread_alive": (_scheduler_thread_alive() if _scheduler is not None else None),
+        "rss_mb": _rss_mb(),
         "uptime_sec": round(time.time() - _start_time),
         "uptime_hours": round((time.time() - _start_time) / 3600, 2),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -4742,6 +4744,68 @@ def _scheduler_liveness_loop(interval: float = 60.0) -> None:
             strikes = _scheduler_liveness_check(strikes)
         except Exception:                                  # noqa: BLE001
             log.exception("[스케줄러 감시] 점검 실패")
+
+
+# ── 스레드 진단 (2026-10-08) ─────────────────────────────────────────────────
+# 운영에서 스케줄러가 부팅 직후 첫 잡 시각에 멈추는데 로컬에서는 재현되지 않는다.
+# 로그를 못 보는 쪽에서도 원인을 알 수 있게, 잡히지 않은 스레드 예외를 최근 몇 개
+# 기억하고(threading.excepthook) 각 스레드가 지금 어디서 멈춰 있는지 보여 준다.
+# 코드 위치만 보이고 값·비밀은 싣지 않는다.
+_THREAD_ERRORS: list = []
+
+
+def _record_thread_exception(args):                       # threading.excepthook
+    try:
+        name = getattr(args.thread, "name", "?")
+        _THREAD_ERRORS.append({
+            "at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "thread": name,
+            "type": getattr(args.exc_type, "__name__", str(args.exc_type)),
+            "where": [f"{fs.filename.rsplit('/', 1)[-1]}:{fs.lineno} {fs.name}"
+                      for fs in __import__("traceback").extract_tb(args.exc_traceback)[-6:]],
+        })
+        del _THREAD_ERRORS[:-10]
+        log.error("[스레드 예외] %s — %s", name, getattr(args.exc_type, "__name__", args.exc_type))
+    except Exception:                                      # noqa: BLE001
+        pass
+    _ORIG_EXCEPTHOOK(args)
+
+
+_ORIG_EXCEPTHOOK = threading.excepthook
+threading.excepthook = _record_thread_exception
+
+
+def _rss_mb() -> float | None:
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        return None
+    return None
+
+
+@app.route("/api/ops/diag/threads", methods=["GET"])
+def api_ops_diag_threads():
+    """스레드마다 지금 실행 중인 코드 위치(마지막 8줄)·잡히지 않은 스레드 예외·메모리."""
+    import sys as _sys
+    import traceback as _tb
+    frames = _sys._current_frames()
+    out = []
+    for th in threading.enumerate():
+        fr = frames.get(th.ident)
+        stack = ([f"{fs.filename.rsplit('/', 1)[-1]}:{fs.lineno} {fs.name}"
+                  for fs in _tb.extract_stack(fr)[-8:]] if fr is not None else [])
+        out.append({"name": th.name, "daemon": th.daemon, "alive": th.is_alive(), "stack": stack})
+    sched = None
+    if _scheduler is not None:
+        sched = {"running": bool(_scheduler.running),
+                 "thread_alive": _scheduler_thread_alive(),
+                 "overdue": _scheduler_overdue()[:10]}
+    return jsonify({"checked_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                    "rss_mb": _rss_mb(), "scheduler": sched,
+                    "thread_errors": _THREAD_ERRORS, "threads": out})
 
 
 @app.before_request
