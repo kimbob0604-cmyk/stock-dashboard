@@ -5211,6 +5211,18 @@ def api_options_signal():
 _TG_SEND_LOCK = threading.RLock()
 _TG_MIN_GAP_S = 1.0
 _TG_LAST_SENT = [0.0]
+# 429 재시도 대기 상한. 텔레그램이 더 길게 부르면(드물다) 이만큼만 기다려 본다 —
+# 줄을 쥔 채 기다리므로 다른 발송을 너무 오래 세우지 않는다.
+_TG_RETRY_MAX_S = 30
+
+
+def _tg_retry_after(r) -> int:
+    """429 응답의 parameters.retry_after(초). 못 읽으면 3초. 1~_TG_RETRY_MAX_S."""
+    try:
+        sec = int(((r.json() or {}).get("parameters") or {}).get("retry_after") or 3)
+    except Exception:                                          # noqa: BLE001
+        sec = 3
+    return max(1, min(sec, _TG_RETRY_MAX_S))
 
 
 def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
@@ -5226,16 +5238,24 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
         import requests as _rq
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         with _TG_SEND_LOCK:
-            gap = _TG_MIN_GAP_S - (time.monotonic() - _TG_LAST_SENT[0])
-            if gap > 0:
-                time.sleep(gap)
-            try:
-                r = _rq.post(url, json={
-                    "chat_id": chat_id, "text": message,
-                    "parse_mode": parse_mode, "disable_web_page_preview": True,
-                }, timeout=10)
-            finally:
-                _TG_LAST_SENT[0] = time.monotonic()
+            for attempt in (1, 2):
+                gap = _TG_MIN_GAP_S - (time.monotonic() - _TG_LAST_SENT[0])
+                if gap > 0:
+                    time.sleep(gap)
+                try:
+                    r = _rq.post(url, json={
+                        "chat_id": chat_id, "text": message,
+                        "parse_mode": parse_mode, "disable_web_page_preview": True,
+                    }, timeout=10)
+                finally:
+                    _TG_LAST_SENT[0] = time.monotonic()
+                # 429 는 '조금 있다 다시' 라는 뜻이다 — 버리지 않고 한 번 더 보낸다.
+                # 줄을 쥔 채 기다린다: 그동안 다른 건을 보내 봐야 똑같이 거절된다.
+                if r.status_code != 429 or attempt == 2:
+                    break
+                wait = _tg_retry_after(r)
+                log.warning("[텔레그램] 429 — %ds 뒤 한 번 더 보낸다", wait)
+                time.sleep(wait)
         if r.status_code != 200:
             log.warning("[텔레그램] send failed: %s %s", r.status_code, r.text[:200])
             return False
@@ -6017,7 +6037,7 @@ def consensus_snapshot_and_revisions() -> None:
         _compute_revisions()
 
 
-def alert_revision_signals():
+def alert_revision_signals() -> bool:
     """Step 5-1-F: 컨센서스 리비전 STRONG 시그널 텔레 발송 (평일 16:00).
 
     1. 14:30 스냅샷·계산이 끝났는지 본다 — 돌고 있으면 기다리고, 오늘 계산이
@@ -6025,7 +6045,11 @@ def alert_revision_signals():
        스냅샷 기준이고, 메시지의 기준일 줄이 그 날짜를 밝힌다.
     2. alert_sent=0 인 STRONG_UP / STRONG_DOWN 만 조회 (NEUTRAL/UP/DOWN 제외)
     3. 종목별 최대 10건씩 발송 (각 방향)
-    4. 발송 후 alert_sent=1 UPDATE — 중복 발송 방지
+    4. 발송 후 alert_sent=1 UPDATE — 중복 발송 방지. **보낸 것만** 찍는다 —
+       발송이 실패했는데 찍으면 그 알림은 영영 안 나간다.
+
+    Returns: 오늘 몫이 끝났으면 True(보냈거나 보낼 게 없음). 발송·조회가
+    실패했으면 False — 캐치업이 다시 부른다.
     """
     try:
         if _CONSENSUS_SNAPSHOT_LOCK.acquire(timeout=_REVISION_WAIT_S):
@@ -6052,7 +6076,16 @@ def alert_revision_signals():
 
         if not rows:
             log.info("[리비전 알림] 신규 STRONG 시그널 없음 — 발송 스킵")
-            return
+            return True
+        # 가장 최근 스냅샷일. 기준일 줄이 '오늘 스냅샷이 없었다' 와 '오늘
+        # 스냅샷은 있는데 이건 전에 못 보낸 몫이다' 를 가리는 데 쓴다.
+        latest_snap = None
+        try:
+            with _get_db() as conn:
+                latest_snap = conn.execute(
+                    "SELECT MAX(snapshot_date) FROM consensus_snapshot").fetchone()[0]
+        except Exception as exc:                              # noqa: BLE001
+            log.debug("[리비전 알림] 최근 스냅샷일 조회 실패: %s", exc)
 
         # 종목명 매핑
         codes = list({r["stock_code"] for r in rows})
@@ -6073,15 +6106,22 @@ def alert_revision_signals():
         today_kst = now_kst().strftime("%Y-%m-%d")
         lines = [f"📈 <b>컨센서스 리비전 알림</b> ({today_kst})"]
         # 기준일은 보내는 날이 아니라 **스냅샷을 받은 날**이다. 오늘 스냅샷이
-        # 없었으면(14:30 잡이 못 돈 날) 그 사실을 적는다.
+        # 없었으면(14:30 잡이 못 돈 날) 그 사실을 적는다. 오늘 스냅샷은 있는데
+        # 여기 실린 게 그 전 날짜뿐이면 — 전날 10건 넘게 나와 남은 몫이다.
         snap_dates = sorted({str(r.get("current_date") or "")[:10]
                              for r in rows if r.get("current_date")})
         if snap_dates:
             d_lbl = snap_dates[-1][5:].replace("-", "/")
             if len(snap_dates) > 1:
                 d_lbl = f"{snap_dates[0][5:].replace('-', '/')}~{d_lbl}"
-            note = ("" if snap_dates[-1] == today_kst
-                    else " — 오늘 스냅샷 전, 가장 최근 수집분")
+            snap_today = (str(latest_snap or "")[:10] == today_kst
+                          if latest_snap else snap_dates[-1] == today_kst)
+            if not snap_today:
+                note = " — 오늘 스냅샷 전, 가장 최근 수집분"
+            elif snap_dates[-1] != today_kst:
+                note = " — 앞서 못 보낸 몫"
+            else:
+                note = ""
             lines.append(f"<i>기준일: 컨센서스 스냅샷 {d_lbl}{note}</i>")
         lines.append("")
 
@@ -6128,22 +6168,30 @@ def alert_revision_signals():
         msg = "\n".join(lines).rstrip()
         if len(msg) > 4000:
             msg = msg[:3990] + "\n…(생략)"
-        send_telegram(msg)
+        if not send_telegram(msg):
+            log.warning("[리비전 알림] 발송 실패 — alert_sent 를 찍지 않는다(다시 보낸다)")
+            return False
 
-        # alert_sent 마킹 (발송된 row 만)
+        # alert_sent 마킹 (발송된 row 만). 이미 보냈으니 여기서 실패해도 True —
+        # False 면 캐치업이 같은 알림을 오늘 또 보낸다.
         if sent_ids:
-            sent_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            placeholders = ",".join(["?"] * len(sent_ids))
-            with _get_db() as conn:
-                conn.execute(
-                    f"UPDATE revision_alerts SET alert_sent=1, sent_at=? "
-                    f"WHERE id IN ({placeholders})",
-                    [sent_at] + sent_ids,
-                )
-                conn.commit()
-            log.info("[리비전 알림] %d건 발송 + alert_sent 마킹", len(sent_ids))
+            try:
+                sent_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                placeholders = ",".join(["?"] * len(sent_ids))
+                with _get_db() as conn:
+                    conn.execute(
+                        f"UPDATE revision_alerts SET alert_sent=1, sent_at=? "
+                        f"WHERE id IN ({placeholders})",
+                        [sent_at] + sent_ids,
+                    )
+                    conn.commit()
+                log.info("[리비전 알림] %d건 발송 + alert_sent 마킹", len(sent_ids))
+            except Exception as exc:                          # noqa: BLE001
+                log.warning("[리비전 알림] 보냈지만 alert_sent 마킹 실패: %s", exc)
+        return True
     except Exception as exc:
         log.warning("alert_revision_signals: %s", exc, exc_info=True)
+        return False
 
 
 def alert_morning_briefing():
@@ -6572,7 +6620,8 @@ def _refresh_global_data_periodic():
 
 
 # ── 알림 5: 장 마감 요약 (평일 16:00 — send_post_close_alerts 가 부른다) ──
-def alert_closing_summary():
+def alert_closing_summary() -> bool:
+    """보냈으면 True. 실패면 False — 캐치업이 다시 부른다."""
     try:
         lines = ["🔔 <b>장 마감 요약</b>", ""]
 
@@ -6618,9 +6667,10 @@ def alert_closing_summary():
                     lines.append(f"  🇰🇷 {it['name']} {it['total_score']}점 ({sign}{chg}%)")
             except Exception:
                 pass
-        send_telegram("\n".join(lines))
+        return bool(send_telegram("\n".join(lines)))
     except Exception as exc:
         log.warning("alert_closing_summary: %s", exc)
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -7208,6 +7258,8 @@ def _startup():
             # 장 끝난 뒤 나머지 텔레그램도 전부 같은 16:00 (2026-10-08 사용자 요청).
             #   장 마감 요약 15:40 · 수급 시그널 19:30 · 리비전 18:30 · AI 추천 15:45
             #   → 한 잡이 정해진 순서로 보낸다(send_post_close_alerts 설명 참고).
+            #   시황이 먼저 나간 뒤에 보낸다. 잠들어 놓치면 closing_brief_catchup 이
+            #   시황과 함께 잡는다(알림별로 보냈는지 적어 둔다).
             # 시각은 시황과 같은 _CLOSING_BRIEF_HHMM 에서 온다. 16:00 에는 시황·
             # stage2·가격 sync·워치독·공시 폴링이 한꺼번에 깨어 스레드풀(10)이
             # 찰 수 있다 — 기본 misfire 1초면 줄 서 있다가 통째로 건너뛴다.
@@ -7230,7 +7282,8 @@ def _startup():
                                misfire_grace_time=300)
             # 밀린 장마감 시황을 뒤늦게라도 보낸다. Render 무료 플랜이 16:00 에
             # 자고 있었으면 cron 은 돌지 않는다 — 깨어 있는 30분마다 확인한다.
-            # 하루 한 번 제한은 send_closing_market_summary 가 건다.
+            # 하루 한 번 제한은 send_closing_market_summary 가 건다. 시황 다음에
+            # 장 끝난 뒤 나머지 알림(send_post_close_alerts)도 남은 것만 보낸다.
             # 16:05 부터 20:35 까지 30분마다. 마지막 슬롯이
             # _CLOSING_BRIEF_DEADLINE_HHMM(20:35)과 같아야 한다 — 그 시각에는
             # 데이터가 덜 찼어도 보낸다. 창이 더 짧으면 재배포로 DB 가 날아간
@@ -14900,25 +14953,38 @@ def closing_brief_catchup() -> bool:
     그 형태였다.
 
     그래서 '시각에 맞춰 깨어 있기' 에 기대지 않고 **깨어날 때마다 밀린 것이
-    있는지 본다.** 부팅 직후와 워치독(평일 08~20시 30분 간격)이 부른다.
+    있는지 본다.** 부팅 직후와 16:05~20:35 30분 간격 cron 이 부른다.
     하루 한 번 제한은 `send_closing_market_summary` 가 건다.
+
+    **장 끝난 뒤 나머지 알림(send_post_close_alerts)도 여기서 잡는다.** 같은
+    16:00 cron 이라 잠들어 있었으면 같이 놓친다(2026-10-08 — 16:01 에 깨어나면
+    16:00 잡은 이미 지나 있다). 순서는 시황 먼저, 그다음 나머지다 —
+    send_post_close_alerts 가 시황부터 보낸다. 알림마다 보냈는지 적어 두므로
+    일부만 실패한 날은 남은 것만 다시 보낸다.
 
     주말·공휴일은 보내지 않는다. 휴장일 판정은 '오늘 시세가 갱신됐는가' 가
     아니라 요일로 한다 — 공휴일에 안 보내는 것보다 평일에 빠뜨리는 쪽이 나쁘다.
+
+    Returns: 이번 호출로 시황이 나갔으면 True.
     """
     now = now_kst()
     if now.weekday() >= 5:
         return False
     if (now.hour, now.minute) < _CLOSING_BRIEF_HHMM:
         return False
-    if str(_ops_get(_closing_brief_key(), "")) == now.strftime("%Y-%m-%d"):
+    today = now.strftime("%Y-%m-%d")
+    brief_was_sent = str(_ops_get(_closing_brief_key(), "")) == today
+    if brief_was_sent and _post_close_all_done(today):
         return False
-    log.info("[장마감시황] 밀린 발송을 지금 보낸다 (%s)", now.strftime("%H:%M"))
+    log.info("[장마감시황] 밀린 발송을 지금 보낸다 (%s) — 시황 %s · 장 끝난 뒤 알림 남은 것 %s",
+             now.strftime("%H:%M"), "보냄" if brief_was_sent else "안 보냄",
+             [k for k in _POST_CLOSE_STEP_KEYS if k not in _post_close_done(today)])
     try:
-        return send_closing_market_summary(catchup=True)
+        send_post_close_alerts(catchup=True)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("[장마감시황] 캐치업 실패: %s", exc)
-        return False
+    return (not brief_was_sent
+            and str(_ops_get(_closing_brief_key(), "")) == today)
 
 
 # ── AI 에이전트 파이프라인 ──
@@ -14947,14 +15013,19 @@ def _run_agent_pipeline() -> dict | None:
     return result
 
 
-def _send_agent_picks(result) -> None:
+def _send_agent_picks(result) -> bool:
+    """보냈거나 보낼 추천이 없으면 True. 실행 실패(None)·발송 실패면 False."""
     if not result:
-        return
+        return False
+    if not (result.get("final_picks") or []):
+        log.info("[Agent] 추천 0종목 — 보낼 것이 없다")
+        return True
     try:
         from agents.pipeline import send_agent_telegram
-        send_agent_telegram(result)
+        return send_agent_telegram(result) is not False
     except Exception as exc:                                  # noqa: BLE001
         log.warning("[Agent] 텔레그램 발송 실패: %s", exc)
+        return False
 
 
 def agent_run_and_send() -> None:
@@ -14970,9 +15041,9 @@ def agent_prepare_close() -> None:
                                   result=result)
 
 
-def _send_agent_close_picks() -> None:
+def _send_agent_close_picks() -> bool:
     """16:00 — 15:45 에 만들어 둔 추천을 보낸다. 없으면(그 시각에 자고 있었거나
-    재시작) 지금 돌려서 보낸다."""
+    재시작) 지금 돌려서 보낸다. 실행이 실패하면 아무것도 안 보내고 False."""
     today = now_kst().strftime("%Y-%m-%d")
     with _AGENT_RUN_LOCK:                 # 15:45 실행이 아직 돌면 끝나기를 기다린다
         result = (_AGENT_CLOSE_PICKS.get("result")
@@ -14980,33 +15051,107 @@ def _send_agent_close_picks() -> None:
     if result is None:
         log.info("[Agent] 15:45 준비분이 없다 — 지금 돌려서 보낸다")
         result = _run_agent_pipeline()
-    _send_agent_picks(result)
+        if result is not None:
+            _AGENT_CLOSE_PICKS.update(date=today, result=result)
+    return _send_agent_picks(result)
 
 
-def send_post_close_alerts() -> None:
+# 장 끝난 뒤 알림을 **알림별로** 오늘 보냈는지 적는다. 값은 "YYYY-MM-DD:키,키".
+# 하나만 실패한 날은 캐치업이 그것만 다시 보낸다. ops_state 는 Gist 로 백업된다.
+_POST_CLOSE_KEY = "post_close_sent"
+_POST_CLOSE_STEP_KEYS = ("summary", "flow", "revision", "agent")
+# 16:00 cron · 30분 캐치업 · 부팅 캐치업 · 수동 트리거가 겹치면 하나만 돈다.
+_POST_CLOSE_LOCK = threading.Lock()
+
+
+def _post_close_done(today: str) -> set:
+    """오늘 끝낸(보냈거나 보낼 게 없다고 확인한) 장 끝난 뒤 알림의 키."""
+    raw = str(_ops_get(_POST_CLOSE_KEY, "") or "")
+    day, _, keys = raw.partition(":")
+    return {k for k in keys.split(",") if k} if day == today else set()
+
+
+def _post_close_all_done(today: str) -> bool:
+    return set(_POST_CLOSE_STEP_KEYS) <= _post_close_done(today)
+
+
+def _post_close_mark(today: str, done: set) -> None:
+    _ops_set(_POST_CLOSE_KEY, f"{today}:{','.join(k for k in _POST_CLOSE_STEP_KEYS if k in done)}")
+
+
+def send_post_close_alerts(*, catchup: bool = False) -> bool:
     """장마감 시황 말고 **장 끝난 뒤 나가는 나머지 텔레그램을 16:00 에 보낸다.**
 
     2026-10-08 사용자 요청: "장 끝나고 16:00 으로 바꿔. 모든 시간대가 다 16:00 으로."
     예전 시각 — 장 마감 요약 15:40 · AI 추천 15:45 · 리비전 18:30 · 수급 시그널 19:30.
     시각은 장마감 시황과 같은 _CLOSING_BRIEF_HHMM 에서 온다.
 
-    한 잡에서 **정해진 순서로** 보낸다. 같은 16:00 에 장마감 시황이 가격·수급을
-    다시 받고 신고가를 판정하느라 몇 분을 쓰는데, 이쪽은 가벼운 것부터 몇 초 안에
-    끝내 그 길을 막지 않는다. 무거운 준비는 전부 16:00 전에 끝나 있다
-      - 수급(flow_cache)      15:40 flow_batch
+    **시황이 먼저다.** 시작하자마자 send_closing_market_summary 를 부른다 —
+    같은 16:00 cron(tg_closing_summary)이 보내는 중이면 끝날 때까지 기다리고,
+    이미 보냈으면 곧바로 돌아오고, 아직이면(그 잡이 스레드를 못 받았으면) 여기서
+    보낸다. 하루 한 번 제한은 시황 쪽이 건다. 시황이 안 나갔으면(데이터 미완)
+    나머지도 보내지 않고 돌아간다 — 30분 캐치업이 시황 다음에 보낸다.
+
+    그다음 **정해진 순서로** 보낸다. 무거운 준비는 전부 16:00 전에 끝나 있다
+      - 수급(flow_cache)      15:40 flow_batch (+ 시황이 한 번 더 받는다)
       - 리비전 계산           14:30 consensus_snapshot_and_revisions
       - AI 추천               15:45 agent_prepare_close
-    발송끼리 겹쳐도 send_telegram 이 한 줄로 세우므로 시황 조각 사이에 끼지 않는다.
-    하나가 실패해도 나머지는 보낸다.
+
+    **알림마다 오늘 끝냈는지 ops_state 에 적는다.** 끝낸 것은 다시 안 보내고,
+    실패한 것만 다음 캐치업(closing_brief_catchup — 부팅 직후 · 16:05~20:35
+    30분 간격)이 다시 보낸다. 하나가 실패해도 나머지는 보낸다.
+
+    Returns: 네 알림이 오늘 다 끝났으면 True.
     """
-    for label, fn in (("장 마감 요약", alert_closing_summary),
-                      ("수급 시그널", alert_flow_signals),
-                      ("컨센서스 리비전", alert_revision_signals),
-                      ("AI 에이전트 추천", _send_agent_close_picks)):
+    if not _POST_CLOSE_LOCK.acquire(blocking=False):
+        log.info("[16:00 알림] 다른 쪽에서 보내는 중 — 건너뛴다 (catchup=%s)", catchup)
+        return False
+    try:
         try:
-            fn()
+            send_closing_market_summary(catchup=catchup)
         except Exception as exc:                              # noqa: BLE001
-            log.warning("[16:00 알림] %s 실패: %s", label, exc)
+            log.warning("[16:00 알림] 시황 발송 실패: %s", exc)
+        today = now_kst().strftime("%Y-%m-%d")
+        if str(_ops_get(_closing_brief_key(), "")) != today:
+            log.warning("[16:00 알림] 시황이 아직 안 나갔다 — 나머지는 시황 다음에 보낸다")
+            return False
+
+        done = _post_close_done(today)
+        before = set(done)
+        for key, label, fn in (
+                ("summary", "장 마감 요약", alert_closing_summary),
+                ("flow", "수급 시그널", lambda: alert_flow_signals(scheduled=True)),
+                ("revision", "컨센서스 리비전", alert_revision_signals),
+                ("agent", "AI 에이전트 추천", _send_agent_close_picks)):
+            if key in done:
+                continue
+            try:
+                ok = fn()
+            except Exception as exc:                          # noqa: BLE001
+                log.warning("[16:00 알림] %s 실패: %s", label, exc)
+                ok = False
+            if not ok:
+                log.warning("[16:00 알림] %s 못 끝냈다 — 다음 캐치업이 다시 보낸다", label)
+                continue
+            done.add(key)
+            _post_close_mark(today, done)
+
+        if done != before:
+            # 표시를 곧바로 밖으로 내보낸다 — 시황과 같은 이유(재배포로 표시만
+            # 사라지면 캐치업이 같은 알림을 또 보낸다). Gist 백업은 매시 30분뿐이다.
+            try:
+                from db_backup import backup_db as _bk
+                r = _bk()
+                log.info("[16:00 알림] 발송 표시 백업: %s",
+                         "ok" if r.get("ok") else r.get("reason"))
+            except Exception as exc:                          # noqa: BLE001
+                log.warning("[16:00 알림] 발송 표시 백업 실패: %s", exc)
+        left = [k for k in _POST_CLOSE_STEP_KEYS if k not in done]
+        log.info("[16:00 알림] %s — 끝냄 %s · 남음 %s (catchup=%s)",
+                 today, sorted(done), left, catchup)
+        return not left
+    finally:
+        _POST_CLOSE_LOCK.release()
 
 
 # ── 데이터 정합성 워치독 + 자가복구 ────────────────────────────────────────
@@ -15369,7 +15514,11 @@ def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
             "reversal": reversal}
 
 
-def alert_flow_signals():
+# 정기(16:00) 수급 시그널이 마지막으로 보낸 기준일. 같은 기준일을 이틀 보내지 않는다.
+_FLOW_SIG_BASIS_KEY = "flow_signals_basis"
+
+
+def alert_flow_signals(*, scheduled: bool = False) -> bool:
     """수급 심화 시그널 텔레그램 발송 (평일 16:00 — send_post_close_alerts 가 부른다).
 
     19:30(저녁 확정 수급)이었던 것을 2026-10-08 사용자 요청으로 16:00 에 당겼다.
@@ -15377,11 +15526,23 @@ def alert_flow_signals():
     장마감 시황과 같은 원칙(2026-09-18)을 따른다 — 기다리지 않고 보내되, 실제
     기준일을 적어 전일 값을 오늘 값인 척 내보내지 않는다. 확정치는 저녁에
     `/시그널` 로 다시 볼 수 있다.
+
+    scheduled=True (16:00 정기 발송) 이면 **이미 보낸 기준일은 다시 안 보낸다.**
+    16:00 의 최신일이 어떤 날은 오늘(잠정)이고 어떤 날은 전일이면, 또는 평일
+    공휴일이면, 같은 날짜의 시그널이 '오늘 것' 처럼 이틀 연달아 나간다.
+    `/시그널` 명령은 묻는 대로 늘 보낸다.
+
+    Returns: 오늘 몫이 끝났으면 True(보냈음 · 포착 없음 · 이미 보낸 기준일).
+    데이터가 아직 없거나 발송이 실패했으면 False — 캐치업이 다시 부른다.
     """
     sig = _analyze_flow_signals()
     if not sig.get("date"):
         log.info("[수급시그널] 데이터 없음 — 스킵")
-        return
+        return False
+    if scheduled and str(_ops_get(_FLOW_SIG_BASIS_KEY, "") or "") == sig["date"]:
+        log.info("[수급시그널] 기준일 %s 은 이미 보냈다 — 같은 날짜를 또 보내지 않는다",
+                 sig["date"])
+        return True
     date_lbl = sig["date"][5:].replace("-", "/")
     _now = now_kst()
     if sig["date"] == _now.strftime("%Y-%m-%d"):
@@ -15435,12 +15596,15 @@ def alert_flow_signals():
 
     if not any_section:
         log.info("[수급시그널] 포착된 시그널 없음 — 스킵")
-        return
+        return True
     lines.append(f"⏰ {now_kst().strftime('%H:%M')} KST")
     msg = "\n".join(lines)
     if len(msg) > 4000:
         msg = msg[:3990] + "\n…(생략)"
-    send_telegram(msg)
+    ok = bool(send_telegram(msg))
+    if ok and scheduled:
+        _ops_set(_FLOW_SIG_BASIS_KEY, sig["date"])
+    return ok
 
 
 @app.route("/api/flow/signals")

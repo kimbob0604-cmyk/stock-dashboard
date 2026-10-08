@@ -12,6 +12,10 @@ server.py 는 Flask 앱이라 import 하지 않는다(다른 check_*.py 와 같�
      같은 16:00 에 한 잡이 정해진 순서로 보낸다 — 2026-10-08 사용자 요청.
      입력(컨센서스 스냅샷 · AI 추천 실행)은 16:00 전에 끝난다.
   8. 16:00 수급 시그널 · 리비전은 실제 기준일을 적는다(전일 값을 오늘인 척 안 함).
+  9. 16:00 에 잠들어 있었으면 캐치업이 시황 → 나머지 순으로 보낸다. 알림별로
+     보냈는지 적어 두어 같은 날 두 번 안 보내고, 실패한 것만 다시 보낸다.
+ 10. 텔레그램 429 는 한 번 다시 보낸다 · 긴 본문 조각이 락에 막히지 않는다.
+ 11. 같은 기준일의 수급 시그널을 이틀 보내지 않는다 · 리비전은 보낸 것만 찍는다.
 """
 import re
 import sys
@@ -223,9 +227,9 @@ csh = re.search(r'hour=(\d+), minute=(\d+)', cs.group(0))
 want(csh and (int(csh.group(1)), int(csh.group(2))) <= (15, 0),
      f'컨센서스 스냅샷이 너무 늦다 — 수십 분 걸리는데 16:00 전에 끝나야 한다 {cs.group(0)!r}')
 
-# 보내는 순서와 실패 격리 — send_post_close_alerts 본문을 그대로 돌린다
-body = grab(r'\ndef send_post_close_alerts\(.*?\n(?=\n\n)', 'send_post_close_alerts').group(0)
-CALLED: list = []
+# ── 9. 순서 · 알림별 기록 · 캐치업 — server.py 본문을 그대로 돌린다 ───────
+import threading  # noqa: E402
+import types  # noqa: E402
 
 
 class _Log:
@@ -233,21 +237,189 @@ class _Log:
         return lambda *a, **k: None
 
 
-def _mk(name, boom=False):
-    def f():
-        CALLED.append(name)
-        if boom:
+pc_src = grab(r'\n_POST_CLOSE_KEY = .*?\n(?=\n\n# ── 데이터 정합성 워치독)',
+              '_POST_CLOSE_KEY ~ send_post_close_alerts').group(0)
+cb_src = grab(r'\ndef closing_brief_catchup\(.*?\n(?=\n\n)', 'closing_brief_catchup').group(0)
+want('send_post_close_alerts(catchup=True)' in cb_src,
+     '캐치업이 장 끝난 뒤 알림을 안 잡는다 — 16:00 에 자고 있었으면 넷이 통째로 사라진다')
+
+EV: list = []                 # 텔레그램으로 나간 순서
+PC_STATE: dict = {}
+BRIEF_READY = [True]
+STEP_OK = {'요약': True, '수급': True, '리비전': True, 'AI': True}
+BACKUPS: list = []
+sys.modules['db_backup'] = types.SimpleNamespace(
+    backup_db=lambda: BACKUPS.append(1) or {'ok': True})
+
+
+def _pc_brief(*, catchup=False):
+    today = NOW[0].strftime('%Y-%m-%d')
+    if PC_STATE.get('closing_brief_sent') == today or not BRIEF_READY[0]:
+        return False
+    EV.append('시황(지연)' if catchup else '시황')
+    PC_STATE['closing_brief_sent'] = today
+    return True
+
+
+def _pc_step(name):
+    def f(**kw):
+        if name == '수급':
+            want(kw == {'scheduled': True}, f'16:00 수급 시그널이 정기 발송 표시 없이 불렸다 — {kw}')
+        r = STEP_OK[name]
+        if r == 'boom':
             raise RuntimeError('일부러')
+        if r:
+            EV.append(name)
+        return bool(r)
     return f
 
 
-ns = {'alert_closing_summary': _mk('요약'), 'alert_flow_signals': _mk('수급', boom=True),
-      'alert_revision_signals': _mk('리비전'), '_send_agent_close_picks': _mk('AI'),
-      'log': _Log()}
-exec(compile(body, 'server.py(발췌)', 'exec'), ns)
-ns['send_post_close_alerts']()
-want(CALLED == ['요약', '수급', '리비전', 'AI'],
-     f'16:00 알림 순서가 다르거나 하나가 실패해 뒤가 끊겼다 — {CALLED}')
+pns = {'threading': threading, 'log': _Log(), 'now_kst': now_kst,
+       '_ops_get': lambda k, d=None: PC_STATE.get(k, d),
+       '_ops_set': lambda k, v: PC_STATE.__setitem__(k, str(v)),
+       '_closing_brief_key': lambda: 'closing_brief_sent',
+       '_CLOSING_BRIEF_HHMM': (H, M),
+       'send_closing_market_summary': _pc_brief,
+       'alert_closing_summary': _pc_step('요약'), 'alert_flow_signals': _pc_step('수급'),
+       'alert_revision_signals': _pc_step('리비전'), '_send_agent_close_picks': _pc_step('AI')}
+exec(compile(pc_src + cb_src, 'server.py(발췌)', 'exec'), pns)
+send_pc, catchup = pns['send_post_close_alerts'], pns['closing_brief_catchup']
+
+
+def _reset(day=(2026, 10, 8, 16, 0)):
+    EV.clear(); PC_STATE.clear(); BACKUPS.clear()
+    BRIEF_READY[0] = True
+    STEP_OK.update({'요약': True, '수급': True, '리비전': True, 'AI': True})
+    NOW[0] = datetime(*day, tzinfo=KST)
+
+
+ALL = ['요약', '수급', '리비전', 'AI']
+
+# 16:00 cron — 시황이 먼저, 그다음 넷이 정해진 순서로
+_reset()
+want(send_pc() is True, '16:00 장 끝난 뒤 알림이 다 끝났다고 안 한다')
+want(EV == ['시황'] + ALL, f'16:00 순서가 다르다 — 시황 먼저, 그다음 요약·수급·리비전·AI {EV}')
+want(BACKUPS, '보낸 표시를 곧바로 백업하지 않는다 — 재배포 뒤 같은 알림이 또 나간다')
+# 같은 날 다시 불려도(캐치업 · 수동 트리거) 아무것도 다시 안 나간다
+EV.clear(); BACKUPS.clear()
+want(send_pc() is True and EV == [], f'같은 날 두 번째 호출이 또 보냈다 — {EV}')
+want(catchup() is False and EV == [], f'다 보낸 날 캐치업이 또 보냈다 — {EV}')
+want(not BACKUPS, '새로 보낸 게 없는데 백업했다')
+
+# 하나가 실패(False)·예외여도 나머지는 나가고, 실패한 것만 캐치업이 다시 보낸다
+_reset()
+STEP_OK['수급'] = 'boom'
+STEP_OK['리비전'] = False
+want(send_pc() is False, '실패가 있는데 다 끝났다고 한다')
+want(EV == ['시황', '요약', 'AI'], f'하나가 실패해 뒤가 끊겼다 — {EV}')
+want(PC_STATE.get('post_close_sent') == '2026-10-08:summary,agent',
+     f'알림별 기록이 이상하다 — {PC_STATE.get("post_close_sent")!r}')
+EV.clear()
+STEP_OK['수급'] = True
+NOW[0] = datetime(2026, 10, 8, 16, 35, tzinfo=KST)
+want(catchup() is False, '시황은 이미 나갔는데 캐치업이 시황을 보냈다고 한다')
+want(EV == ['수급'], f'캐치업이 실패한 것만 다시 보내지 않는다 — {EV}')
+EV.clear()
+STEP_OK['리비전'] = True
+NOW[0] = datetime(2026, 10, 8, 17, 5, tzinfo=KST)
+catchup()
+want(EV == ['리비전'], f'두 번째 캐치업이 남은 것만 보내지 않는다 — {EV}')
+EV.clear()
+catchup()
+want(EV == [], f'다 끝난 뒤에도 캐치업이 보냈다 — {EV}')
+
+# 16:00 에 자고 있다 16:01 에 깨어났다 — 부팅 캐치업이 시황 → 나머지 순으로
+_reset((2026, 10, 8, 16, 1))
+want(catchup() is True, '부팅 캐치업이 밀린 시황을 보냈다고 안 한다')
+want(EV == ['시황(지연)'] + ALL, f'깨어난 뒤 순서가 다르거나 빠졌다 — {EV}')
+
+# 시황 데이터가 덜 찼으면 나머지도 안 보내고 기록도 안 찍는다 — 시황 다음에 보낸다
+_reset((2026, 10, 8, 16, 1))
+BRIEF_READY[0] = False
+want(catchup() is False and EV == [], f'시황이 안 나갔는데 나머지를 보냈다 — {EV}')
+want('post_close_sent' not in PC_STATE, '아무것도 안 보냈는데 기록을 찍었다')
+BRIEF_READY[0] = True
+NOW[0] = datetime(2026, 10, 8, 16, 35, tzinfo=KST)
+want(catchup() is True and EV == ['시황(지연)'] + ALL,
+     f'데이터가 찬 뒤 캐치업이 시황 → 나머지 순으로 안 보냈다 — {EV}')
+
+# 장중 · 주말에는 캐치업이 아무것도 안 한다
+_reset((2026, 10, 8, 15, 59))
+want(catchup() is False and EV == [], f'16:00 전에 캐치업이 보냈다 — {EV}')
+_reset((2026, 10, 10, 17, 0))                                   # 토요일
+want(catchup() is False and EV == [], f'토요일에 캐치업이 보냈다 — {EV}')
+
+# 어제 기록은 오늘을 막지 않는다
+_reset((2026, 10, 8, 16, 0))
+send_pc()
+EV.clear()
+NOW[0] = datetime(2026, 10, 9, 16, 5, tzinfo=KST)
+catchup()
+want(EV == ['시황(지연)'] + ALL, f'어제 기록 때문에 오늘 것이 막혔다 — {EV}')
+
+# 다른 쪽이 보내는 중이면 겹쳐 보내지 않는다 (16:00 cron 이 리비전을 기다리는 동안 16:05 캐치업)
+_reset()
+pns['_POST_CLOSE_LOCK'].acquire()
+try:
+    want(send_pc() is False and EV == [], f'보내는 중인데 또 보냈다 — {EV}')
+    want(catchup() is False and EV == [], f'보내는 중인데 캐치업이 또 보냈다 — {EV}')
+finally:
+    pns['_POST_CLOSE_LOCK'].release()
+
+# AI 추천 — 15:45 준비분을 16:00 에 보낸다 · 실행 실패면 안 보내고 '못 끝냄'
+ag_src = grab(r'\n_AGENT_RUN_LOCK = .*?\ndef _send_agent_close_picks\(.*?\n(?=\n\n)',
+              '_AGENT_RUN_LOCK ~ _send_agent_close_picks').group(0)
+AG_SENT: list = []
+AG_RUNS: list = []
+AG_NEXT: list = []
+
+
+def _fake_run_pipeline():
+    AG_RUNS.append(1)
+    r = AG_NEXT.pop(0) if AG_NEXT else None
+    if isinstance(r, Exception):
+        raise r
+    return r
+
+
+sys.modules['agents'] = types.SimpleNamespace()
+sys.modules['agents.pipeline'] = types.SimpleNamespace(
+    run_pipeline=_fake_run_pipeline,
+    send_agent_telegram=lambda res: AG_SENT.append(res['tag']) or True)
+
+
+class _P:
+    def __truediv__(self, _):
+        return self
+
+    def exists(self):
+        return True
+
+
+ans = {'threading': threading, 'time': __import__('time'), 'log': _Log(), 'now_kst': now_kst,
+       'BASE_DIR': _P()}
+exec(compile(ag_src, 'server.py(발췌)', 'exec'), ans)
+NOW[0] = datetime(2026, 10, 8, 15, 45, tzinfo=KST)
+AG_NEXT[:] = [{'tag': '15:45', 'final_picks': [{'code': '005930'}]}]
+ans['agent_prepare_close']()
+want(AG_SENT == [], f'15:45 준비가 텔레그램을 보냈다 — {AG_SENT}')
+NOW[0] = datetime(2026, 10, 8, 16, 0, tzinfo=KST)
+want(ans['_send_agent_close_picks']() is True and AG_SENT == ['15:45'] and len(AG_RUNS) == 1,
+     f'16:00 에 15:45 준비분을 안 보냈거나 다시 돌렸다 — 보냄 {AG_SENT} · 실행 {len(AG_RUNS)}')
+# 다음 날 — 어제 준비분은 안 쓴다. 15:45 를 놓쳤으면 지금 돌리고, 실패하면 아무것도 안 보낸다
+AG_SENT.clear(); AG_RUNS.clear()
+NOW[0] = datetime(2026, 10, 9, 16, 1, tzinfo=KST)
+AG_NEXT[:] = [RuntimeError('일부러')]
+want(ans['_send_agent_close_picks']() is False and AG_SENT == [],
+     f'실행이 실패했는데 보냈거나 끝냈다고 한다 — {AG_SENT}')
+AG_NEXT[:] = [{'tag': '재실행', 'final_picks': [{'code': '000660'}]}]
+want(ans['_send_agent_close_picks']() is True and AG_SENT == ['재실행'],
+     f'캐치업 재시도가 새로 돌려 보내지 않았다 — {AG_SENT}')
+AG_NEXT[:] = [{'tag': '0종목', 'final_picks': []}]
+AG_SENT.clear()
+NOW[0] = datetime(2026, 10, 12, 16, 0, tzinfo=KST)
+want(ans['_send_agent_close_picks']() is True and AG_SENT == [],
+     '추천 0종목인 날을 못 끝냈다고 한다 — 캐치업이 계속 다시 돌린다')
 
 # wake.yml 은 15:35 준비 잡 전에 깨운다
 WAKE = open('/home/user/stock-dashboard/.github/workflows/wake.yml', encoding='utf-8').read()
@@ -255,12 +427,24 @@ want(re.search(r"cron: '30,[^']* 6 \* \* 1-5'", WAKE),
      'wake.yml 이 KST 15:30(UTC 06:30)부터 안 깨운다 — 15:35~15:48 준비 잡이 잠든 채 지나간다')
 
 # ── 8. 16:00 메시지의 기준일 ────────────────────────────────────────────
-fs = grab(r'\ndef alert_flow_signals\(.*?\n(?=\n\n)', 'alert_flow_signals').group(0)
+fs = grab(r'\n_FLOW_SIG_BASIS_KEY = .*?\ndef alert_flow_signals\(.*?\n(?=\n\n)',
+          'alert_flow_signals').group(0)
 OUT: list = []
 SIG = {'date': '2026-10-07', 'dual_buy': [{'name': 'A', 'foreign': 120.0, 'inst': 80.0}],
        'dual_sell': [], 'streak_buy': [], 'streak_sell': [], 'reversal': []}
-fns = {'_analyze_flow_signals': lambda: SIG, 'send_telegram': OUT.append,
-       'now_kst': now_kst, 'log': _Log()}
+FS_STATE: dict = {}
+TG_OK = [True]
+
+
+def _out(msg):
+    OUT.append(msg)
+    return TG_OK[0]
+
+
+fns = {'_analyze_flow_signals': lambda: SIG, 'send_telegram': _out,
+       'now_kst': now_kst, 'log': _Log(),
+       '_ops_get': lambda k, d=None: FS_STATE.get(k, d),
+       '_ops_set': lambda k, v: FS_STATE.__setitem__(k, str(v))}
 exec(compile(fs, 'server.py(발췌)', 'exec'), fns)
 NOW[0] = datetime(2026, 10, 8, 16, 0, tzinfo=KST)
 fns['alert_flow_signals']()
@@ -273,6 +457,30 @@ want('기준일 10/08(오늘)' in OUT[-1] and '잠정' in OUT[-1],
 NOW[0] = datetime(2026, 10, 8, 19, 30, tzinfo=KST)
 fns['alert_flow_signals']()
 want('잠정' not in OUT[-1], f'저녁 확정 뒤인데 잠정이라고 적는다 — {OUT[-1][:200]!r}')
+
+# ── 11. 같은 기준일을 이틀 보내지 않는다 (16:00 최신일이 오늘·전일로 오가는 날, 평일 공휴일)
+af = fns['alert_flow_signals']
+OUT.clear(); FS_STATE.clear()
+NOW[0] = datetime(2026, 10, 8, 16, 0, tzinfo=KST)
+SIG['date'] = '2026-10-08'                    # 오늘 16:00 — 오늘 잠정치가 있었다
+want(af(scheduled=True) is True and len(OUT) == 1, '16:00 수급 시그널을 안 보냈다')
+NOW[0] = datetime(2026, 10, 9, 16, 0, tzinfo=KST)  # 다음 날 16:00 — 아직 전일(10/08)뿐
+want(af(scheduled=True) is True, '이미 보낸 기준일인데 못 끝냈다고 한다 — 캐치업이 계속 돈다')
+want(len(OUT) == 1, f'10/08 시그널을 이틀 연달아 보냈다 — {len(OUT)}건')
+SIG['date'] = '2026-10-09'
+af(scheduled=True)
+want(len(OUT) == 2, '새 기준일인데 안 보냈다')
+af()                                          # /시그널 명령 — 묻는 대로 늘 보낸다
+want(len(OUT) == 3, '/시그널 명령이 정기 발송 기록에 막혔다')
+# 발송이 실패하면 기록을 안 찍고 False — 캐치업이 다시 보낸다
+FS_STATE.clear(); TG_OK[0] = False
+want(af(scheduled=True) is False and not FS_STATE, '발송 실패인데 보냈다고 기록했다')
+TG_OK[0] = True
+# 데이터가 아직 없으면(재시작 직후 flow_cache 빔) 끝낸 게 아니다
+_sig_backup = dict(SIG)
+SIG['date'] = None
+want(af(scheduled=True) is False, '수급 데이터가 없는데 끝냈다고 한다 — 캐치업이 다시 안 본다')
+SIG.update(_sig_backup)
 
 # 리비전 — 기준일은 보낸 날이 아니라 스냅샷 날
 import contextlib  # noqa: E402
@@ -300,7 +508,15 @@ def _mem_db():
 
 COMPUTED: list = []
 RV_OUT: list = []
-rns = {'_get_db': _mem_db, 'send_telegram': RV_OUT.append, 'now_kst': now_kst,
+RV_TG_OK = [True]
+
+
+def _rv_out(msg):
+    RV_OUT.append(msg)
+    return RV_TG_OK[0]
+
+
+rns = {'_get_db': _mem_db, 'send_telegram': _rv_out, 'now_kst': now_kst,
        'log': _Log(), '_CONSENSUS_SNAPSHOT_LOCK': threading.Lock(),
        '_REVISION_WAIT_S': 1, '_REVISION_COMPUTED': {'date': '2026-10-08'},
        '_compute_revisions': lambda: COMPUTED.append(1)}
@@ -326,8 +542,96 @@ want('기준일: 컨센서스 스냅샷 10/08</i>' in RV_OUT[-1],
      f'오늘 스냅샷 기준일이 이상하다 — {RV_OUT[-1][:200]!r}')
 # 오늘 계산분이 없으면(재시작·잠듦) 16:00 에 계산한다
 rns['_REVISION_COMPUTED']['date'] = '2026-10-07'
-rns['alert_revision_signals']()
+want(rns['alert_revision_signals']() is True, '보낼 게 없는 날을 끝냈다고 안 한다')
 want(COMPUTED == [1], '오늘 계산분이 없는데 계산 없이 보냈다')
+rns['_REVISION_COMPUTED']['date'] = '2026-10-08'
+
+# 발송이 실패하면 alert_sent 를 찍지 않는다 — 찍으면 그 알림은 영영 안 나간다
+_add_alert('2026-10-08')
+RV_TG_OK[0] = False
+want(rns['alert_revision_signals']() is False, '리비전 발송 실패인데 끝냈다고 한다')
+left = MEM.execute('SELECT COUNT(*) FROM revision_alerts WHERE alert_sent=0').fetchone()[0]
+want(left == 1, f'발송 실패인데 alert_sent 를 찍었다 — 남은 미발송 {left}')
+RV_TG_OK[0] = True
+want(rns['alert_revision_signals']() is True, '다시 보낼 때 못 보냈다')
+left = MEM.execute('SELECT COUNT(*) FROM revision_alerts WHERE alert_sent=0').fetchone()[0]
+want(left == 0, f'보냈는데 alert_sent 를 안 찍었다 — 남은 미발송 {left}')
+
+# 오늘 스냅샷은 있는데 실린 게 전날 남은 몫뿐이면 '오늘 스냅샷 전' 이라고 하지 않는다
+MEM.executescript("CREATE TABLE consensus_snapshot (snapshot_date TEXT);"
+                  "INSERT INTO consensus_snapshot VALUES ('2026-10-08');")
+_add_alert('2026-10-07')
+rns['alert_revision_signals']()
+want('오늘 스냅샷 전' not in RV_OUT[-1] and '앞서 못 보낸 몫' in RV_OUT[-1],
+     f'오늘 스냅샷이 있는데 없다고 적는다 — {RV_OUT[-1][:200]!r}')
+MEM.execute("DELETE FROM consensus_snapshot")
+MEM.execute("INSERT INTO consensus_snapshot VALUES ('2026-10-07')")
+_add_alert('2026-10-07')
+rns['alert_revision_signals']()
+want('오늘 스냅샷 전' in RV_OUT[-1], f'오늘 스냅샷이 없는데 안 밝힌다 — {RV_OUT[-1][:200]!r}')
+
+# ── 10. 텔레그램 — 429 는 한 번 다시 · 긴 본문 조각은 락에 안 막힌다 ────────
+import os  # noqa: E402
+
+tg_src = grab(r'\n_TG_SEND_LOCK = .*?\ndef send_telegram\(.*?\n(?=\n\n)', 'send_telegram').group(0)
+sp_src = grab(r'\n_TG_LIMIT = .*?\ndef send_telegram_long\(.*?\n(?=\n\n)',
+              '_split_telegram_lines ~ send_telegram_long').group(0)
+POSTS: list = []
+SLEEPS: list = []
+CODES: list = []
+
+
+class _Resp:
+    def __init__(self, code):
+        self.status_code = code
+        self.text = ''
+
+    def json(self):
+        return {'ok': False, 'parameters': {'retry_after': 2}} if self.status_code == 429 else {'ok': True}
+
+
+class _FakeTime:
+    t = [1000.0]
+
+    @staticmethod
+    def monotonic():
+        return _FakeTime.t[0]
+
+    @staticmethod
+    def sleep(sec):
+        SLEEPS.append(round(sec, 2))
+        _FakeTime.t[0] += sec
+
+
+def _post(url, json=None, timeout=None):
+    POSTS.append(json['text'])
+    return _Resp(CODES.pop(0) if CODES else 200)
+
+
+sys.modules['requests'] = types.SimpleNamespace(post=_post)
+os.environ.update({'TELEGRAM_BOT_TOKEN': 'test-token', 'TELEGRAM_CHAT_ID': '1',
+                   'TELEGRAM_ENABLED': '1'})
+tns = {'threading': threading, 'time': _FakeTime, 'os': os, 'log': _Log()}
+exec(compile(tg_src + sp_src, 'server.py(발췌)', 'exec'), tns)
+CODES[:] = [429, 200]
+want(tns['send_telegram']('a') is True, '429 뒤 다시 보낸 게 성공인데 실패라고 한다')
+want(POSTS == ['a', 'a'] and 2 in SLEEPS, f'429 를 retry_after 만큼 기다려 다시 안 보냈다 — {POSTS} {SLEEPS}')
+POSTS.clear(); CODES[:] = [429, 429, 200]
+want(tns['send_telegram']('b') is False and POSTS == ['b', 'b'],
+     f'429 재시도가 한 번이 아니다 — {POSTS}')
+POSTS.clear(); SLEEPS.clear(); CODES[:] = []
+_FakeTime.t[0] += 100
+tns['send_telegram']('c'); tns['send_telegram']('d')
+want(SLEEPS and abs(SLEEPS[-1] - tns['_TG_MIN_GAP_S']) < 0.01,
+     f'연달아 보낼 때 간격을 안 띄웠다 — {SLEEPS}')
+# 긴 본문은 같은 락(RLock)을 쥔 채 조각을 보낸다 — 다른 스레드에서 돌려 막히지 않는지 본다
+POSTS.clear()
+long_msg = '\n'.join(f'줄 {i:04d} ' + 'x' * 60 for i in range(150))
+th = threading.Thread(target=tns['send_telegram_long'], args=(long_msg,), daemon=True)
+th.start(); th.join(5)
+want(not th.is_alive(), '긴 본문 발송이 락에 막혀 끝나지 않는다 (재진입 교착)')
+want(len(POSTS) >= 2 and all(p.startswith(f'<i>({i}/{len(POSTS)})</i>') for i, p in enumerate(POSTS, 1)),
+     f'조각이 순서대로 안 나갔다 — {[p[:12] for p in POSTS]}')
 
 # ── 옛 이름이 남아 있지 않은지 ───────────────────────────────────────────
 want('send_evening_market_summary' not in SRC,
