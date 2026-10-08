@@ -13672,12 +13672,16 @@ def _kospi200_futures_section() -> dict:
     return sec
 
 
-def build_market_summary(dry_run: bool = False) -> dict:
+def build_market_summary(dry_run: bool = False,
+                         nh_hist_budget_s: float | None = None) -> dict:
     """매크로·섹터·특징주·수급·공시·AI 섹션을 DB/캐시에서 집계.
 
     Args:
         dry_run: True면 summary["debug"] 에 빌더별 elapsed_ms / error 기록.
                  (기존 cron/api 호출 호환을 위해 기본값 False)
+        nh_hist_budget_s: 신고가 '역사적' 의 상장 이후 이력을 네트워크로 받는 데
+                 쓸 시간(초). None 이면 시황 예산(newhigh.HIST_BUDGET_BRIEF_S).
+                 0 이면 표(alltime_high)만 읽는다 — 대시보드 API 가 그렇게 부른다.
     """
     summary = {
         "generated_at": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -13941,7 +13945,9 @@ def build_market_summary(dry_run: bool = False) -> dict:
                 # 모집단: ETF 가 아닌 시총 1,000억(원 단위 1e11) 이상.
                 # 일봉은 그보다 넓게(800억~) 받아 두지만 판정은 여기서 자른다.
                 nh = _nh.compute(conn, today_ymd, _oa.MIN_MARKET_CAP_WON,
-                                 budget_s=_nh.HIST_BUDGET_BRIEF_S)
+                                 budget_s=(_nh.HIST_BUDGET_BRIEF_S
+                                           if nh_hist_budget_s is None
+                                           else nh_hist_budget_s))
                 if nh["error"]:
                     # 왜 모자란지까지 적는다. ohlcv 는 16:10 잡과 부팅 스레드가
                     # 채운다(_fill_ohlcv_job).
@@ -14256,7 +14262,12 @@ def build_market_summary(dry_run: bool = False) -> dict:
 
 @app.route("/api/market_summary")
 def api_market_summary():
-    return jsonify(build_market_summary())
+    # 대시보드가 페이지를 열 때마다 부른다(캐시 없음). 신고가 '역사적' 의 상장 이후
+    # 이력은 여기서 받지 않는다(예산 0 — 표만 읽는다). 받게 두면 장중 요청이
+    # 종목마다 수 초짜리 네트워크 조회로 요청 스레드(gunicorn 1 worker · 4 threads)를
+    # 최대 60초 붙잡고, 그 락을 16:00 시황이 기다리다 예산을 다 쓴다. 이력은 15:48
+    # 프리워밍과 16:00 시황이 받아 표에 둔다 — 표에 없는 후보는 '판정 보류' 로 적힌다.
+    return jsonify(build_market_summary(nh_hist_budget_s=0))
 
 
 def build_us_market_summary() -> dict:

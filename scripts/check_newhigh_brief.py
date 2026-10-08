@@ -128,6 +128,30 @@ print("   ", sec.get("error"))
 check("120거래일 창을 못 채운다고 밝힌다",
       bool(sec.get("error")) and "120거래일 창" in sec["error"] and not sec["subsections"])
 
+print("3. 대시보드 API(/api/market_summary) — 이력을 네트워크로 받지 않는다")
+# 페이지를 열 때마다 불리는 경로다. 여기서 받으면 요청 스레드를 최대 60초 붙잡고
+# 16:00 시황과 락을 다툰다. 표에 없는 후보는 보류로 적혀야 한다.
+CURRENT[0] = make_db(424)
+use_db(CURRENT[0])
+API_CALLS = []
+_prev_fetch = nh._default_fetch
+nh._default_fetch = lambda code, s, e: (API_CALLS.append(code), fake_fetch(code, s, e))[1]
+try:
+    resp = server.app.test_client().get("/api/market_summary")
+    body = resp.get_json() or {}
+finally:
+    nh._default_fetch = _prev_fetch
+sec = next((s for s in body.get("sections", []) if s.get("title") == "🏔 신고가"), {})
+basis = (sec.get("items") or [""])[0]
+print("   ", resp.status_code, API_CALLS, basis[-40:])
+check("API 응답 200", resp.status_code == 200)
+check("API 는 이력을 받지 않는다", API_CALLS == [], str(API_CALLS))
+check("표에 없는 후보는 보류로 적힌다", "역사적 판정 보류 2종목" in basis, basis)
+# 시황(텔레그램)은 같은 날 받아서 판정한다 — 둘째 빌드는 예산을 쓴다.
+out = server.build_market_summary()
+subs = {s["subtitle"] for s in section(out)["subsections"]}
+check("시황 빌드는 이력을 받아 역사적을 판정한다", "🏔 역사적 신고가 1종목" in subs, str(subs))
+
 print()
 print("전부 통과" if not FAILS else f"실패 {len(FAILS)}: {FAILS}")
 sys.exit(1 if FAILS else 0)
