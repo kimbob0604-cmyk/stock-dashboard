@@ -2,7 +2,8 @@
 
 2026-10-08 운영에서 APScheduler 가 running=True 인 채로 10:55 부터 잡을 하나도
 돌리지 않았다. 감시는 '다음 실행 시각을 5분 넘게 지난 잡' 또는 '죽은 스케줄러
-스레드' 를 1분마다 보고, 3번 연속이면 워커를 끝내 gunicorn 이 새로 띄우게 한다.
+스레드' 를 1분마다 보고, 3번 연속이면 스케줄러가 도는 프로세스를 끝내 다시 뜨게 한다.
+운영은 gunicorn preload 라 스케줄러가 마스터에 있다 — 워커는 마스터의 심장박동 파일을 읽는다(8번).
 진짜 server 모듈의 함수를 그대로 부른다(SERVER_NO_STARTUP=1 — 스케줄러·스레드 없음).
 """
 import os
@@ -78,7 +79,7 @@ r1 = run(stuck, 0)
 r2 = run(stuck, r1[0])
 r3 = run(stuck, r2[0])
 want(r1 == (1, None) and r2 == (2, None), "밀린 잡: 1·2번째는 종료하지 않는다")
-want(r3 == (None, 1), "밀린 잡: 3번째 연속이면 워커를 끝낸다(코드 1 — gunicorn 이 다시 띄움)")
+want(r3 == (None, 1), "밀린 잡: 3번째 연속이면 프로세스를 끝낸다(코드 1 — 다시 떠야 스케줄러가 산다)")
 want(stuck.wakes == 3, "의심할 때마다 먼저 wakeup 을 부른다")
 want([j for j, _ in server._scheduler_overdue()] == ["stage2_realtime_kr", "tg_closing_summary"],
      "밀린 잡은 오래 밀린 순")
@@ -126,6 +127,127 @@ want(d["scheduler"]["thread_alive"] is False and any(e["thread"] == "boom-test" 
      "/api/ops/diag/threads: 스케줄러 스레드 생존·스레드 예외")
 want(any(th["name"] == "MainThread" and th["stack"] for th in d["threads"]), "/api/ops/diag/threads: 스레드별 코드 위치")
 want(h.get("scheduler_thread_alive") is False and "rss_mb" in h, "/api/health: 스케줄러 스레드 생존·메모리")
+server._scheduler = None
+
+# 8) 심장박동 — 운영 gunicorn 은 preload 라 스케줄러는 마스터에서 돌고 워커에는 fork 사본만 있다.
+#    마스터가 적은 상태를 워커가 읽어야 한다. 진짜 fork 로 확인한다.
+import json  # noqa: E402
+import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+server._SCHED_HEARTBEAT = server.Path(tempfile.mkdtemp()) / "hb.json"
+Job.name, Job.trigger, Job.max_instances = None, "interval[0:01:00]", 1
+
+
+class StartCounting(FakeScheduler):
+    started = 0
+
+    def start(self):
+        StartCounting.started += 1
+
+
+server._SCHED_PID = None
+server._scheduler = stuck
+want(server._scheduler_view()["process"] == "this" and len(server._scheduler_view()["overdue"]) == 2,
+     "단일 프로세스(_SCHED_PID 없음)면 예전처럼 직접 본다")
+
+master = FakeScheduler([Job("a", -60), Job("b", 299), Job("paused", None)])
+server._scheduler, server._SCHED_PID = master, os.getpid()
+server._scheduler_heartbeat_write()
+hb = json.loads(server._SCHED_HEARTBEAT.read_text(encoding="utf-8"))
+want(hb["pid"] == os.getpid() and hb["overdue"] == [] and set(hb["jobs"]) == {"a", "b", "paused"}
+     and hb["jobs"]["paused"] is None, "마스터가 심장박동(pid·밀린 잡·잡별 다음 시각)을 적는다")
+want(not list(server._SCHED_HEARTBEAT.parent.glob("*.tmp")), "임시 파일을 남기지 않는다(원자적 교체)")
+
+r_fd, w_fd = os.pipe()
+pid = os.fork()
+if pid == 0:                                   # ── 워커 역할(자식) ──
+    os.close(r_fd)
+    out = {}
+    try:
+        # fork 사본: 같은 잡이지만 다음 실행 시각이 부팅 때 값에 멈춰 있고 스레드는 없다
+        copy = StartCounting([Job("a", 9999), Job("b", 9999), Job("paused", None)], alive=False)
+        server._scheduler = copy
+        with server.app.test_client() as c:
+            out["health"] = c.get("/api/health").get_json()
+            out["cron"] = c.get("/api/ops/cron/jobs").get_json()
+            out["diag"] = c.get("/api/ops/diag/threads").get_json()["scheduler"]
+            copy.running = False                   # 사본이 '멈춤' 으로 보여도
+            server._last_scheduler_check = 0.0
+            c.get("/api/health")
+            out["started"] = StartCounting.started  # 워커에서 두 번째 스케줄러를 띄우면 안 된다
+            stale = json.loads(server._SCHED_HEARTBEAT.read_text(encoding="utf-8"))
+            stale["at"] -= 400
+            server._SCHED_HEARTBEAT.write_text(json.dumps(stale), encoding="utf-8")
+            out["stale"] = c.get("/api/health").get_json()
+            stale["pid"] = 1
+            stale["at"] += 400
+            server._SCHED_HEARTBEAT.write_text(json.dumps(stale), encoding="utf-8")
+            out["other_boot"] = server._scheduler_view()
+    except Exception as e:                     # noqa: BLE001
+        out["error"] = repr(e)
+    os.write(w_fd, json.dumps(out, default=str).encode())
+    os._exit(0)
+os.close(w_fd)
+buf = b""
+while chunk := os.read(r_fd, 65536):
+    buf += chunk
+os.waitpid(pid, 0)
+w = json.loads(buf or b"{}")
+want("error" not in w, f"워커 역할 실행 오류 없음 {w.get('error', '')}")
+h = w.get("health") or {}
+want(h.get("scheduler_process") == "other" and h.get("scheduler_overdue") == 0
+     and h.get("scheduler_thread_alive") is True and h.get("scheduler_running") is True,
+     "/api/health(워커): fork 사본이 아니라 마스터 심장박동으로 — 밀린 잡 0·스레드 살아 있음")
+rows = {r["id"]: r for r in (w.get("cron") or {}).get("jobs", [])}
+want((w.get("cron") or {}).get("next_run_source") == "heartbeat"
+     and rows.get("a", {}).get("status") == "scheduled" and rows.get("a", {}).get("next_run_in_sec", -1) > 0
+     and rows.get("paused", {}).get("status") == "paused",
+     "/api/ops/cron/jobs(워커): 다음 실행 시각은 마스터 것")
+want((w.get("diag") or {}).get("process") == "other" and (w.get("diag") or {}).get("overdue") == [],
+     "/api/ops/diag/threads(워커): 마스터 기준")
+want(w.get("started") == 0, "워커는 사본이 멈춰 보여도 스케줄러를 새로 띄우지 않는다(이중 발송 방지)")
+st = w.get("stale") or {}
+want(st.get("scheduler_overdue") is None and st.get("scheduler_running") is None
+     and st.get("scheduler_heartbeat_age_sec", 0) > server._SCHED_HEARTBEAT_STALE_SEC,
+     "심장박동이 3분 넘게 묵었으면 '모름'(None)과 나이를 싣는다")
+ob = w.get("other_boot") or {}
+want(ob.get("overdue") is None and ob.get("heartbeat_age_sec") is None, "다른 부팅(pid)의 심장박동은 쓰지 않는다")
+
+server._scheduler, server._SCHED_PID = master, None
+
+# 9) /api/ops/post_close/status — 오늘 16:00 텔레그램을 어디까지 보냈는지(ops_state)
+dbp = os.path.join(tempfile.mkdtemp(), "t.db")
+cx = sqlite3.connect(dbp)
+cx.execute("CREATE TABLE ops_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+cx.commit(); cx.close()
+
+
+@contextmanager
+def gdb():
+    c = sqlite3.connect(dbp)
+    c.row_factory = sqlite3.Row
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+server._get_db = gdb
+today = server.now_kst().strftime("%Y-%m-%d")
+server._ops_set(server._closing_brief_key(), today)
+server._ops_set(server._POST_CLOSE_KEY, f"{today}:summary,flow")
+with server.app.test_client() as c:
+    ps = c.get("/api/ops/post_close/status").get_json()
+want(ps["closing_brief_sent"] is True and ps["post_close_done"] == ["summary", "flow"]
+     and ps["post_close_left"] == ["revision", "agent"]
+     and ps["marks"][server._POST_CLOSE_KEY]["updated_at"],
+     "/api/ops/post_close/status: 시황 보냄·알림 끝낸 것/남은 것·기록 시각")
+server._ops_set(server._POST_CLOSE_KEY, "2026-01-02:summary,flow,revision,agent")
+with server.app.test_client() as c:
+    ps = c.get("/api/ops/post_close/status").get_json()
+want(ps["post_close_done"] == [] and len(ps["post_close_left"]) == 4, "다른 날 표시는 오늘 것으로 치지 않는다")
 server._scheduler = None
 
 print(f"\n{'실패 ' + str(len(FAIL)) + '개' if FAIL else '모두 통과'}")
