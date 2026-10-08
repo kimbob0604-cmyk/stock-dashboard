@@ -10,6 +10,8 @@ on:
       - 'server.py'
       - 'scripts/test_collectors.py'
       - 'scripts/test_data_json.py'
+      - 'scripts/check_boot_after_fork.py'
+      - 'scripts/check_scheduler_liveness.py'
       - '.github/workflows/collector-test.yml'
 
 permissions:
@@ -30,3 +32,7 @@ jobs:
         run: python3 scripts/test_collectors.py
       - name: data.json 생성기 검증
         run: python3 scripts/test_data_json.py
+      - name: 부팅 위치 검증 (gunicorn preload 여도 워커에서 시작)
+        run: python3 scripts/check_boot_after_fork.py
+      - name: 스케줄러 감시·심장박동 검증
+        run: python3 scripts/check_scheduler_liveness.py
