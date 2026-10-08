@@ -105,5 +105,28 @@ with server.app.test_client() as c:
 want(body.get("scheduler_overdue") == 2, "/api/health 에 scheduler_overdue(밀린 잡 수)")
 server._scheduler = None
 
+# 7) 진단 — 잡히지 않은 스레드 예외를 기억하고, /api/ops/diag/threads 가 스레드 위치·메모리를 보인다
+import threading  # noqa: E402
+
+
+def _boom():
+    raise MemoryError("시험")
+
+
+t = threading.Thread(target=_boom, name="boom-test")
+t.start(); t.join()
+errs = [e for e in server._THREAD_ERRORS if e["thread"] == "boom-test"]
+want(len(errs) == 1 and errs[0]["type"] == "MemoryError" and errs[0]["where"],
+     "스레드에서 잡히지 않은 예외(이름·종류·위치)를 기억한다")
+server._scheduler = dead
+with server.app.test_client() as c:
+    d = c.get("/api/ops/diag/threads").get_json()
+    h = c.get("/api/health").get_json()
+want(d["scheduler"]["thread_alive"] is False and any(e["thread"] == "boom-test" for e in d["thread_errors"]),
+     "/api/ops/diag/threads: 스케줄러 스레드 생존·스레드 예외")
+want(any(th["name"] == "MainThread" and th["stack"] for th in d["threads"]), "/api/ops/diag/threads: 스레드별 코드 위치")
+want(h.get("scheduler_thread_alive") is False and "rss_mb" in h, "/api/health: 스케줄러 스레드 생존·메모리")
+server._scheduler = None
+
 print(f"\n{'실패 ' + str(len(FAIL)) + '개' if FAIL else '모두 통과'}")
 sys.exit(1 if FAIL else 0)
