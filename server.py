@@ -4683,10 +4683,9 @@ def api_test_telegram_get():
 #
 # 그래서 **스케줄러 밖의 스레드**가 1분마다 본다: 다음 실행 시각을 5분 넘게
 # 지난 잡이 있거나 스케줄러 스레드가 죽었으면 '멈춤 의심'. 먼저 깨워 보고
-# (wakeup), 3번 연속이면 스케줄러가 도는 프로세스를 끝낸다. 운영 gunicorn 은
-# preload 라 그게 마스터다(아래 '스케줄러 심장박동') — 서비스가 통째로 다시 뜨고,
-# 부팅 직후 closing_brief_catchup 이 그날 못 보낸 시황·알림을 보낸다(발송 표시는
-# 보낼 때마다 Gist 로 백업되므로 이미 보낸 것은 다시 안 보낸다).
+# (wakeup), 3번 연속이면 스케줄러가 도는 프로세스(워커 — 파일 끝 _boot 참고)를
+# 끝낸다. gunicorn 이 새 워커를 띄우고 새 워커가 다시 시작하며, 부팅 직후
+# closing_brief_catchup 이 그날 못 보낸 시황·알림을 보낸다(발송 표시는 DB 에 있다).
 _SCHED_STALL_SEC = 300       # 예정 시각을 이만큼 넘긴 잡이 하나라도 있으면 의심
 _SCHED_STALL_STRIKES = 3     # 연속 의심 횟수(1분 간격) — 이만큼이면 프로세스를 끝낸다
 
@@ -4754,11 +4753,11 @@ def _scheduler_liveness_loop(interval: float = 60.0) -> None:
 
 
 # ── 스케줄러 심장박동 (2026-10-08) ───────────────────────────────────────────
-# **운영에서는 스케줄러가 요청을 받는 프로세스에 없다.** gunicorn 이 앱을 마스터에서
-# 먼저 import 한 뒤(preload) 워커를 fork 한다. 스케줄러·백그라운드 스레드는 마스터에서
-# 돌고, 워커에는 fork 순간의 스케줄러 사본만 남는다 — 스레드는 없고 다음 실행 시각은
-# 부팅 때 값 그대로다. /api/health · /api/ops/cron/jobs 가 그 사본을 읽어 같은 날
-# '10:55 부터 멈춤' 으로 보였다. 실제로는 마스터에서 잡이 돌며 DB 를 채우고 있었다.
+# **스케줄러가 요청을 받는 프로세스에 없을 수 있다.** 그날 운영 gunicorn 은 앱을 마스터
+# 에서 먼저 import(preload)했고 스케줄러가 마스터에서 돌았다. 워커에는 fork 순간의
+# 사본만 남아 /api/health · /api/ops/cron/jobs 가 '10:55 부터 멈춤' 으로 보였다.
+# 이제 preload 여도 스케줄러는 워커에서 시작한다(파일 끝 _imported_by_gunicorn_master)
+# — 그래도 다른 배치(워커 여럿 등)에서 같은 오판이 없게 이 장치는 남겨 둔다.
 #
 # 그래서 스케줄러를 띄운 프로세스(_SCHED_PID)의 감시 스레드가 1분마다 실제 상태를
 # 파일에 적고, 다른 프로세스는 그 파일을 읽는다. 같은 프로세스면 예전처럼 직접 본다.
@@ -19742,12 +19741,52 @@ def api_revision_history(code):
         return jsonify({'error': str(e)}), 500
 
 
+def _imported_by_gunicorn_master() -> bool:
+    """gunicorn 이 preload 로 **마스터에서** 이 모듈을 import 하는 중인가.
+
+    preload 면 arbiter.setup() 이 앱을 불러오고, 아니면 워커의 load_wsgi() 가 부른다.
+    호출 스택에 어느 쪽이 있는지로 가린다.
+    """
+    f = sys._getframe(1)
+    in_arbiter = False
+    while f is not None:
+        fn = f.f_code.co_filename.replace("\\", "/")
+        if "/gunicorn/workers/" in fn:
+            return False
+        if fn.endswith("/gunicorn/arbiter.py"):
+            in_arbiter = True
+        f = f.f_back
+    return in_arbiter
+
+
+def _startup_in_forked_worker() -> None:
+    # fork 직후 자식에서 불린다. 무거운 부팅(Gist 복원 등)이 워커 초기화를 붙잡지 않게 스레드로.
+    threading.Thread(target=_startup, daemon=True, name="startup-after-fork").start()
+
+
 # gunicorn 이 모듈을 import 하는 시점에 자동 실행.
 # SERVER_NO_STARTUP=1 이면 건너뛴다 — 스케줄러·백그라운드 스레드 없이
 # 파서 함수만 import 해서 테스트하려고 둔 문이다 (scripts/test_collectors.py).
 # 운영에서는 이 변수를 설정하지 않으므로 동작이 달라지지 않는다.
-if os.environ.get("SERVER_NO_STARTUP") != "1":
-    _startup()
+#
+# **preload 면 마스터에서 시작하지 않고 fork 된 워커에서 시작한다 (2026-10-08).**
+# 마스터에서 스케줄러·수집 스레드가 SQLite 를 쓰는 도중에 gunicorn 이 워커를 fork 하면,
+# 그 순간 잡혀 있던 SQLite 내부 잠금이 잠긴 채로 워커에 복사된다. 워커의 첫 DB 접근이
+# 영원히 멈추고(timeout=10 도 소용없다), 그런 요청 4개면 스레드 4개가 다 막혀 사이트
+# 전체가 응답하지 않는다. 그날 17:33 배포 뒤 실제로 그렇게 멈췄고, 로컬에서도 쓰기
+# 스레드 3개를 돌리며 fork 60번에 5번 재현됐다(나머지 일부는 'disk image is malformed').
+# 워커에서 시작하면 스케줄러·DB 를 쓰는 스레드가 요청을 받는 프로세스와 같아진다.
+def _boot() -> None:
+    if os.environ.get("SERVER_NO_STARTUP") == "1":
+        return
+    if _imported_by_gunicorn_master():
+        log.info("[부팅] gunicorn preload — 스케줄러·백그라운드 작업은 fork 된 워커에서 시작한다")
+        os.register_at_fork(after_in_child=_startup_in_forked_worker)
+    else:
+        _startup()
+
+
+_boot()
 
 
 if __name__ == "__main__":
