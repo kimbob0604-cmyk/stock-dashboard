@@ -14,11 +14,8 @@ GitHub Actions(master-refresh.yml)가 주 1회 돌리고, 바뀐 것이 있으�
                  (stock/etf/etn) + 시가총액(marketValueRaw, 원)
   2. 업종 상세   /api/stocks/industry/{no}                — 종목 → 업종(79개)
 
-**페이지가 밀린다.** 두 목록 모두 100개씩 나눠 주는데 장중엔 정렬 순서(시총·
-등락률)가 요청 사이에 바뀐다. 한 종목이 앞 페이지로 올라가면 빠지고, 뒤로 밀리면
-두 번 나온다. 2026-10-13 장중 첫 수집에서 반도체 업종 172종목 중 원익홀딩스·
-제우스가 그렇게 빠졌다. 그래서 고유 종목 수가 totalCount 와 맞을 때까지 그
-목록을 처음부터 다시 받는다. 주말 정기 실행에선 순서가 고정이라 한 번에 맞는다.
+목록은 100개씩 나눠 받고, 장중에 순서가 밀려 빠지는 종목은 다시 받아 채운다
+(scripts/naver_mobile.py 참조).
 
 **열화된 파일로 덮지 않는다.** 아래 중 하나라도 걸리면 쓰지 않고 실패로 끝난다
 (--force 로 넘길 수 있다).
@@ -31,76 +28,30 @@ import argparse
 import json
 import sys
 import time
-import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import stock_master as sm                                     # noqa: E402
+from naver_mobile import fetch_complete, fetch_groups         # noqa: E402
 
-UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
-MV_URL = "https://m.stock.naver.com/api/stocks/marketValue/{market}?page={page}&pageSize=100"
-IND_LIST_URL = "https://m.stock.naver.com/api/stocks/industry?page=1&pageSize=100"
-IND_URL = "https://m.stock.naver.com/api/stocks/industry/{no}?page={page}&pageSize=100"
-PAGE = 100            # 네이버가 받는 최대 pageSize (200 이상은 400)
 KST = timezone(timedelta(hours=9))
 
 MAX_COUNT_DRIFT = 0.05
 MAX_NO_INDUSTRY = 0.01
 
 
-def get_json(url: str, tries: int = 4) -> dict:
-    for i in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=20) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except Exception as exc:                              # noqa: BLE001
-            if i == tries - 1:
-                raise RuntimeError(f"{url} — {type(exc).__name__}: {exc}") from exc
-            time.sleep(2 ** i)
-    raise AssertionError("unreachable")
-
-
-def fetch_complete(url_fmt: str, label: str, tries: int = 5, **kw) -> dict[str, dict]:
-    """페이지를 끝까지 받아 code → 행. 고유 종목 수가 totalCount 와 맞을 때까지 다시 받는다.
-
-    다시 받을 때 앞서 받은 것을 버리지 않는다 — 밀린 종목은 다음 바퀴에 잡히니
-    합집합이 금방 다 찬다. 몇 분 사이에 상장폐지되는 종목은 없다.
-    """
-    rows: dict[str, dict] = {}
-    for attempt in range(1, tries + 1):
-        page, total = 1, 0
-        while True:
-            d = get_json(url_fmt.format(page=page, **kw))
-            batch = d.get("stocks") or []
-            total = int(d.get("totalCount") or 0)
-            for r in batch:
-                rows[str(r.get("itemCode") or "")] = r
-            if len(batch) < PAGE or page * PAGE >= total:
-                break
-            page += 1
-            time.sleep(0.15)
-        if total and len(rows) == total:
-            return rows
-        print(f"  {label}: 고유 {len(rows)} / totalCount {total} — 순서가 밀렸다, "
-              f"다시 받는다 ({attempt}/{tries})")
-        time.sleep(1.5 * attempt)
-    raise RuntimeError(f"{label}: {tries}번 받아도 totalCount 와 안 맞는다")
-
-
 def fetch_industries() -> dict[str, str]:
     """code → 네이버 업종 이름."""
-    groups = get_json(IND_LIST_URL).get("groups") or []
+    groups = fetch_groups("industry")
     if len(groups) < 70:
         raise RuntimeError(f"업종 목록이 {len(groups)}개뿐이다 (평소 79개)")
     out: dict[str, str] = {}
     for g in groups:
         if g.get("name") == "기타":       # ETF·ETN 1,500여 개뿐이다. 마스터엔 안 쓴다
             continue
-        rows = fetch_complete(IND_URL, f"업종 {g.get('name')}", no=g["no"])
-        for code in rows:
+        for code in fetch_complete(f"industry/{g['no']}", f"업종 {g.get('name')}"):
             out.setdefault(code, g["name"])
         time.sleep(0.1)
     return out
@@ -210,7 +161,7 @@ def main() -> int:
 
     t0 = time.time()
     print("▶ 시총 목록")
-    markets = {m: fetch_complete(MV_URL, m, market=m) for m in sm.MARKETS}
+    markets = {m: fetch_complete(f"marketValue/{m}", m) for m in sm.MARKETS}
     for m, items in markets.items():
         print(f"  {m}: {len(items)}종목 {dict(Counter(r.get('stockEndType') for r in items.values()))}")
     print("▶ 업종")

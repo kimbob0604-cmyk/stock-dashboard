@@ -1,7 +1,8 @@
 name: 종목 마스터 갱신
 
-# KOSPI·KOSDAQ 보통주·우선주 마스터(data/master/stocks.csv)를 새로 만들고,
-# 바뀐 것(신규 상장·상장폐지·사명 변경·시장 이전·업종 변경)이 있으면 PR 을 연다.
+# KOSPI·KOSDAQ 보통주·우선주 마스터(data/master/stocks.csv)와 네이버 테마 원본
+# (naver_themes.json · naver_theme_members.csv)을 새로 만들고, 바뀐 것(신규 상장·
+# 상장폐지·사명 변경·시장 이전·업종 변경·테마 편입/편출)이 있으면 PR 을 연다.
 # 머지하면 Render 가 배포하고, 서버는 그 파일을 부팅 때 한 번 읽는다 — 요청
 # 시점에 외부를 부르지 않는다.
 #
@@ -27,6 +28,8 @@ on:
     paths:
       - 'stock_master.py'
       - 'scripts/build_stock_master.py'
+      - 'scripts/build_naver_themes.py'
+      - 'scripts/naver_mobile.py'
       - '.github/workflows/master-refresh.yml'
   workflow_dispatch:
     inputs:
@@ -72,6 +75,12 @@ jobs:
           [ "${{ github.event_name }}" = "push" ] && args="$args --dry-run"
           python3 scripts/build_stock_master.py $args
 
+      - name: 네이버 테마
+        run: |
+          args="--report /tmp/report.md"
+          [ "${{ github.event_name }}" = "push" ] && args="$args --dry-run"
+          python3 scripts/build_naver_themes.py $args
+
       - name: 검증
         run: python3 scripts/check_stock_master.py
 
@@ -81,14 +90,16 @@ jobs:
 
       # PR 은 돌린 브랜치로 연다 — 정기 실행이면 기본 브랜치다.
       # meta.json 만 바뀐 날(수집 시각·ETF 수)은 PR 을 열지 않는다.
+      # 새로 생긴 파일도 잡도록 git diff 가 아니라 git status 로 본다.
       - name: PR 열기
         if: github.event_name != 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           BASE: ${{ github.ref_name }}
         run: |
-          if git diff --quiet -- data/master/stocks.csv; then
-            echo "stocks.csv 변화 없음 — PR 을 열지 않는다"
+          files="data/master/stocks.csv data/master/naver_themes.json data/master/naver_theme_members.csv"
+          if [ -z "$(git status --porcelain -- $files)" ]; then
+            echo "마스터·테마 변화 없음 — PR 을 열지 않는다"
             exit 0
           fi
           day=$(TZ=Asia/Seoul date +%F)
@@ -96,7 +107,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add data/master/stocks.csv data/master/meta.json
+          git add $files data/master/meta.json
           git commit -m "chore(master): 종목 마스터 갱신 ${day}"
           git push -f origin "$branch"
           if [ "$(gh pr view "$branch" --json state -q .state 2>/dev/null)" = "OPEN" ]; then

@@ -13,6 +13,8 @@ master-check.yml 이 마스터를 건드리는 push·PR 마다 돌리고, master
   4. 업종 — 비어 있는 종목 1% 이하, 대분류가 industry_groups.json 과 맞는다
   5. 규모 — 2,000~4,000종목. 수집이 반쯤 된 파일을 잡는다
   6. meta.json 의 집계가 파일과 맞는다
+  7. 네이버 테마 원본(있으면) — 테마 번호·쌍 중복 없음, 종목이 전부 마스터 안,
+     테마별 종목 수가 in_master 와 맞는다
 """
 import json
 import os
@@ -121,6 +123,27 @@ if os.path.exists(sm.META_JSON):
           'meta.by_tier 일치')
 else:
     check(False, 'meta.json 이 있다')
+
+themes_json = os.path.join(sm.MASTER_DIR, 'naver_themes.json')
+members_csv = os.path.join(sm.MASTER_DIR, 'naver_theme_members.csv')
+if os.path.exists(themes_json) or os.path.exists(members_csv):
+    print('── 네이버 테마')
+    import csv
+    themes = json.load(open(themes_json, encoding='utf-8'))['themes']
+    with open(members_csv, encoding='utf-8', newline='') as f:
+        members = list(csv.DictReader(f))
+    by_no = {t['no']: t for t in themes}
+    check(len(by_no) == len(themes), f'테마 번호 중복 없음 ({len(themes)}개)')
+    check(len(themes) >= 200, f'테마 {len(themes)}개 (≥ 200)')
+    pairs = Counter((m['theme_no'], m['code']) for m in members)
+    check(all(n == 1 for n in pairs.values()), f'테마×종목 중복 없음 ({len(members)}건)')
+    bad = sorted({m['theme_no'] for m in members if int(m['theme_no']) not in by_no})
+    check(not bad, f'모든 테마 번호가 목록에 있다 (없음 {sample(bad)})')
+    bad = sorted({m['code'] for m in members if m['code'] not in by_code})
+    check(not bad, f'모든 종목이 마스터 안 (밖 {sample(bad)})')
+    per = Counter(int(m['theme_no']) for m in members)
+    bad = [t['name'] for t in themes if per.get(t['no'], 0) != t['in_master']]
+    check(not bad, f'테마별 종목 수 = in_master (어긋남 {sample(bad)})')
 
 print(f"\n{len(rows)}종목 · 유형 {dict(Counter(r['type'] for r in rows))} · "
       f"Tier {dict(sorted(Counter(r['tier'] for r in rows if r['tier']).items()))}")
