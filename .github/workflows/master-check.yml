@@ -15,6 +15,7 @@ on:
       - 'stock_master.py'
       - 'scripts/build_stock_master.py'
       - 'scripts/check_stock_master.py'
+      - 'data/valuechain_map.json'
       - '.github/workflows/master-check.yml'
   pull_request:
     paths:
@@ -22,6 +23,7 @@ on:
       - 'stock_master.py'
       - 'scripts/build_stock_master.py'
       - 'scripts/check_stock_master.py'
+      - 'data/valuechain_map.json'
       - '.github/workflows/master-check.yml'
 
 permissions:

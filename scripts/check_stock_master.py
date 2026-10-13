@@ -15,6 +15,9 @@ master-check.yml 이 마스터를 건드리는 push·PR 마다 돌리고, master
   6. meta.json 의 집계가 파일과 맞는다
   7. 네이버 테마 원본(있으면) — 테마 번호·쌍 중복 없음, 종목이 전부 마스터 안,
      테마별 종목 수가 in_master 와 맞는다
+  8. 대테마(themes.json, 있으면) — id 중복 없음, 밸류체인 id 가
+     valuechain_map.json 에 있다. 네이버가 테마를 없애거나 이름을 바꾸거나 새로
+     만들어 어느 쪽에도 없으면 경고만 한다 — 주간 갱신을 막지 않는다
 """
 import json
 import os
@@ -144,6 +147,32 @@ if os.path.exists(themes_json) or os.path.exists(members_csv):
     per = Counter(int(m['theme_no']) for m in members)
     bad = [t['name'] for t in themes if per.get(t['no'], 0) != t['in_master']]
     check(not bad, f'테마별 종목 수 = in_master (어긋남 {sample(bad)})')
+
+themes_def = os.path.join(sm.MASTER_DIR, 'themes.json')
+if os.path.exists(themes_def) and os.path.exists(themes_json):
+    print('── 대테마')
+    tx = json.load(open(themes_def, encoding='utf-8'))
+    naver_by_no = {t['no']: t for t in json.load(open(themes_json, encoding='utf-8'))['themes']}
+    ids = [t['id'] for t in tx['themes']]
+    check(len(ids) == len(set(ids)), f'대테마 id 중복 없음 ({len(ids)}개)')
+    refs = [x for t in tx['themes'] for x in t['naver']] + tx.get('excluded_naver', [])
+    gone = [f"{x['no']} {x['name']}" for x in refs if x['no'] not in naver_by_no]
+    if gone:
+        warn(f'네이버에서 없어진 테마 {len(gone)}개 — themes.json 에서 뺀다: {sample(gone)}')
+    else:
+        print('  PASS 이은 네이버 테마가 모두 있다')
+    renamed = [f"{x['name']} → {naver_by_no[x['no']]['name']}" for x in refs
+               if x['no'] in naver_by_no and naver_by_no[x['no']]['name'] != x['name']]
+    if renamed:
+        warn(f'네이버가 이름을 바꾼 테마 {len(renamed)}개 — themes.json 의 name 을 고친다: {sample(renamed)}')
+    placed = {x['no'] for x in refs}
+    loose = [f"{n} {t['name']}({t['in_master']})" for n, t in sorted(naver_by_no.items()) if n not in placed]
+    if loose:
+        warn(f'대테마에도 제외 목록에도 없는 네이버 테마 {len(loose)}개 — themes.json 에 넣는다: {sample(loose)}')
+    vc_path = os.path.join(ROOT, 'data', 'valuechain_map.json')
+    vc_ids = set(json.load(open(vc_path, encoding='utf-8'))['themes']) if os.path.exists(vc_path) else set()
+    bad = [f"{t['id']}→{t['valuechain']}" for t in tx['themes'] if t.get('valuechain') and t['valuechain'] not in vc_ids]
+    check(not bad, f'밸류체인 id 가 valuechain_map.json 에 있다 (없음 {sample(bad)})')
 
 print(f"\n{len(rows)}종목 · 유형 {dict(Counter(r['type'] for r in rows))} · "
       f"Tier {dict(sorted(Counter(r['tier'] for r in rows if r['tier']).items()))}")
