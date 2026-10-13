@@ -4,9 +4,10 @@ stock_master.py — 국내 상장 종목 마스터 (KOSPI·KOSDAQ 보통주·우
 테마·밸류체인 매핑의 바닥이다. 어떤 종목이 매핑 대상인지, 업종이 무엇인지,
 얼마나 손을 들여 검수할지(Tier)를 여기서 정한다.
 
-원본은 git 의 data/master/stocks.csv 다. 서버는 요청 시점에 외부를 부르지
-않고 이 파일을 한 번 읽어 메모리에 둔다. 파일은 scripts/build_stock_master.py
-가 GitHub Actions 에서 주 1회 만들고 PR 로 올린다.
+원본은 git 의 data/master/stocks.csv 다. 쓰는 쪽은 요청 시점에 외부를 부르지
+않고 load_master() 로 이 파일을 한 번 읽어 메모리에 둔다(서버 연결은 아직이다).
+파일은 scripts/build_stock_master.py 가 GitHub Actions 에서 주 1회 만들고 PR 로
+올린다.
 
 대상
   - ETF·ETN 은 **처음부터 들어오지 않는다.** 네이버 시총 목록의 stockEndType
