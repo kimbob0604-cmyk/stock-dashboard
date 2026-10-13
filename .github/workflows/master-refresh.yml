@@ -1,0 +1,107 @@
+name: 종목 마스터 갱신
+
+# KOSPI·KOSDAQ 보통주·우선주 마스터(data/master/stocks.csv)를 새로 만들고,
+# 바뀐 것(신규 상장·상장폐지·사명 변경·시장 이전·업종 변경)이 있으면 PR 을 연다.
+# 머지하면 Render 가 배포하고, 서버는 그 파일을 부팅 때 한 번 읽는다 — 요청
+# 시점에 외부를 부르지 않는다.
+#
+# 일요일 06:00 KST 에 돈다. 장이 쉬는 날이라 네이버 목록의 정렬 순서가 고정이고
+# 페이지가 밀리지 않는다(장중엔 밀려서 다시 받는다 — build_stock_master.py 참조).
+# GitHub 크론은 늦거나 걸러지기도 하는데, 주 1회 기준 데이터라 상관없다.
+#
+# Tier(검수 우선순위)는 평소엔 그대로 두고, 분기 첫 주(1·4·7·10월 1~7일) 정기
+# 실행 때만 그때 시총으로 다시 매긴다. 경계 종목이 매주 들락날락하지 않게.
+# 손으로 돌릴 때 retier 를 켜면 바로 다시 매긴다.
+#
+# PR 생성은 저장소 설정 Settings → Actions → General → "Allow GitHub Actions
+# to create and approve pull requests" 가 켜져 있어야 된다. 꺼져 있으면 브랜치만
+# 올리고 비교 링크를 경고로 남긴다.
+
+on:
+  schedule:
+    - cron: '0 21 * * 6'          # 토 21:00 UTC = 일 06:00 KST
+  # 빌더를 고친 push 는 러너에서 실제로 받아 보기만 한다(--dry-run, PR 없음).
+  # 개발 컨테이너와 러너는 나가는 길이 달라 한쪽에서 된다고 다른 쪽도 된다는
+  # 보장이 없다.
+  push:
+    paths:
+      - 'stock_master.py'
+      - 'scripts/build_stock_master.py'
+      - '.github/workflows/master-refresh.yml'
+  workflow_dispatch:
+    inputs:
+      retier:
+        description: 'Tier 를 지금 시총으로 다시 매긴다'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: master-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Tier 를 다시 매길까
+        id: tier
+        run: |
+          retier=false
+          [ "${{ inputs.retier }}" = "true" ] && retier=true
+          m=$(TZ=Asia/Seoul date +%-m); d=$(TZ=Asia/Seoul date +%-d)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$d" -le 7 ] && [ $((m % 3)) -eq 1 ]; then
+            retier=true
+          fi
+          echo "retier=$retier" >> "$GITHUB_OUTPUT"
+          echo "Tier 다시 매김: $retier"
+
+      - name: 마스터 생성
+        run: |
+          args="--report /tmp/report.md"
+          [ "${{ steps.tier.outputs.retier }}" = "true" ] && args="$args --retier"
+          [ "${{ github.event_name }}" = "push" ] && args="$args --dry-run"
+          python3 scripts/build_stock_master.py $args
+
+      - name: 검증
+        run: python3 scripts/check_stock_master.py
+
+      - name: 요약
+        if: always()
+        run: '[ -f /tmp/report.md ] && cat /tmp/report.md >> "$GITHUB_STEP_SUMMARY" || true'
+
+      # PR 은 돌린 브랜치로 연다 — 정기 실행이면 기본 브랜치다.
+      # meta.json 만 바뀐 날(수집 시각·ETF 수)은 PR 을 열지 않는다.
+      - name: PR 열기
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- data/master/stocks.csv; then
+            echo "stocks.csv 변화 없음 — PR 을 열지 않는다"
+            exit 0
+          fi
+          day=$(TZ=Asia/Seoul date +%F)
+          branch="bot/stock-master-${day}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add data/master/stocks.csv data/master/meta.json
+          git commit -m "chore(master): 종목 마스터 갱신 ${day}"
+          git push -f origin "$branch"
+          if [ "$(gh pr view "$branch" --json state -q .state 2>/dev/null)" = "OPEN" ]; then
+            echo "같은 날 PR 이 이미 있다 — 브랜치만 갱신했다"
+          elif ! gh pr create --base "$BASE" --head "$branch" \
+                 --title "종목 마스터 갱신 ${day}" --body-file /tmp/report.md; then
+            echo "::warning::PR 을 만들지 못했다 — Settings → Actions → General 에서 'Allow GitHub Actions to create and approve pull requests' 를 켠다. 브랜치는 올라갔다: ${{ github.server_url }}/${{ github.repository }}/compare/${BASE}...${branch}"
+          fi

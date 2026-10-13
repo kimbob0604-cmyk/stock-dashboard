@@ -1,0 +1,40 @@
+name: 종목 마스터 검증
+
+# data/master/ 를 건드리는 push·PR 마다 마스터가 온전한지 본다.
+# 네트워크를 쓰지 않는다 — 파일만 읽는다. 무엇을 보는지는
+# scripts/check_stock_master.py 머리말에 있다.
+#
+# master-refresh.yml 이 여는 PR 은 GITHUB_TOKEN 으로 만들어져 이 워크플로가
+# 돌지 않는다(GitHub 이 루프를 막느라 그렇다). 그래서 그쪽은 PR 을 열기 전에
+# 같은 검사를 스스로 돌린다.
+
+on:
+  push:
+    paths:
+      - 'data/master/**'
+      - 'stock_master.py'
+      - 'scripts/build_stock_master.py'
+      - 'scripts/check_stock_master.py'
+      - '.github/workflows/master-check.yml'
+  pull_request:
+    paths:
+      - 'data/master/**'
+      - 'stock_master.py'
+      - 'scripts/build_stock_master.py'
+      - 'scripts/check_stock_master.py'
+      - '.github/workflows/master-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 검증
+        run: python3 scripts/check_stock_master.py
