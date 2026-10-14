@@ -82,7 +82,8 @@ if det.get("stocks"):
     print(f"    업종명: {det['sector_name']}")
     print(f"    첫 종목: {det['stocks'][0]}")
     st = det["stocks"]
-    check("종목코드 6자리", all(len(x["code"]) == 6 and x["code"].isdigit() for x in st))
+    # 영숫자 코드('0126Z0')도 정상이다 — 판정은 서버와 같은 함수로
+    check("종목코드 6자리", all(server._is_kr_code(x["code"]) for x in st))
     check("종가 양수", all(x["close"] > 0 for x in st),
           f"0 인 종목 {sum(1 for x in st if x['close'] <= 0)}개")
     check("등락률이 전부 0은 아님", any(x["change_pct"] != 0 for x in st),

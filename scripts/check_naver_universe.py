@@ -141,6 +141,7 @@ nj, st = fake_source(codes, fail_first=True)
 fn, errs = load(nj, sleep=False)
 out = fn('261')
 check(out.get('error') and out['stocks'] == [], '첫 요청부터 실패면 error')
+check(st['calls'] == 1, f'막힌 네이버를 다시 두드리지 않는다 — 요청 1번 (실제 {st["calls"]})')
 
 print('── D. 국내 코드가 아닌 항목이 섞여도 헛바퀴 없음')
 nj, st = fake_source([f'{i:06d}' for i in range(1, 50)] + ['Q50001', 'ABCDEF'])
@@ -168,14 +169,18 @@ PATS = [re.compile(r'\\d\{6\}'), re.compile(r'isdigit\(\)\s*(and|or)\s*len\('),
 # 이 규칙을 정의·설명하는 파일, 서버를 거치지 않는 옛 테마 크롤러(theme_crawler.py)
 SKIP_FILES = {'stock_master.py', 'theme_crawler.py'}
 hits = []
-for base, _, files in os.walk(ROOT):
-    if any(part in base for part in ('.git', 'scripts', 'node_modules', 'cache')):
+SKIP_DIRS = {'.git', 'scripts', 'node_modules', 'cache'}   # scripts/ 는 시험 데이터로 옛 패턴을 쓴다
+scanned = 0
+for base, dirs, files in os.walk(ROOT):
+    rel = os.path.relpath(base, ROOT)
+    if rel != '.' and rel.split(os.sep)[0] in SKIP_DIRS:
         continue
     for f in files:
         if not f.endswith(('.py', '.js')) or f in SKIP_FILES:
             continue
         path = os.path.join(base, f)
         text = open(path, encoding='utf-8').read()
+        scanned += 1
         legacy = []
         if f.endswith('.py'):
             for n in ast.walk(ast.parse(text)):
@@ -187,6 +192,7 @@ for base, _, files in os.walk(ROOT):
                 continue
             if any(p.search(line) for p in PATS) or re.search(r'/\^\\d\{6\}\$/', line):
                 hits.append(f'{os.path.relpath(path, ROOT)}:{i}: {s[:90]}')
+check(scanned >= 20, f'훑은 파일 {scanned}개 (≥ 20 — 경로 판정이 전부 건너뛰지 않았다)')
 check(not hits, '살아 있는 코드에 숫자 6자리 전용 판정 없음' + ('' if not hits else ':\n         ' + '\n         '.join(hits)))
 
 print("── H. ETF 표식 — 업종 '기타' 도 ETF")

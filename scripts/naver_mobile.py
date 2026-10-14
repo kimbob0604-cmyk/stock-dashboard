@@ -18,9 +18,11 @@ from typing import Callable
 
 BASE = "https://m.stock.naver.com/api/stocks"
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
-# pageSize 최대는 100(200 이상은 HTTP 400). 다시 받을 때는 페이지 크기를 바꿔 경계를 옮긴다. 경계(100번째)를 오가는 종목은
-# 같은 크기로 몇 번을 다시 받아도 계속 빠질 수 있다(2026-10-14 러너, 자동차부품
-# 3번 내리 152/153). server.py _scrape_naver_sector_detail 과 같은 방식.
+# pageSize 최대는 100(200 이상은 HTTP 400). 다시 받을 때는 페이지 크기를 바꿔
+# 경계를 옮긴다. 경계(100번째)를 오가는 종목은 같은 크기로 몇 번을 다시 받아도
+# 계속 빠질 수 있다(2026-10-14 러너, 자동차부품 3번 내리 152/153).
+# server.py _scrape_naver_sector_detail 과 같은 방식이다 — 서버는 scripts/ 를
+# import 하지 않고, 끝내 못 채우면 받은 만큼 쓰는 쪽이라 따로 둔다.
 PAGE_SIZES = (100, 97, 91, 83, 79)
 
 
@@ -55,7 +57,7 @@ def _collect(path: str, list_key: str, id_key: str, label: str, tries: int,
                 break
             page += 1
             time.sleep(0.15)
-        if len(rows) == total:
+        if len(rows) >= total:      # 그사이 목록에서 빠진 종목이 있으면 total 을 넘는다
             return rows
         print(f"  {label}: 고유 {len(rows)} / totalCount {total} — 순서가 밀렸다, "
               f"다시 받는다 ({attempt}/{tries})")

@@ -49,8 +49,9 @@ def fetch_industries() -> dict[str, str]:
         raise RuntimeError(f"업종 목록이 {len(groups)}개뿐이다 (평소 79개)")
     out: dict[str, str] = {}
     for g in groups:
-        if g.get("name") == "기타":       # ETF·ETN 1,500여 개뿐이다. 마스터엔 안 쓴다
-            continue
+        # '기타'(ETF·ETN·펀드 1,500여 개)도 받는다. 마스터엔 안 들어가지만, 여기
+        # 들어 있다는 사실이 stockEndType 'stock' 으로 오는 상장 펀드를 가려낸다
+        # (stock_master.exclusion_reason). 안 받으면 그 펀드가 업종 없는 보통주로 샌다.
         for code in fetch_complete(f"industry/{g['no']}", f"업종 {g.get('name')}"):
             out.setdefault(code, g["name"])
         time.sleep(0.1)
@@ -71,7 +72,7 @@ def build(markets: dict[str, dict], industry: dict[str, str], prev: dict[str, di
             if reason:
                 excluded[reason] += 1
                 continue
-            if not sm.CODE_RE.match(code):
+            if not sm.is_kr_code(code):
                 raise RuntimeError(f"종목코드 형식이 낯설다: {code!r} {name}")
             old = prev.get(code) or {}
             former = [n for n in (old.get("former_names") or "").split(";") if n]

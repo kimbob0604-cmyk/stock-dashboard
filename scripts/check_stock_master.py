@@ -56,7 +56,7 @@ rows = sm.read_rows()
 by_code = {r['code']: r for r in rows}
 check(len(by_code) == len(rows),
       f'코드 중복 없음 ({len(rows)}행, 중복 {sample(c for c, n in Counter(r["code"] for r in rows).items() if n > 1)})')
-bad = [r['code'] for r in rows if not sm.CODE_RE.match(r['code'])]
+bad = [r['code'] for r in rows if not sm.is_kr_code(r['code'])]
 check(not bad, f'코드 형식 6자리 영숫자 (어긋남 {sample(bad)})')
 check(all(r['name'].strip() for r in rows), '이름이 비어 있지 않다')
 for col, allowed in (('market', sm.MARKETS), ('type', sm.TYPES)):

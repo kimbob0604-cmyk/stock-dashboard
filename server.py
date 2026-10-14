@@ -2279,7 +2279,6 @@ def api_news(code: str):
     캐시: cache/news_{code}.json, TTL 1시간.
     NAVER_CLIENT_ID/SECRET 미설정 시 503 + hint.
     """
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -2561,7 +2560,6 @@ def api_reports(code: str):
     종목 관련 증권사 리포트 크롤링 + 규칙 기반 핵심 정보 추출.
     캐시: cache/reports_{code}.json, TTL 6시간.
     """
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -3331,7 +3329,9 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
             ranked = sorted(
                 (v for v in umap.values()
                  if _is_kr_code(v.get("code"))
-                 and float(v.get("close") or 0) >= 1000),
+                 and float(v.get("close") or 0) >= 1000
+                 and "기타" not in (v.get("sectors") or [])      # 업종 '기타' = ETF·ETN·펀드
+                 and not _is_etf_name(v.get("name"))),
                 key=lambda v: float(v.get("market_cap") or 0) or float(v.get("volume_mn") or 0),
                 reverse=True)
             codes = [v["code"] for v in ranked[:top_n]]
@@ -3392,7 +3392,6 @@ def api_flow(code: str):
     Cache: cache/flow_{code}.json, TTL 1시간.
     실패 시 {"error":"데이터 없음"} 반환.
     """
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -3596,6 +3595,11 @@ def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
                 f"?page={page}&pageSize={size}",
                 "naver_sector_detail")
             if not isinstance(d, dict):
+                if not got_any:
+                    # 첫 요청부터 안 되면 다시 받지 않는다. 다시 받기는 순서가 밀려
+                    # 빠진 것을 채우려는 것이지, 막힌 네이버를 두드리려는 게 아니다 —
+                    # 79개 업종마다 3번씩 타임아웃을 기다리면 유니버스 빌드가 40분이 된다.
+                    return {"error": "업종 상세 조회 실패", "sector_name": "", "stocks": []}
                 break
             batch = d.get("stocks")
             if not isinstance(batch, list):
@@ -4066,7 +4070,6 @@ def api_krx_status():
 
 @app.route("/api/compare")
 def api_compare():
-    import re as _re
     code1  = (request.args.get("code1")  or "").strip()
     code2  = (request.args.get("code2")  or "").strip()
     period = (request.args.get("period") or "1M").strip()
@@ -4373,7 +4376,6 @@ def api_price(code: str):
       2) data.json 테마 종목 (134)
       3) cache/chart_{code}_{date}.json (온디맨드 차트 캐시)
     """
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -4557,7 +4559,6 @@ def api_chart_intraday(code: str):
       장중 5분 / 장외 24h TTL
     응답 스키마는 /api/chart 와 동일하므로 프론트의 _drawCandles 등 재사용 가능.
     """
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -4703,7 +4704,6 @@ def _append_today_candle_kr(result: dict, code: str) -> bool:
 
 @app.route("/api/chart/<code>")
 def api_chart(code: str):
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
@@ -6323,7 +6323,6 @@ def _resolve_kr_code(q: str) -> tuple[str, str] | None:
     q = (q or "").strip()
     if not q:
         return None
-    import re as _re
     if _is_kr_code(q.upper()):
         return (q.upper(), _get_stock_name(q.upper()) or q.upper())
     ql = q.lower()
@@ -9002,14 +9001,20 @@ def _refresh_prices_from_naver():
                         sectors = info.get("sectors") or []
                         sector = sectors[0] if sectors else ""
                         name = info.get("name") or code
+                        # ETF 표식을 넣을 때 같이 박는다 — mark_etf_stocks 와 같은
+                        # 기준(이름 패턴 · 업종 '기타'). 표식이 붙기 전에 일봉·수급
+                        # 대상을 고르는 틈이 없도록. 한 번 붙은 표식은 여기서 떼지
+                        # 않는다 — 떼는 것은 mark_etf_stocks 가 처음부터 다시 할 때뿐.
+                        is_etf = int(_is_etf_name(name) or "기타" in sectors)
                         conn.execute(
                             "INSERT INTO stocks "
                             "(code, name, market, sector, market_cap, market_cap_updated, "
                             " close, change_pct, volume_mn, sectors_json, "
                             " after_hours_price, after_hours_change_pct, "
-                            " after_hours_status, after_hours_time, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
+                            " after_hours_status, after_hours_time, is_etf, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
                             "ON CONFLICT(code) DO UPDATE SET "
+                            "  is_etf = MAX(COALESCE(stocks.is_etf, 0), excluded.is_etf), "
                             "  close = excluded.close, "
                             "  change_pct = excluded.change_pct, "
                             "  volume_mn = excluded.volume_mn, "
@@ -9042,7 +9047,8 @@ def _refresh_prices_from_naver():
                              info.get("after_hours_price"),
                              info.get("after_hours_change_pct"),
                              info.get("after_hours_status"),
-                             info.get("after_hours_time")),
+                             info.get("after_hours_time"),
+                             is_etf),
                         )
                     conn.commit()
                     after_cnt = conn.execute(
@@ -9097,6 +9103,7 @@ def _ohlcv_ranked_codes() -> tuple[str, list]:
             f"WHERE code GLOB '{_KR_CODE_GLOB}' "
             "  AND (market = '' OR market LIKE 'KOS%') "
             "  AND COALESCE(is_etf, 0) = 0 "
+            "  AND COALESCE(sector, '') != '기타' "      # 표식이 아직 안 붙은 ETF
             "  AND COALESCE(market_cap, 0) > 0").fetchall()
     by_cap = [(float(r["market_cap"]), r["code"]) for r in rows
               if not _is_etf_name(r["name"])]
@@ -10866,7 +10873,6 @@ def api_disclosure_bonus(code: str):
     """종목의 최근 7일 공시 보너스 (Stage 2 가산점 단위 + 샘플)."""
     if not (_SQLITE_OK and USE_SQLITE):
         return jsonify({"bonus": 0, "disclosures": []})
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
     try:
@@ -10900,7 +10906,6 @@ def api_disclosure_events(code: str):
     """종목 공시 이력 (차트 마커용). 10분 캐시."""
     if not (_SQLITE_OK and USE_SQLITE):
         return jsonify({"events": []})
-    import re as _re
     if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
     cache_file = BASE_DIR / "cache" / f"disc_events_{code}.json"
@@ -17068,7 +17073,6 @@ def api_fear_greed():
 
 
 # ── 한국투자증권 API (데이터 조회 전용 — 매매 X) ─────────────
-import re as _re_kis
 
 
 def _kis_valid_code(code: str) -> bool:
