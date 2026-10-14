@@ -20,6 +20,8 @@ import sqlite3
 import re
 import json
 from pathlib import Path
+
+from stock_master import is_kr_code
 from typing import Optional, Dict, List
 
 DB_PATH = Path(__file__).parent / 'db' / 'dashboard.db'
@@ -32,7 +34,7 @@ def _get_db():
 
 
 def is_kr_stock(code: str) -> bool:
-    return bool(re.fullmatch(r'\d{6}', code))
+    return is_kr_code(code)
 
 
 # ============================================================

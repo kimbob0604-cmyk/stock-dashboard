@@ -60,6 +60,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from stock_master import KR_CODE_GLOB, is_kr_code
+
 log = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
@@ -181,7 +183,7 @@ def status() -> dict:
         with _get_db() as conn:
             r = conn.execute(
                 "SELECT COUNT(*), COUNT(DISTINCT code), MIN(date), MAX(date) "
-                "FROM ohlcv WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                f"FROM ohlcv WHERE code GLOB '{KR_CODE_GLOB}'"
             ).fetchone()
         return {"rows": r[0] or 0, "codes": r[1] or 0,
                 "first": r[2], "last": r[3]}
@@ -255,12 +257,14 @@ def _rank_from_universe(uni, min_cap, is_etf=None):
     stocks = (uni or {}).get("stocks") or {}
     out = []
     for code, s in stocks.items():
-        if not (str(code).isdigit() and len(str(code)) == 6):
+        if not is_kr_code(code):
             continue
         cap = (s or {}).get("market_cap") or 0
         if cap < min_cap or cap <= 0:
             continue
         if is_etf is not None and is_etf((s or {}).get("name") or ""):
+            continue
+        if "기타" in ((s or {}).get("sectors") or []):   # 네이버 업종 '기타' = ETF·ETN·펀드
             continue
         out.append((cap, code))
     return ("market_cap" if out else "none"), out

@@ -720,7 +720,7 @@ function _bindCompareSearch(inputId, ddId, slot) {
     if (e.key === 'Enter') {
       const first = dd.querySelector('.cmp-search-result');
       if (first) first.click();
-      else if (/^\d{6}$/.test(inp.value.trim())) _pickCompare(slot, inp.value.trim(), inp.value.trim());
+      else if (isKrCode(inp.value.trim())) _pickCompare(slot, inp.value.trim(), inp.value.trim());
     }
   });
 
@@ -1490,7 +1490,7 @@ function _bindFlowSearch() {
     if (e.key === 'Enter') {
       const first = dd.querySelector('.cmp-search-result');
       if (first) first.click();
-      else if (/^\d{6}$/.test(inp.value.trim())) {
+      else if (isKrCode(inp.value.trim())) {
         _flowPick(inp.value.trim(), inp.value.trim());
       }
     }
@@ -4351,7 +4351,7 @@ async function _fetchDisclosures() {
     box.querySelectorAll('.disc-code').forEach(el => {
       el.addEventListener('click', () => {
         const c = el.dataset.code;
-        if (c && /^\d{6}$/.test(c)) openChartPanel(c);
+        if (c && isKrCode(c)) openChartPanel(c);
       });
     });
   } catch (err) {
@@ -6701,9 +6701,9 @@ function vc2RenderStocksPanel() {
   let stocks = (sd.stocks || []).slice();
 
   if (VC2_STATE.filterMarket === 'kr') {
-    stocks = stocks.filter(s => /^\d{6}$/.test(s.code));
+    stocks = stocks.filter(s => isKrCode(s.code));
   } else if (VC2_STATE.filterMarket === 'us') {
-    stocks = stocks.filter(s => !/^\d{6}$/.test(s.code));
+    stocks = stocks.filter(s => !isKrCode(s.code));
   }
 
   const segScore = sd.segment_score || 50;
@@ -6756,7 +6756,7 @@ function vc2RenderStocksPanel() {
 function vc2RenderStockCard(s) {
   const score = s.score || 50;
   const badgeColor = vc2BadgeColor(score);
-  const isUS = !/^\d{6}$/.test(s.code);
+  const isUS = !isKrCode(s.code);
   const marketBadge = isUS ? 'US' : 'KR';
   const market = isUS ? 'us' : 'kr';
   const bd = s.breakdown || {};
@@ -6886,7 +6886,7 @@ async function vc2PromptAddStock() {
   if (!input) return;
   const code = input.trim().toUpperCase();
   if (!code) return;
-  const market = (/^\d{6}$/.test(code)) ? 'kr' : 'us';
+  const market = (isKrCode(code)) ? 'kr' : 'us';
   try {
     const url = `/api/valuechain2/segment/${VC2_STATE.currentTheme}/${VC2_STATE.currentLayer}/${VC2_STATE.currentSegment}/manage`;
     const resp = await fetch(url, {
@@ -6914,7 +6914,7 @@ async function vc2PromptAddStock() {
 
 function vc2OpenStockChart(code, name, market) {
   if (typeof openChartPanel === 'function') {
-    openChartPanel(code, name || null, market || (/^\d{6}$/.test(code) ? 'kr' : 'us'));
+    openChartPanel(code, name || null, market || (isKrCode(code) ? 'kr' : 'us'));
   } else {
     console.warn('openChartPanel not found:', code);
   }
@@ -7066,7 +7066,7 @@ async function _verifDoSearch(query) {
       const code = s.code || s.stock_code || '';
       const name = s.name || s.stock_name || '';
       // KR 6자리는 KR, 그 외(US 티커)는 US
-      const marketTag = /^\d{6}$/.test(code) ? 'KR' : 'US';
+      const marketTag = isKrCode(code) ? 'KR' : 'US';
       return `
         <div class="verif-search-item" data-code="${_phEsc(code)}">
           <span class="verif-item-code">${_phEsc(code)}</span>

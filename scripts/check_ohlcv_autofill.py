@@ -122,9 +122,10 @@ if _seed_path.exists():
         min_cap=oa.MIN_MARKET_CAP_WON, load_universe=lambda: _seed,
         is_etf=real_is_etf)
     expect = sorted(c for c, v in _stk.items()
-                    if c.isdigit() and len(c) == 6
+                    if oa.is_kr_code(c)
                     and (v.get('market_cap') or 0) >= oa.MIN_MARKET_CAP_WON
-                    and not real_is_etf(v.get('name')))
+                    and not real_is_etf(v.get('name'))
+                    and '기타' not in (v.get('sectors') or []))
     SEED_TARGET = len(real_codes)
     SEED_FILL = len(oa.universe_codes(load_universe=lambda: _seed,
                                       is_etf=real_is_etf))

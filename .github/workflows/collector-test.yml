@@ -14,6 +14,17 @@ on:
       - 'scripts/test_data_json.py'
       - 'scripts/check_boot_after_fork.py'
       - 'scripts/check_scheduler_liveness.py'
+      - 'scripts/check_naver_universe.py'
+      - 'stock_master.py'
+      - 'ohlcv_autofill.py'
+      - 'newhigh.py'
+      - 'valuechain.py'
+      - 'revision_calculator.py'
+      - 'consensus_collector.py'
+      - 'consensus_snapshot_collector.py'
+      - 'data_freshness.py'
+      - 'tam_modeler.py'
+      - 'static/js/**'
       - '.github/workflows/collector-test.yml'
 
 permissions:
@@ -40,3 +51,7 @@ jobs:
         run: python3 scripts/check_scheduler_liveness.py
       - name: 16:00 수급 KIS 당일 잠정 행 검증 (가짜 응답)
         run: python3 scripts/check_flow_kis_today.py
+      # 업종 유니버스가 100개 넘는 업종·영숫자 코드(0126Z0)를 흘리지 않는가.
+      # 가짜 응답으로 한 번, 러너에서 진짜 네이버로 한 번.
+      - name: 네이버 업종 유니버스 검증
+        run: python3 scripts/check_naver_universe.py --live

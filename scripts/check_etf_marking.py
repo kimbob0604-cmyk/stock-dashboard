@@ -42,22 +42,30 @@ check(len(FEAT) == 3, f'특징주 쿼리 3개를 찾았다 (찾은 수 {len(FEAT
 
 
 def db(rows):
+    """rows: (code, name, close, change_pct, volume_mn, sector)."""
     c = sqlite3.connect(':memory:')
     c.row_factory = sqlite3.Row
     c.execute("""CREATE TABLE stocks (code TEXT PRIMARY KEY, name TEXT, market TEXT DEFAULT '',
         sector TEXT, market_cap REAL, market_cap_updated TEXT, close REAL, change_pct REAL,
         volume_mn REAL, is_etf INTEGER DEFAULT 0)""")
     # **표식이 낡은 상태**로 넣는다 — 전부 0. 09-22 가 이랬다.
-    c.executemany("""INSERT INTO stocks (code, name, market, sector, close, change_pct, volume_mn, is_etf)
-        VALUES (?,?,'KOSPI','기타',?,?,?,0)""", rows)
+    c.executemany("""INSERT INTO stocks (code, name, market, close, change_pct, volume_mn, sector, is_etf)
+        VALUES (?,?,'KOSPI',?,?,?,?,0)""", rows)
     return c
 
 
+# server.py mark_etf_stocks 의 업종 규칙 — 소스에 그 줄이 그대로 있어야 한다
+SECTOR_RULE = "UPDATE stocks SET is_etf = 1 WHERE sector = '기타'"
+_mk = SRC[SRC.index('def mark_etf_stocks('):]
+check(SECTOR_RULE in _mk[:_mk.index('\ndef ', 10)], "mark_etf_stocks 가 업종 '기타' 도 ETF 로 찍는다")
+
+
 def mark(c):
-    """server.py mark_etf_stocks 와 같은 일."""
+    """server.py mark_etf_stocks 와 같은 일 — 이름 패턴 + 업종 '기타'."""
     c.execute('UPDATE stocks SET is_etf = 0')
     for p in PATS:
         c.execute('UPDATE stocks SET is_etf = 1 WHERE name LIKE ?', (f'%{p}%',))
+    c.execute(SECTOR_RULE)
 
 
 def shown(c):
@@ -88,13 +96,18 @@ LEAKED = [
     # 브랜드가 목록에 없어 새던 것
     ('069660', 'KIWOOM 200', 40000, 5.5, 4600), ('385720', 'TIME 코스피액티브', 20000, 5.4, 4500),
     ('487130', 'KoAct AI인프라액티브', 20000, 5.3, 4400),
+    # 패턴에 없는 운용사 — 업종 '기타' 로만 잡힌다(2026-10-14). 영숫자 코드도 있다
+    ('472840', 'IBK 200', 40000, 5.2, 4300), ('0220B0', 'DS 코스닥액티브', 20000, 5.6, 4200),
 ]
+LEAKED = [r + ('기타',) for r in LEAKED]           # 네이버 업종 '기타' = ETF·ETN·펀드
 REAL = [
-    ('000660', 'SK하이닉스', 300000, -2.0, 54847), ('005930', '삼성전자', 80000, 0.4, 46405),
-    ('003490', '대한항공', 25000, 8.2, 3000), ('064290', '인텍플러스', 20000, 9.4, 2500),
-    ('138930', 'BNK금융지주', 12000, 5.2, 2400),   # 'BNK' 가 오탐하던 은행주
-    ('195940', 'HK이노엔', 40000, 5.1, 2300),       # 'HK ' 와 붙여 쓰는 회사
-    ('047310', '파워로직스', 8000, 6.0, 2200),      # '파워 ' 와 붙여 쓰는 회사
+    ('000660', 'SK하이닉스', 300000, -2.0, 54847, '반도체와반도체장비'),
+    ('005930', '삼성전자', 80000, 0.4, 46405, '반도체와반도체장비'),
+    ('003490', '대한항공', 25000, 8.2, 3000, '항공사'),
+    ('064290', '인텍플러스', 20000, 9.4, 2500, '반도체와반도체장비'),
+    ('138930', 'BNK금융지주', 12000, 5.2, 2400, '은행'),        # 'BNK' 가 오탐하던 은행주
+    ('195940', 'HK이노엔', 40000, 5.1, 2300, '제약'),           # 'HK ' 와 붙여 쓰는 회사
+    ('047310', '파워로직스', 8000, 6.0, 2200, '전자장비와기기'),  # '파워 ' 와 붙여 쓰는 회사
 ]
 c = db(LEAKED + REAL)
 before = shown(c)
@@ -109,15 +122,20 @@ check(not lost, f'실제 종목은 남는다 (빠진 것: {lost or "없음"})')
 print('3. 전 종목에서 오탐')
 seed = os.path.join(ROOT, 'data', 'naver_universe_seed.json')
 if os.path.exists(seed):
-    names = {k: v['name'] for k, v in json.load(open(seed, encoding='utf-8'))['stocks'].items()
-             if isinstance(v, dict) and v.get('name')}
-    c = db([(k, n, 10000, 0.0, 0) for k, n in names.items()])
+    seed_stocks = {k: v for k, v in json.load(open(seed, encoding='utf-8'))['stocks'].items()
+                   if isinstance(v, dict) and v.get('name')}
+    names = {k: v['name'] for k, v in seed_stocks.items()}
+    c = db([(k, v['name'], 10000, 0.0, 0, (v.get('sectors') or [''])[0])
+            for k, v in seed_stocks.items()])
     mark(c)
     etf = {r['code']: r['name'] for r in c.execute('SELECT code, name FROM stocks WHERE is_etf = 1')}
+    # 업종 '기타' 로 찍힌 것은 업종이 ETF 라고 말한 것이다 — 오탐 후보는 그 밖에서 본다
+    by_pattern = {r['code']: r['name'] for r in c.execute(
+        "SELECT code, name FROM stocks WHERE is_etf = 1 AND COALESCE(sector, '') != '기타'")}
     # 운용사 브랜드로 시작하지 않는데 ETF 로 찍힌 것 = 오탐 후보
     brand = tuple(p.strip().upper() for p in PATS if p.strip() and p[0] != ' ' and
                   not any('가' <= ch <= '힣' for ch in p)) + ('ETN',)
-    odd = sorted(f'{k} {n}' for k, n in etf.items()
+    odd = sorted(f'{k} {n}' for k, n in by_pattern.items()
                  if not n.upper().startswith(brand) and not re.search(r'ETN|레버리지|인버스|선물|마이티|에셋플러스|파워 ', n))
     check('138930' not in etf, 'BNK금융지주는 ETF 가 아니다')
     check(not odd, f'브랜드로 시작하지 않는데 ETF 로 찍힌 것 {len(odd)}개 {odd[:5]}')

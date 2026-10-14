@@ -29,6 +29,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
+from stock_master import KR_CODE_GLOB
+
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / 'db' / 'dashboard.db'
 
@@ -107,9 +109,9 @@ def backfill_ntm_from_consensus_estimate(verbose: bool = True) -> Dict:
                substr(fetched_at, 1, 10) AS snap_date
         FROM consensus_estimate
         WHERE fwd_eps_1y IS NOT NULL
-          AND stock_code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+          AND stock_code GLOB ?
           AND fetched_at IS NOT NULL
-    """).fetchall()
+    """, (KR_CODE_GLOB,)).fetchall()
 
     seeded = 0
     for r in rows:

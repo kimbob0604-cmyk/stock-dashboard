@@ -197,11 +197,11 @@ if _m:
       sector TEXT, market_cap REAL, market_cap_updated TEXT, close REAL,
       change_pct REAL, volume_mn REAL, sectors_json TEXT, after_hours_price REAL,
       after_hours_change_pct REAL, after_hours_status TEXT, after_hours_time TEXT,
-      updated_at TEXT)""")
+      is_etf INTEGER DEFAULT 0, updated_at TEXT)""")
 
-    def _up(cap, asof, close):
-        cx.execute(UPSERT, ('005930', '삼성전자', '', '반도체', cap, asof,
-                            close, 1.0, 100, '[]', None, None, None, None))
+    def _up(cap, asof, close, is_etf=0, code='005930'):
+        cx.execute(UPSERT, (code, '삼성전자', '', '반도체', cap, asof,
+                            close, 1.0, 100, '[]', None, None, None, None, is_etf))
 
     def _row():
         return cx.execute(
@@ -213,6 +213,16 @@ if _m:
 
     _up(POLL_CAP, '20260915', 85000)          # 오늘 폴링이 진짜 값을 준다
     want(_row()[:2] == (POLL_CAP, '20260915'), '오늘 폴링 값으로 갱신되지 않는다')
+
+    # ETF 표식은 넣을 때 같이 박히고, 다음 저장에서 0 이 와도 떼지 않는다
+    # (떼는 것은 mark_etf_stocks 가 처음부터 다시 할 때뿐)
+    _up(1e12, '20260915', 10000, is_etf=1, code='0135Y0')
+    _etf = lambda: cx.execute("SELECT is_etf FROM stocks WHERE code='0135Y0'").fetchone()[0]
+    want(_etf() == 1, 'ETF 표식이 넣을 때 박히지 않는다')
+    _up(1e12, '20260916', 10000, is_etf=0, code='0135Y0')
+    want(_etf() == 1, '다음 저장에서 ETF 표식이 떨어졌다')
+    want(cx.execute("SELECT is_etf FROM stocks WHERE code='005930'").fetchone()[0] == 0,
+         '보통주에 ETF 표식이 붙었다')
 
     _up(SEED_CAP, '20260602', 86000)          # 재시작 → 시드가 되돌리려 시도
     want(_row()[:2] == (POLL_CAP, '20260915'),

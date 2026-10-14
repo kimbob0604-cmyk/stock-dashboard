@@ -33,6 +33,7 @@ DB_PATH = BASE_DIR / 'db' / 'dashboard.db'
 sys.path.insert(0, str(BASE_DIR))
 from consensus_quarterly_collector import collect_one as collect_quarterly_one
 from consensus_collector import collect_consensus_for_stock as collect_forward_one
+from stock_master import KR_CODE_GLOB, is_kr_code
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +59,13 @@ def get_extended_universe(target_size: int = 350) -> List[Dict]:
     cur.execute("""
         SELECT code, name, market_cap
         FROM stocks
-        WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+        WHERE code GLOB ?
           AND market_cap > 0
           AND name IS NOT NULL
           AND COALESCE(is_etf, 0) = 0
         ORDER BY market_cap DESC
         LIMIT ?
-    """, (target_size,))
+    """, (KR_CODE_GLOB, target_size))
     mcap_stocks = [dict(r) for r in cur.fetchall()]
 
     # 2. valuechain 매핑 KR 종목 (헬퍼 사용)
@@ -72,7 +73,7 @@ def get_extended_universe(target_size: int = 350) -> List[Dict]:
     try:
         from valuechain import get_all_stocks_in_map
         kr_codes, _ = get_all_stocks_in_map()
-        vc_codes = {c for c in kr_codes if isinstance(c, str) and len(c) == 6 and c.isdigit()}
+        vc_codes = {c for c in kr_codes if is_kr_code(c)}
     except Exception as e:
         logger.warning(f"[universe] valuechain 로드 실패: {e}")
 
@@ -83,8 +84,8 @@ def get_extended_universe(target_size: int = 350) -> List[Dict]:
             SELECT code, name, market_cap
             FROM stocks
             WHERE code IN ({placeholders})
-              AND code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
-        """, list(vc_codes))
+              AND code GLOB ?
+        """, [*vc_codes, KR_CODE_GLOB])
         vc_stocks = [dict(r) for r in cur.fetchall()]
 
     conn.close()
