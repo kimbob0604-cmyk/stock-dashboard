@@ -13,7 +13,8 @@ server.py 는 Flask 앱이라 import 하지 않는다(check_etf_marking.py 와 �
 
 보는 것
   A. 175종목 업종을 끝까지 받는다 · 영숫자 코드가 남는다 · 중복이 없다
-  B. 페이지가 밀려 한 바퀴에 못 채우면 다시 받아 채운다(앞서 받은 것은 버리지 않는다)
+  B. 페이지가 밀려 한 바퀴에 못 채우면 다시 받아 채운다(앞서 받은 것은 버리지 않고,
+     페이지 크기를 바꿔 경계를 옮긴다 — 경계에 붙은 종목은 같은 크기로는 계속 빠진다)
   C. 끝내 못 채우면 받은 만큼 돌려주고 수집 오류를 남긴다 · 첫 요청부터 실패면 error
   D. 국내 코드가 아닌 항목이 섞여도 완결 판정이 막히지 않는다(헛바퀴를 돌지 않는다)
   E. 코드 판정 — is_kr_code 와 SQLite GLOB 이 같은 답을 낸다
@@ -50,9 +51,9 @@ TREE = ast.parse(SRC)
 WANT = {'_parse_naver_flow_number', '_parse_pct', '_naver_json', '_scrape_naver_sector_detail'}
 nodes = [n for n in TREE.body
          if (isinstance(n, ast.FunctionDef) and n.name in WANT)
-         or (isinstance(n, ast.Assign) and any(getattr(t, 'id', '') == '_SECTOR_PAGE' for t in n.targets))]
-found = {getattr(n, 'name', '_SECTOR_PAGE') for n in nodes}
-assert found == WANT | {'_SECTOR_PAGE'}, f'server.py 에서 못 찾았다: {WANT | {"_SECTOR_PAGE"} - found}'
+         or (isinstance(n, ast.Assign) and any(getattr(t, 'id', '') == '_SECTOR_PAGES' for t in n.targets))]
+found = {getattr(n, 'name', '_SECTOR_PAGES') for n in nodes}
+assert found == WANT | {'_SECTOR_PAGES'}, f'server.py 에서 못 찾았다: {WANT | {"_SECTOR_PAGES"} - found}'
 
 
 def load(naver_json=None, sleep=True):
@@ -75,9 +76,11 @@ def row(code, i):
             'accumulatedTradingVolume': '1,000', 'fluctuationsRatio': '1.5'}
 
 
-def fake_source(items, drift_passes=0, fail_first=False, never_complete=False):
+def fake_source(items, drift_passes=0, fail_first=False, never_complete=False, stuck_size=None):
     """네이버 업종 상세 흉내. drift_passes 바퀴 동안은 1쪽을 받은 뒤 2쪽 첫 종목이
-    1쪽 끝으로 올라간다(장중 순서 변동) — 그 종목은 그 바퀴에 안 보인다."""
+    1쪽 끝으로 올라간다(장중 순서 변동) — 그 종목은 그 바퀴에 안 보인다.
+    stuck_size 를 주면 그 페이지 크기로 받을 때마다 밀린다(경계에 붙은 종목).
+    never_complete 면 totalCount 가 실제보다 하나 많다 — 목록에 끝내 안 나오는 종목."""
     state = {'calls': 0, 'pass': 0}
 
     def naver_json(url, source, timeout=10):
@@ -89,12 +92,12 @@ def fake_source(items, drift_passes=0, fail_first=False, never_complete=False):
         if page == 1:
             state['pass'] += 1
         seq = list(items)
-        moved = state['pass'] <= drift_passes or never_complete
+        moved = state['pass'] <= drift_passes or size == stuck_size
         if moved and page >= 2:
             # 1쪽을 받은 뒤 101번째가 1쪽으로 올라갔다 → 2쪽은 102번째부터 시작한다
             seq = seq[:size - 1] + [seq[size]] + [seq[size - 1]] + seq[size + 1:]
         chunk = seq[(page - 1) * size: page * size]
-        return {'groupInfo': {'name': '제약'}, 'totalCount': len(items),
+        return {'groupInfo': {'name': '제약'}, 'totalCount': len(items) + (1 if never_complete else 0),
                 'stocks': [row(c, i) for i, c in enumerate(chunk)]}
 
     return naver_json, state
@@ -121,11 +124,17 @@ check(len(set(got)) == 175, f'두 바퀴 합쳐 175종목 ({len(set(got))})')
 check(st['pass'] == 2, f'두 바퀴 돌았다 (실제 {st["pass"]})')
 check(not errs, '다 채웠으니 수집 오류 없음')
 
+print('── B2. 경계에 붙은 종목 — 같은 크기로는 매번 빠진다, 크기를 바꿔 잡는다')
+nj, st = fake_source(codes, stuck_size=100)
+fn, errs = load(nj, sleep=False)
+got = [s['code'] for s in fn('261')['stocks']]
+check(len(set(got)) == 175 and not errs, f'페이지 크기를 바꾼 둘째 바퀴에 채운다 ({len(set(got))}, 바퀴 {st["pass"]})')
+
 print('── C. 끝내 못 채우거나 처음부터 실패')
 nj, st = fake_source(codes, never_complete=True)
 fn, errs = load(nj, sleep=False)
 out = fn('261', tries=3)
-check(len(out['stocks']) == 174 and 'error' not in out, f'받은 만큼(174) 돌려준다 ({len(out["stocks"])})')
+check(len(out['stocks']) == 175 and 'error' not in out, f'받은 만큼(175) 돌려준다 ({len(out["stocks"])})')
 check(st['pass'] == 3, f'3바퀴에서 멈춘다 (실제 {st["pass"]})')
 check(any('다 못 받았다' in d for _, d in errs), '수집 오류에 남긴다')
 nj, st = fake_source(codes, fail_first=True)

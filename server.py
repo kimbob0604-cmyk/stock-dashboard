@@ -3306,7 +3306,11 @@ def _scrape_naver_sectors_legacy_unused() -> list[dict]:
     return out
 
 
-_SECTOR_PAGE = 100        # 네이버가 받는 최대 pageSize (200 이상은 HTTP 400)
+# 페이지 크기 — 네이버가 받는 최대는 100(200 이상은 HTTP 400). 다시 받을 때는
+# 크기를 바꿔 페이지 경계를 옮긴다. 경계(100번째)를 오가는 종목은 같은 크기로
+# 몇 번을 다시 받아도 계속 빠질 수 있다 — 2026-10-14 러너에서 자동차부품이
+# 3번 내리 152/153 이었다.
+_SECTOR_PAGES = (100, 97, 91)
 
 
 def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
@@ -3320,8 +3324,9 @@ def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
 
     **장중엔 페이지가 밀린다.** 목록이 등락률 순이라 요청 사이에 순서가 바뀌면
     한 종목이 빠지고 다른 종목이 두 번 나온다. 고유 종목 수가 totalCount 와 맞을
-    때까지 다시 받되, 앞서 받은 것은 버리지 않는다(합집합이 금방 다 찬다). 끝내
-    못 채우면 받은 만큼 돌려주고 수집 오류 링버퍼에 남긴다.
+    때까지 다시 받되, 앞서 받은 것은 버리지 않고(합집합이 금방 다 찬다) 페이지
+    크기를 바꿔 경계를 옮긴다. 끝내 못 채우면 받은 만큼 돌려주고 수집 오류
+    링버퍼에 남긴다.
 
     종목코드는 영숫자다('0126Z0' 삼성에피스홀딩스) — _is_kr_code 로 판정한다.
     """
@@ -3329,11 +3334,12 @@ def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
     seen: set = set()            # 완결 판정용 — 코드 형식과 무관하게 받은 항목 전부
     sector_name, total, got_any = "", 0, False
     for attempt in range(1, tries + 1):
+        size = _SECTOR_PAGES[(attempt - 1) % len(_SECTOR_PAGES)]
         page = 1
         while True:
             d = _naver_json(
                 f"https://m.stock.naver.com/api/stocks/industry/{no}"
-                f"?page={page}&pageSize={_SECTOR_PAGE}",
+                f"?page={page}&pageSize={size}",
                 "naver_sector_detail")
             if not isinstance(d, dict):
                 break
@@ -3352,7 +3358,7 @@ def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
                 seen.add(code)
                 if _is_kr_code(code):
                     rows[code] = s
-            if len(batch) < _SECTOR_PAGE or page * _SECTOR_PAGE >= total:
+            if len(batch) < size or page * size >= total:
                 break
             page += 1
             time.sleep(0.15)
