@@ -8,6 +8,8 @@ on:
   push:
     paths:
       - 'server.py'
+      - 'kis_api.py'
+      - 'scripts/check_flow_kis_today.py'
       - 'scripts/test_collectors.py'
       - 'scripts/test_data_json.py'
       - 'scripts/check_boot_after_fork.py'
@@ -36,3 +38,5 @@ jobs:
         run: python3 scripts/check_boot_after_fork.py
       - name: 스케줄러 감시·심장박동 검증
         run: python3 scripts/check_scheduler_liveness.py
+      - name: 16:00 수급 KIS 당일 잠정 행 검증 (가짜 응답)
+        run: python3 scripts/check_flow_kis_today.py

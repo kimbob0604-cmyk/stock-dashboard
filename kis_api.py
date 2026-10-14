@@ -253,14 +253,40 @@ def get_orderbook(code: str) -> dict | None:
 
 
 # ── 투자자별 매매동향 (10분 캐시) ────────────────
-def get_investor_trading(code: str) -> list:
-    key = f"investor_{code}"
-    c = _get_cache(key, 600)
-    if c is not None:
-        return c
+def _investor_qty(v) -> int | None:
+    """KIS 수량 문자열 → int. 빈칸은 None (0 과 구분한다 — 아직 집계 전일 수 있다)."""
+    s = str(v if v is not None else "").strip().replace(",", "")
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def get_investor_daily(code: str, ttl: int = 600) -> dict:
+    """종목별 투자자 일별 순매수 (FHKST01010900 inquire-investor).
+
+    get_investor_trading 과 같은 호출이지만 **실패와 '데이터 없음' 을 구분해**
+    돌려준다. 장마감 수급 배치가 '키가 없다 · 호출이 실패했다 · 오늘 행이 아직
+    없다' 를 각각 다르게 다뤄야 해서다.
+
+    Returns: {"ok": bool, "error": str | None, "rows": [...]}  rows 는 최신이 앞.
+      row = {date: 'YYYYMMDD', foreign_net, inst_net, retail_net (주, 빈칸이면 None),
+             close (원, stck_clpr · 없으면 0), blank (세 값이 모두 빈칸이거나 0)}
+      error: 'no_key' (APP_KEY/SECRET 미설정) · 'no_token' · 그 밖의 실패 사유.
+    ttl=0 이면 캐시를 읽지 않는다(장 마감 직후처럼 방금 값이 필요할 때).
+    """
+    key = f"investor_daily_{code}"
+    if ttl > 0:
+        c = _get_cache(key, ttl)
+        if c is not None:
+            return {"ok": True, "error": None, "rows": c}
+    if not (os.getenv("KIS_APP_KEY") and os.getenv("KIS_APP_SECRET")):
+        return {"ok": False, "error": "no_key", "rows": []}
     h = _headers("FHKST01010900")
     if not h:
-        return []
+        return {"ok": False, "error": "no_token", "rows": []}
     _rate_limit()
     p = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
     try:
@@ -269,26 +295,40 @@ def get_investor_trading(code: str) -> list:
             headers=h, params=p, timeout=10,
         )
         d = r.json()
-        if d.get("rt_cd") != "0":
-            log.warning("[KIS] 투자자 %s: %s", code, d.get("msg1"))
-            return []
-        out = []
-        for it in d.get("output", [])[:10]:
-            try:
-                out.append({
-                    "date": it.get("stck_bsop_date", ""),
-                    "foreign_net": int(it.get("frgn_ntby_qty") or 0),
-                    "inst_net": int(it.get("orgn_ntby_qty") or 0),
-                    "retail_net": int(it.get("prsn_ntby_qty") or 0),
-                })
-            except Exception:
-                continue
-        if out:
-            _set_cache(key, out)
-        return out
     except Exception as exc:
-        log.warning("[KIS] 투자자 %s 호출실패: %s", code, exc)
+        return {"ok": False, "error": f"호출실패 {type(exc).__name__}: {exc}", "rows": []}
+    if d.get("rt_cd") != "0":
+        return {"ok": False, "error": f"rt_cd={d.get('rt_cd')} {d.get('msg1')}", "rows": []}
+    out = []
+    for it in d.get("output") or []:
+        if not isinstance(it, dict):
+            continue
+        f = _investor_qty(it.get("frgn_ntby_qty"))
+        o = _investor_qty(it.get("orgn_ntby_qty"))
+        p_ = _investor_qty(it.get("prsn_ntby_qty"))
+        out.append({
+            "date": str(it.get("stck_bsop_date") or ""),
+            "foreign_net": f, "inst_net": o, "retail_net": p_,
+            "close": _investor_qty(it.get("stck_clpr")) or 0,
+            "blank": all(v is None or v == 0 for v in (f, o, p_)),
+        })
+    if out:
+        _set_cache(key, out)
+    return {"ok": True, "error": None, "rows": out}
+
+
+def get_investor_trading(code: str) -> list:
+    """/api/kis/investor 용 — 최근 10일, 빈칸은 0. 실패면 [] (로그만 남긴다)."""
+    r = get_investor_daily(code)
+    if not r["ok"]:
+        log.warning("[KIS] 투자자 %s: %s", code, r["error"])
         return []
+    return [{
+        "date": x["date"],
+        "foreign_net": x["foreign_net"] or 0,
+        "inst_net": x["inst_net"] or 0,
+        "retail_net": x["retail_net"] or 0,
+    } for x in r["rows"][:10]]
 
 
 # ── 현재가 상세 (장중 30s, 장외 1h) ──────────────
