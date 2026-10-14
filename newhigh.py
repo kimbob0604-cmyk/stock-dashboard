@@ -58,6 +58,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta, timezone
 
 import krx_calendar
+from stock_master import KR_CODE_GLOB
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ def observed_counts(conn, start: str, end: str) -> dict:
     try:
         return {r[0]: r[1] for r in conn.execute(
             "SELECT date, COUNT(*) FROM ohlcv "
-            "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' "
+            f"WHERE code GLOB '{KR_CODE_GLOB}' "
             "AND date >= ? AND date < ? GROUP BY date", (start, end)).fetchall()}
     except Exception as exc:                               # noqa: BLE001
         log.debug("[신고가] 관측 거래일 조회 실패: %s", exc)

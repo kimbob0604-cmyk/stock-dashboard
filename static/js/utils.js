@@ -1,6 +1,12 @@
 // ===== static/js/utils.js — 공용 포매팅/색상/배지/스파크라인 =====
 'use strict';
 
+// 국내 종목코드인가. '005930' 뿐 아니라 '0126Z0'(삼성에피스홀딩스)·'00680K'
+// (미래에셋증권2우B) 같은 영숫자 코드가 있다(2024년~). 숫자 6자리로만 보면 이
+// 종목들을 미국 종목으로 오인한다. 서버 stock_master.is_kr_code 와 같은 규칙.
+const KR_CODE_RE = /^[0-9][0-9A-Z]{5}$/;
+function isKrCode(code) { return KR_CODE_RE.test(String(code || '')); }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // COLOR HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +120,7 @@ function _marketBadgeFromItem(item) {
   if (mt === 'us') return _marketBadge('US');
   // 코드 패턴 기반 추정
   const code = item.code || item.symbol || '';
-  if (/^\d{6}$/.test(code)) return _marketBadge('kr');
+  if (isKrCode(code)) return _marketBadge('kr');
   if (/^[A-Z][A-Z0-9.\-]{0,6}$/.test(code)) return _marketBadge('US');
   return '';
 }

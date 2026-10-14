@@ -21,6 +21,8 @@ from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
 
+from stock_master import is_kr_code
+
 log = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
@@ -665,7 +667,7 @@ def _vc_db_conn():
 
 
 def _is_kr_code(code: str) -> bool:
-    return bool(code) and code.isdigit() and len(code) == 6
+    return is_kr_code(code)               # '0126Z0' 같은 영숫자 코드까지
 
 
 # ── 점수 변환 함수 ──────────────────────────────
@@ -942,14 +944,14 @@ def get_market_cap_vc(code):
                 try:
                     cap = float(r["market_cap"])
                     # US 종목이면 USD 단위로 저장된 경우가 있어 환율 적용
-                    is_us = not (code.isdigit() and len(code) == 6)
+                    is_us = not _is_kr_code(code)
                     if cap > 0:
                         return cap * _get_usd_krw_rate() if is_us else cap
                 except (TypeError, ValueError):
                     pass
 
             # 2) financial 테이블 (KR 한국식 문자열)
-            if code.isdigit() and len(code) == 6:
+            if _is_kr_code(code):
                 r = conn.execute(
                     "SELECT market_cap FROM financial WHERE code = ?", (code,)
                 ).fetchone()

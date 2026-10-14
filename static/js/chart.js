@@ -20,7 +20,7 @@ async function openChartPanel(code, hintName, marketOverride) {
   const isUS = effectiveMarket === 'us';
   const valid = isUS
     ? /^[A-Z][A-Z0-9.\-]{0,6}$/.test(code)
-    : /^\d{6}$/.test(code);
+    : isKrCode(code);
   if (!valid) {
     console.error('[openChartPanel] ❌ invalid code:', code, 'market:', effectiveMarket);
     return;
@@ -1770,7 +1770,7 @@ function _drawDisclosureMarkers(ctx, data, sc) {
 
 // ── 공시 이벤트 fetch + 캐시 + 재렌더 ──
 async function _loadDisclosureEvents(code) {
-  if (!code || !/^\d{6}$/.test(code)) return [];
+  if (!code || !isKrCode(code)) return [];
   if (CHART_STATE.disclosureCode === code && CHART_STATE.disclosureEvents) {
     return CHART_STATE.disclosureEvents;
   }

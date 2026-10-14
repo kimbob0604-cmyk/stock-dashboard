@@ -32,6 +32,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations as _comb
 from pathlib import Path
 
+# 국내 종목코드 판정. '0126Z0'(삼성에피스홀딩스)·'00680K'(미래에셋증권2우B) 같은
+# 영숫자 코드까지 받는다 — `\d{6}`·isdigit() 으로 거르면 2024년 이후 상장한
+# 종목이 통째로 빠진다. 판정 규칙은 stock_master.py 한 곳에 있다.
+from stock_master import KR_CODE_GLOB as _KR_CODE_GLOB, is_kr_code as _is_kr_code
+
 # ── .env 파일 로더 (python-dotenv 미의존) ──────────────────────────────
 # 로컬 개발 시 .env 파일이 있으면 os.environ 에 병합.
 # Render/프로덕션은 서비스의 환경변수를 직접 사용하므로 .env 가 없어도 무해.
@@ -747,7 +752,7 @@ def _overlay_live_prices_on_data(data: dict) -> dict:
         for theme in (data.get("themes") or []):
             for s in (theme.get("stocks") or []):
                 code = s.get("code")
-                if code and re.fullmatch(r"\d{6}", code):
+                if _is_kr_code(code):
                     kr_codes.append(code)
         if not kr_codes:
             return data
@@ -2275,7 +2280,7 @@ def api_news(code: str):
     NAVER_CLIENT_ID/SECRET 미설정 시 503 + hint.
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     stock_name = _get_stock_name(code)
@@ -2557,7 +2562,7 @@ def api_reports(code: str):
     캐시: cache/reports_{code}.json, TTL 6시간.
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     stock_name = _get_stock_name(code)
@@ -2813,7 +2818,7 @@ def _fetch_naver_trend(code: str, days: int = 20) -> dict | None:
     """
     import re as _re
     import urllib.request
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return None
 
     url = (f"https://m.stock.naver.com/api/stock/{code}/trend"
@@ -3080,7 +3085,7 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
         if umap:
             ranked = sorted(
                 (v for v in umap.values()
-                 if str(v.get("code") or "").isdigit()
+                 if _is_kr_code(v.get("code"))
                  and float(v.get("close") or 0) >= 1000),
                 key=lambda v: float(v.get("market_cap") or 0) or float(v.get("volume_mn") or 0),
                 reverse=True)
@@ -3135,7 +3140,7 @@ def api_flow(code: str):
     실패 시 {"error":"데이터 없음"} 반환.
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     stock_name = _get_stock_name(code) or code
@@ -3301,33 +3306,68 @@ def _scrape_naver_sectors_legacy_unused() -> list[dict]:
     return out
 
 
-def _scrape_naver_sector_detail(no: str) -> dict:
+_SECTOR_PAGE = 100        # 네이버가 받는 최대 pageSize (200 이상은 HTTP 400)
+
+
+def _scrape_naver_sector_detail(no: str, tries: int = 3) -> dict:
     """
     업종 소속 종목 리스트. 업종 요약과 같은 이유로 모바일 JSON API 를 쓴다.
     Returns: {sector_name, stocks: [{code, name, close, change_pct, volume, volume_mn}]}
-    """
-    d = _naver_json(
-        f"https://m.stock.naver.com/api/stocks/industry/{no}?page=1&pageSize=100",
-        "naver_sector_detail")
-    if not isinstance(d, dict):
-        return {"error": "업종 상세 조회 실패", "sector_name": "", "stocks": []}
 
-    ginfo = d.get("groupInfo") or {}
-    sector_name = ginfo.get("name") or ""
-    rows = d.get("stocks")
-    if not isinstance(rows, list):
-        _note_collect_error("naver_sector_detail", f"no={no} stocks 없음 — 키 {list(d)[:8]}")
-        return {"sector_name": sector_name, "stocks": []}
+    **끝 페이지까지 받는다.** 예전엔 첫 페이지(100개)만 받아 100개가 넘는 업종이
+    잘렸다 — 2026-10-13 기준 제약 175 · 반도체와반도체장비 172 · 자동차부품 153 ·
+    화학 122 · IT서비스 119 · 기계 105 · 전자장비와기기 105 · 건강관리장비와용품 104.
+
+    **장중엔 페이지가 밀린다.** 목록이 등락률 순이라 요청 사이에 순서가 바뀌면
+    한 종목이 빠지고 다른 종목이 두 번 나온다. 고유 종목 수가 totalCount 와 맞을
+    때까지 다시 받되, 앞서 받은 것은 버리지 않는다(합집합이 금방 다 찬다). 끝내
+    못 채우면 받은 만큼 돌려주고 수집 오류 링버퍼에 남긴다.
+
+    종목코드는 영숫자다('0126Z0' 삼성에피스홀딩스) — _is_kr_code 로 판정한다.
+    """
+    rows: dict[str, dict] = {}
+    seen: set = set()            # 완결 판정용 — 코드 형식과 무관하게 받은 항목 전부
+    sector_name, total, got_any = "", 0, False
+    for attempt in range(1, tries + 1):
+        page = 1
+        while True:
+            d = _naver_json(
+                f"https://m.stock.naver.com/api/stocks/industry/{no}"
+                f"?page={page}&pageSize={_SECTOR_PAGE}",
+                "naver_sector_detail")
+            if not isinstance(d, dict):
+                break
+            batch = d.get("stocks")
+            if not isinstance(batch, list):
+                _note_collect_error("naver_sector_detail",
+                                    f"no={no} stocks 없음 — 키 {list(d)[:8]}")
+                break
+            got_any = True
+            sector_name = sector_name or (d.get("groupInfo") or {}).get("name") or ""
+            total = int(d.get("totalCount") or 0)
+            for s in batch:
+                if not isinstance(s, dict):
+                    continue
+                code = str(s.get("itemCode") or "")
+                seen.add(code)
+                if _is_kr_code(code):
+                    rows[code] = s
+            if len(batch) < _SECTOR_PAGE or page * _SECTOR_PAGE >= total:
+                break
+            page += 1
+            time.sleep(0.15)
+        if got_any and len(seen) >= total:
+            break
+        if attempt < tries:
+            time.sleep(1.0 * attempt)
+    if not got_any:
+        return {"error": "업종 상세 조회 실패", "sector_name": "", "stocks": []}
+    if len(seen) < total:
+        _note_collect_error("naver_sector_detail",
+                            f"no={no} {sector_name} {len(seen)}/{total} — {tries}번 받아도 다 못 받았다")
 
     stocks: list[dict] = []
-    seen: set = set()
-    for s in rows:
-        if not isinstance(s, dict):
-            continue
-        code = str(s.get("itemCode") or "")
-        if not re.fullmatch(r"\d{6}", code) or code in seen:
-            continue
-        seen.add(code)
+    for code, s in rows.items():
         close = _parse_naver_flow_number(str(s.get("closePrice") or ""))
         vol = _parse_naver_flow_number(str(s.get("accumulatedTradingVolume") or ""))
         stocks.append({
@@ -3770,7 +3810,7 @@ def api_compare():
     code1  = (request.args.get("code1")  or "").strip()
     code2  = (request.args.get("code2")  or "").strip()
     period = (request.args.get("period") or "1M").strip()
-    if not (_re.fullmatch(r"\d{6}", code1) and _re.fullmatch(r"\d{6}", code2)):
+    if not (_is_kr_code(code1) and _is_kr_code(code2)):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     PERIOD_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365, "3Y": 365 * 3, "5Y": 365 * 5}
@@ -3860,7 +3900,7 @@ def api_financial(code: str):
               배당수익률, 추정PER, 매출/영업이익/순이익 (3년 + 추정).
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     cache_file = BASE_DIR / "cache" / f"financial_{code}.json"
@@ -4074,7 +4114,7 @@ def api_price(code: str):
       3) cache/chart_{code}_{date}.json (온디맨드 차트 캐시)
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     # 1) Naver universe
@@ -4258,7 +4298,7 @@ def api_chart_intraday(code: str):
     응답 스키마는 /api/chart 와 동일하므로 프론트의 _drawCandles 등 재사용 가능.
     """
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     try:
@@ -4404,7 +4444,7 @@ def _append_today_candle_kr(result: dict, code: str) -> bool:
 @app.route("/api/chart/<code>")
 def api_chart(code: str):
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     # Phase 12-1: 기간 파라미터 (기본 180일). 클램프 7~3650.
@@ -6024,8 +6064,8 @@ def _resolve_kr_code(q: str) -> tuple[str, str] | None:
     if not q:
         return None
     import re as _re
-    if _re.fullmatch(r"\d{6}", q):
-        return (q, _get_stock_name(q) or q)
+    if _is_kr_code(q.upper()):
+        return (q.upper(), _get_stock_name(q.upper()) or q.upper())
     ql = q.lower()
     uni = _load_naver_universe()
     stocks = (uni or {}).get("stocks") or {}
@@ -7950,13 +7990,22 @@ def _is_etf_name(name: str) -> bool:
 
 
 def mark_etf_stocks():
-    """ETF/ETN 종목 자동 마킹. 매일 03:10 cron."""
+    """ETF/ETN 종목 자동 마킹. 매일 03:10 cron.
+
+    이름 패턴에 더해 **네이버 업종 '기타'** 를 ETF 로 본다. 그 업종엔 ETF·ETN·
+    상장 펀드뿐이다(2026-10-13 1,546개 = ETF 1,177 · ETN 367 · 펀드 클래스 2).
+    패턴은 새 운용사를 놓친다 — 같은 날 IBK·DS·DAISHIN·아이엠에셋·더제이 ETF
+    18개가 패턴을 빠져나갔다. 이들은 영숫자 코드(0135Y0 등)라 예전엔 유니버스에
+    아예 못 들어와 드러나지 않았다. 미국 종목의 sector 는 yfinance 영문값이라
+    '기타' 가 될 일이 없다.
+    """
     if not (_SQLITE_OK and USE_SQLITE):
         return 0
     with _get_db() as conn:
         conn.execute("UPDATE stocks SET is_etf = 0")
         for p in ETF_PATTERNS:
             conn.execute("UPDATE stocks SET is_etf = 1 WHERE name LIKE ?", (f'%{p}%',))
+        conn.execute("UPDATE stocks SET is_etf = 1 WHERE sector = '기타'")
         cnt = conn.execute("SELECT COUNT(*) FROM stocks WHERE is_etf = 1").fetchone()[0]
         conn.commit()
     log.info("[ETF 마킹] %d종목", cnt)
@@ -8682,7 +8731,7 @@ def _refresh_prices_from_naver():
                 with _get_db() as conn:
                     before_cnt = conn.execute(
                         "SELECT COUNT(*) FROM stocks "
-                        "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                        f"WHERE code GLOB '{_KR_CODE_GLOB}'"
                     ).fetchone()[0]
                     for code, info in stocks_map.items():
                         mcap = info.get("market_cap") or 0
@@ -8736,7 +8785,7 @@ def _refresh_prices_from_naver():
                     conn.commit()
                     after_cnt = conn.execute(
                         "SELECT COUNT(*) FROM stocks "
-                        "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                        f"WHERE code GLOB '{_KR_CODE_GLOB}'"
                     ).fetchone()[0]
                 inserted = after_cnt - before_cnt
                 if inserted > 0:
@@ -8783,7 +8832,7 @@ def _ohlcv_ranked_codes() -> tuple[str, list]:
     with _get_db() as conn:
         rows = conn.execute(
             "SELECT code, name, market_cap FROM stocks "
-            "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' "
+            f"WHERE code GLOB '{_KR_CODE_GLOB}' "
             "  AND (market = '' OR market LIKE 'KOS%') "
             "  AND COALESCE(is_etf, 0) = 0 "
             "  AND COALESCE(market_cap, 0) > 0").fetchall()
@@ -9663,7 +9712,7 @@ def _scrape_naver_research_list(kind: str, pages: int) -> list[dict]:
             else:
                 entry["stock_name"] = name_tag.get_text(strip=True) if name_tag else cols[0].get_text(strip=True)
                 code_href = (name_tag.get("href") or "") if name_tag else ""
-                m = re.search(r"code=(\d{6})", code_href)
+                m = re.search(r"code=([0-9][0-9A-Z]{5})", code_href)
                 entry["stock_code"] = m.group(1) if m else ""
 
             out.append(entry)
@@ -10179,7 +10228,7 @@ def api_sector_rotation():
 @app.route("/api/peers/<code>")
 def api_peers_kr(code: str):
     """KR 동종 업계 비교. naver_universe 같은 섹터 → 거래대금 상위 20, 12h 캐시."""
-    if not re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
     cache_file = BASE_DIR / "cache" / f"peers_{code}.json"
     cached = _read_fresh_json(cache_file, 720)
@@ -10556,7 +10605,7 @@ def api_disclosure_bonus(code: str):
     if not (_SQLITE_OK and USE_SQLITE):
         return jsonify({"bonus": 0, "disclosures": []})
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code or ""):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
     try:
         with _get_db() as conn:
@@ -10590,7 +10639,7 @@ def api_disclosure_events(code: str):
     if not (_SQLITE_OK and USE_SQLITE):
         return jsonify({"events": []})
     import re as _re
-    if not _re.fullmatch(r"\d{6}", code or ""):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
     cache_file = BASE_DIR / "cache" / f"disc_events_{code}.json"
     try:
@@ -11035,7 +11084,7 @@ def api_dart_financial(code: str):
     국내 종목 12분기 손익 + 마진 + (best-effort) 사업부별 매출.
     24h 캐시: cache/dart_fin_{code}.json
     """
-    if not re.fullmatch(r"\d{6}", code):
+    if not _is_kr_code(code):
         return jsonify({"error": "잘못된 종목코드"}), 400
 
     dart_key = os.getenv("DART_API_KEY")
@@ -11690,7 +11739,7 @@ def _apply_live_prices_to_items(items: list) -> int:
     patched = 0
     # US codes 를 DB 한번에 조회
     us_codes = [it.get("code") for it in items
-                if it.get("code") and not (it.get("code") or "").isdigit()]
+                if it.get("code") and not _is_kr_code(it.get("code"))]
     us_map: dict = {}
     if us_codes and _SQLITE_OK and USE_SQLITE:
         try:
@@ -11707,7 +11756,7 @@ def _apply_live_prices_to_items(items: list) -> int:
         code = it.get("code", "")
         if not code:
             continue
-        if code.isdigit() and len(code) == 6:  # KR
+        if _is_kr_code(code):  # KR
             live = kr_live.get(code)
             if live and live.get("close"):
                 it["price"] = live["close"]
@@ -16363,7 +16412,7 @@ def api_valuechain():
                 for r in rows:
                     price_map[r["code"]] = dict(r)
                 # KR 종목만 외국인 net (flow_cache)
-                kr_codes = [c for c in all_codes if c.isdigit() and len(c) == 6]
+                kr_codes = [c for c in all_codes if _is_kr_code(c)]
                 if kr_codes:
                     qm2 = ",".join(["?"] * len(kr_codes))
                     fr = conn.execute(
@@ -16679,7 +16728,7 @@ import re as _re_kis
 
 
 def _kis_valid_code(code: str) -> bool:
-    return bool(_re_kis.fullmatch(r"\d{6}", code or ""))
+    return _is_kr_code(code)
 
 
 @app.route("/api/kis/minute/<code>")
@@ -16958,9 +17007,9 @@ def api_vc2_segment_manage(theme_id, layer_id, segment_id):
             return jsonify({"error": "action must be add|remove"}), 400
         if not code:
             return jsonify({"error": "code required"}), 400
-        # market 자동 추정 (6자리 숫자=KR, 그 외=US)
+        # market 자동 추정 (국내 종목코드=KR, 그 외=US)
         if market not in ("kr", "us"):
-            market = "kr" if code.isdigit() and len(code) == 6 else "us"
+            market = "kr" if _is_kr_code(code) else "us"
 
         from valuechain import VALUECHAIN_MAP_PATH, reload_valuechain_map, _REFLECTION_CACHE
         with open(VALUECHAIN_MAP_PATH, "r", encoding="utf-8") as f:
@@ -17480,9 +17529,9 @@ def api_verification_prefill(code):
     build_prefill_data 어댑터 — step1/step2/step4/step5 구조로 재포장.
     step3 는 null (4-5-5 에서 사용자 수동 입력).
     부분 실패해도 errors[] 누적 + 가능한 step 표시."""
-    if not code or not code.isdigit() or len(code) != 6:
+    if not _is_kr_code(code):
         return jsonify({
-            'error': '6자리 숫자 종목 코드만 허용', 'code': code,
+            'error': '6자리 국내 종목 코드만 허용', 'code': code,
         }), 400
 
     errors: list = []
@@ -17916,8 +17965,8 @@ def api_verification_composite(code):
                actions: [...], monitoring: [...],
                errors: [...] }
     """
-    if not code or not code.isdigit() or len(code) != 6:
-        return jsonify({'error': '6자리 숫자 종목 코드만 허용', 'code': code}), 400
+    if not _is_kr_code(code):
+        return jsonify({'error': '6자리 국내 종목 코드만 허용', 'code': code}), 400
 
     errors: list = []
     conn = sqlite3.connect(str(BASE_DIR / 'db' / 'dashboard.db'), timeout=10)
@@ -18249,8 +18298,8 @@ def api_verification_gap_analysis(code):
         action: {stars, label, rationale, checklist[]},
         errors: [...] }
     """
-    if not code or not code.isdigit() or len(code) != 6:
-        return jsonify({'error': '6자리 숫자 종목 코드만 허용', 'code': code}), 400
+    if not _is_kr_code(code):
+        return jsonify({'error': '6자리 국내 종목 코드만 허용', 'code': code}), 400
 
     errors: list = []
 
@@ -18403,10 +18452,10 @@ def api_verification_stock(code):
                market_cap, week52_low, week52_high, week52_days,
                price_meta: { source, last_updated, freshness_label, ... } }
     """
-    if not code or not code.isdigit() or len(code) != 6:
+    if not _is_kr_code(code):
         return jsonify({
             'found': False,
-            'error': '6자리 숫자 종목 코드만 허용',
+            'error': '6자리 국내 종목 코드만 허용',
             'code': code,
         }), 400
 
@@ -19279,7 +19328,7 @@ def api_ops_diag_kr_universe():
             with _get_db() as conn:
                 cnt = conn.execute(
                     "SELECT COUNT(*) FROM stocks "
-                    "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                    f"WHERE code GLOB '{_KR_CODE_GLOB}'"
                 ).fetchone()[0]
                 latest = conn.execute(
                     "SELECT MAX(updated_at) FROM stocks"
@@ -19356,7 +19405,7 @@ def api_ops_recover_kr_stocks():
             with _get_db() as conn:
                 cnt = conn.execute(
                     "SELECT COUNT(*) FROM stocks "
-                    "WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+                    f"WHERE code GLOB '{_KR_CODE_GLOB}'"
                 ).fetchone()[0]
             steps.append({"step": "verify", "stocks_count_kr": cnt})
             ok = cnt > 100
@@ -19506,7 +19555,7 @@ def api_revision_for_stock(code):
     """종목 리비전 알림 조회. Query: window, metric, signal, limit(20)."""
     try:
         code = code.strip()
-        if not (code.isdigit() and len(code) == 6):
+        if not _is_kr_code(code):
             return jsonify({'error': 'invalid code'}), 400
         window = request.args.get('window', type=int)
         metric = request.args.get('metric')
@@ -19679,7 +19728,7 @@ def api_revision_history(code):
     Query: period_type, period_year, period_quarter, metric(eps), days(180)."""
     try:
         code = code.strip()
-        if not (code.isdigit() and len(code) == 6):
+        if not _is_kr_code(code):
             return jsonify({'error': 'invalid code'}), 400
         period_type = request.args.get('period_type')
         period_year = request.args.get('period_year', type=int)

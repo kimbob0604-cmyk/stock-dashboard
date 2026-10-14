@@ -18,6 +18,8 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
+
+from stock_master import is_kr_code
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -40,7 +42,7 @@ def _get_db():
 
 
 def is_kr_stock(code: str) -> bool:
-    return bool(re.fullmatch(r'\d{6}', code))
+    return is_kr_code(code)
 
 
 def _is_valid(v, max_val=1e10):

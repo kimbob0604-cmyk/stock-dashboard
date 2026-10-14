@@ -24,8 +24,9 @@ KST = timezone(timedelta(hours=9))
 # DB 컨벤션:
 #   stocks.market: KR = '' (빈 문자열), US = 'US'
 #   discover_results.market: 'kr' / 'us' / 'all' (소문자)
-#   ohlcv: market 컬럼 없음 → code GLOB '[0-9]{6}' 로 KR 식별
-KR_CODE_GLOB = "[0-9][0-9][0-9][0-9][0-9][0-9]"
+#   ohlcv: market 컬럼 없음 → code GLOB KR_CODE_GLOB 로 KR 식별
+#          (영숫자 코드 '0126Z0' 까지 — stock_master.py 참조)
+from stock_master import KR_CODE_GLOB  # noqa: E402
 
 
 # ============================================================

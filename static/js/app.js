@@ -770,7 +770,7 @@ function _modalAddFromInput(ti) {
   if (!inp) return;
   const q = inp.value.trim();
   if (!q) return;
-  if (/^\d{6}$/.test(q)) {
+  if (isKrCode(q)) {
     _modalAddStock(ti, q, q);
     inp.value = '';
     const dd = inp.closest('.mt-search-wrap')?.querySelector('.mt-search-dropdown');

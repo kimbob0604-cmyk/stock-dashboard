@@ -26,8 +26,9 @@ stock_master.py — 국내 상장 종목 마스터 (KOSPI·KOSDAQ 보통주·우
   infra      인프라펀드(맥쿼리인프라 등). 업종만.
 
 종목코드는 6자리 영숫자다. 2024년부터 '0126Z0'(삼성에피스홀딩스) 같은 코드가
-나온다 — `\\d{6}` 으로 거르면 신규 상장이 통째로 빠진다. 여섯째 자리가 '0' 이면
-보통주, 아니면(5·7·9·K·L…) 같은 앞 다섯 자리 보통주의 우선주다.
+나온다 — `\\d{6}` 이나 isdigit() 으로 거르면 신규 상장이 통째로 빠진다. 판정은
+is_kr_code()(SQL 은 KR_CODE_GLOB) 하나로 한다. 여섯째 자리가 '0' 이면 보통주,
+아니면(5·7·9·K·L…) 같은 앞 다섯 자리 보통주의 우선주다.
 """
 from __future__ import annotations
 
@@ -59,8 +60,16 @@ THEME_TYPES = ("common",)            # 테마를 직접 붙이는 유형 (우선
 TIER_THRESHOLDS = (("A", 5_000e8), ("B", 1_000e8))
 TIERS = ("A", "B", "C")
 
-CODE_RE = re.compile(r"^[0-9A-Z]{6}$")
+# 국내 종목코드 판정 — 서버·수집기가 모두 이것을 쓴다. 첫 글자는 숫자라 미국
+# 티커(NVDA·BRK.B)와 겹치지 않는다. SQLite 는 GLOB 으로 같은 판정을 한다.
+CODE_RE = re.compile(r"^[0-9][0-9A-Z]{5}$")
+KR_CODE_GLOB = "[0-9][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]"
 UNCLASSIFIED_GROUP = "unclassified"
+
+
+def is_kr_code(code) -> bool:
+    """국내 상장 종목코드인가. '005930' · '0126Z0' · '00680K' 는 참, 'NVDA' 는 거짓."""
+    return bool(CODE_RE.fullmatch(str(code or "")))
 
 
 def parent_of(code: str) -> str:
