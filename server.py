@@ -2878,6 +2878,10 @@ def _save_flow(code: str, stock_name: str, t: dict) -> dict:
     foreign_value = [f * c for f, c in zip(foreign_net, closes)]
     inst_value = [i * c for i, c in zip(inst_net, closes)]
     fetched_at = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    # 오늘 행을 KIS 로 붙였으면 '_FLOW_SRC_NAVER+kis_provisional:YYYY-MM-DD'.
+    # flow_cache 는 종목당 한 줄이라 행별 출처를 둘 칸이 없다 — 꼬리표의 날짜가
+    # 마지막 행 날짜와 같으면 그 행이 KIS 잠정치다(_flow_last_is_kis).
+    source = t.get("source") or _FLOW_SRC_NAVER
 
     result = {
         "code": code, "name": stock_name,
@@ -2888,8 +2892,12 @@ def _save_flow(code: str, stock_name: str, t: dict) -> dict:
         "foreign_value": foreign_value, "inst_value": inst_value,
         "foreign_sum_20": sum(foreign_value),
         "inst_sum_20": sum(inst_value),
-        "source": "naver_mobile_api", "fetched_at": fetched_at,
+        "source": source, "fetched_at": fetched_at,
     }
+    # 행마다 출처·잠정 여부. 오늘 행을 KIS 잠정치로 붙였으면 마지막 칸만 KIS 다.
+    if t.get("row_source"):
+        result["row_source"] = t["row_source"]
+        result["provisional"] = t.get("provisional") or []
     try:
         cache_file = BASE_DIR / "cache" / f"flow_{code}.json"
         cache_file.parent.mkdir(exist_ok=True)
@@ -2915,7 +2923,7 @@ def _save_flow(code: str, stock_name: str, t: dict) -> dict:
                      json.dumps(foreign_value, ensure_ascii=False),
                      json.dumps(inst_value, ensure_ascii=False),
                      sum(foreign_value), sum(inst_value),
-                     "naver_mobile_api", fetched_at),
+                     source, fetched_at),
                 )
                 conn.commit()
         except Exception as exc:
@@ -2923,14 +2931,251 @@ def _save_flow(code: str, stock_name: str, t: dict) -> dict:
     return result
 
 
-def _fetch_and_save_flow(code: str) -> bool:
+# ── 당일 수급: KIS 장 마감 잠정치 ─────────────────────────────────────────
+# 네이버 일별 매매동향은 당일 행이 ~18:30 에야 생긴다. 16:00 시황·수급 시그널은
+# 그래서 늘 전일 값이었다(2026-10-14 사용자: "전일 데이터가 날라온다").
+# KIS FHKST01010900(inquire-investor)은 장 마감 뒤 당일 행을 준다 — **잠정치**다
+# (시간외 거래가 끝나고 KRX 가 확정하기 전). 그 오늘 행만 네이버 시계열 끝에
+# 붙이고, 출처를 꼬리표로 남겨 메시지가 '잠정(KIS)' 이라고 적게 한다.
+#
+# 단위: KIS 는 **수량(주)** 만 쓴다. 네이버 행도 수량이고, flow_cache 의 금액
+# (foreign_value 등)은 원래부터 '수량 × 그날 종가' 근사다(_save_flow). 오늘 행도
+# 같은 식(수량 × 오늘 종가)으로 맞춰야 시계열 안에서 단위·근사 방식이 섞이지
+# 않는다 — 시그널의 억원 컷·연속일·반전이 전부 이 금액 배열을 본다.
+_FLOW_SRC_NAVER = "naver_mobile_api"
+_FLOW_KIS_MARK = "+kis_provisional:"
+_FLOW_KIS_FROM_HHMM = 1530          # 정규장 마감 전에는 붙이지 않는다(장중 부분치)
+_FLOW_KIS_MAX_CONSEC_FAIL = 5       # 연속 실패면 그 회차는 KIS 를 접는다
+
+
+def _flow_last_is_kis(source, dates) -> bool:
+    """flow_cache 한 줄의 마지막 행이 KIS 잠정치인지."""
+    return (bool(dates) and isinstance(source, str)
+            and source.endswith(_FLOW_KIS_MARK + str(dates[-1])))
+
+
+def _flow_kis_window(now: datetime | None = None) -> bool:
+    """KIS 당일 행을 붙일 시각인가 — 거래일 15:30 이후."""
+    now = now or now_kst()
+    if _is_kr_holiday(now):
+        return False
+    return now.hour * 100 + now.minute >= _FLOW_KIS_FROM_HHMM
+
+
+def _kis_investor_daily(code: str, ttl: int = 0) -> dict:
+    """kis_api.get_investor_daily 얇은 래퍼(검사 스크립트가 갈아 끼운다)."""
+    try:
+        import kis_api as _kis
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "error": f"kis_api import 실패: {exc}", "rows": []}
+    return _kis.get_investor_daily(code, ttl=ttl)
+
+
+def _merge_kis_today(t: dict, kis: dict, today_iso: str,
+                     close_fallback=None, keep: int = 20) -> bool:
+    """네이버 시계열 t(오래된→최신)에 KIS 의 **오늘** 행을 붙인다. 붙였으면 True.
+
+    - KIS 최신 행 날짜가 오늘이 아니면 안 붙인다(지어내지 않는다).
+    - 세 값(외인·기관·개인)이 모두 빈칸/0 이면 아직 집계 전으로 보고 안 붙인다.
+    - 네이버가 이미 오늘 행을 갖고 있으면 그게 확정치다 — 네이버를 남긴다.
+    - 금액용 종가는 KIS 의 stck_clpr, 없으면 close_fallback(code→종가) 값.
+      둘 다 없으면 금액을 못 만드므로 안 붙인다.
+    t 를 제자리에서 고친다. 길이는 keep(20)으로 맞춰 20일 누적의 뜻을 지킨다.
+    """
+    rows = (kis or {}).get("rows") or []
+    if not rows:
+        return False
+    top = rows[0]
+    d = str(top.get("date") or "")
+    if len(d) != 8 or f"{d[:4]}-{d[4:6]}-{d[6:]}" != today_iso:
+        return False
+    if top.get("blank"):
+        return False
+    dates = t.get("dates") or []
+    if dates and str(dates[-1]) >= today_iso:
+        return False
+    close = int(top.get("close") or 0)
+    if close <= 0 and close_fallback is not None:
+        try:
+            close = int(float(close_fallback() or 0))
+        except Exception:                                     # noqa: BLE001
+            close = 0
+    if close <= 0:
+        return False
+    n_before = len(dates)
+    indi = t.get("individual_net") or []
+    t["dates"] = list(dates) + [today_iso]
+    t["closes"] = list(t.get("closes") or []) + [close]
+    t["foreign_net"] = list(t.get("foreign_net") or []) + [int(top.get("foreign_net") or 0)]
+    t["inst_net"] = list(t.get("inst_net") or []) + [int(top.get("inst_net") or 0)]
+    if len(indi) == n_before:
+        t["individual_net"] = list(indi) + [int(top.get("retail_net") or 0)]
+    t["row_source"] = ["naver"] * n_before + ["KIS"]
+    t["provisional"] = [False] * n_before + [True]
+    if len(t["dates"]) > keep:
+        for k in ("dates", "closes", "foreign_net", "inst_net",
+                  "row_source", "provisional"):
+            t[k] = t[k][-keep:]
+        if len(t.get("individual_net") or []) > keep:
+            t["individual_net"] = t["individual_net"][-keep:]
+    t["source"] = f"{_FLOW_SRC_NAVER}{_FLOW_KIS_MARK}{today_iso}"
+    return True
+
+
+def _kis_flow_stats() -> dict:
+    return {"tried": 0, "today": 0, "not_today": 0, "fail": 0,
+            "consec_fail": 0, "first_error": None, "disabled": None}
+
+
+def _stock_close_db(code: str):
+    """stocks.close (15:35 가격 sync 값) — KIS 응답에 종가가 없을 때만 쓴다."""
+    def _f():
+        with _get_db() as conn:
+            r = conn.execute("SELECT close FROM stocks WHERE code=?", (code,)).fetchone()
+        return r["close"] if r else 0
+    return _f
+
+
+def _kis_try_today(code: str, t: dict, today_iso: str, stats: dict) -> bool:
+    """종목 하나 — KIS 를 불러 오늘 행을 t 에 붙인다. 결과는 stats 에 센다."""
+    if stats.get("disabled"):
+        return False
+    stats["tried"] += 1
+    kis = _kis_investor_daily(code, ttl=0)
+    if not kis.get("ok"):
+        stats["fail"] += 1
+        stats["consec_fail"] += 1
+        if not stats["first_error"]:
+            stats["first_error"] = f"{code}: {kis.get('error')}"
+        if kis.get("error") in ("no_key", "no_token"):
+            stats["disabled"] = kis.get("error")
+        elif stats["consec_fail"] >= _FLOW_KIS_MAX_CONSEC_FAIL:
+            stats["disabled"] = f"연속 실패 {stats['consec_fail']}회"
+        return False
+    stats["consec_fail"] = 0
+    if _merge_kis_today(t, kis, today_iso, close_fallback=_stock_close_db(code)):
+        stats["today"] += 1
+        return True
+    stats["not_today"] += 1
+    return False
+
+
+def _kis_flow_report(stats: dict, where: str) -> None:
+    """KIS 당일 수급 시도 결과를 한 줄로. 실패는 삼키지 않는다."""
+    if not stats.get("tried"):
+        return
+    if stats.get("fail") or stats.get("disabled"):
+        msg = (f"{where}: KIS 당일 수급 {stats['tried']}회 중 실패 {stats['fail']}"
+               f" — 오늘 {stats['today']} · 오늘 행 없음 {stats['not_today']}"
+               f"{' · 중단(' + str(stats['disabled']) + ')' if stats.get('disabled') else ''}"
+               f" · 첫 오류 {stats.get('first_error')}")
+        log.warning("[flow KIS] %s — 해당 종목은 네이버(전일까지)만 쓴다", msg)
+        _note_collect_error("kis_investor", msg)
+    else:
+        log.info("[flow KIS] %s: 오늘 행 %d · 아직 없음 %d (총 %d)", where,
+                 stats["today"], stats["not_today"], stats["tried"])
+
+
+def _fetch_and_save_flow(code: str, kis_stats: dict | None = None) -> bool:
     """수급 fetch → cache + flow_cache DB 갱신. cron batch 용.
-    Returns: True 성공 / False 실패."""
+
+    거래일 15:30 이후이고 네이버에 오늘 행이 없으면 KIS 오늘 행(잠정)을 붙인다.
+    kis_stats 를 넘기면(배치) 결과를 거기 세고, 안 넘기면(단건) 여기서 보고한다.
+    Returns: True 성공 / False 실패 (네이버 기준 — KIS 는 덧붙이기일 뿐)."""
     t = _fetch_naver_trend(code)
     if not t:
         return False
+    _flow_maybe_add_kis(code, t, kis_stats)
     _save_flow(code, _get_stock_name(code) or code, t)
     return True
+
+
+def _flow_maybe_add_kis(code: str, t: dict, kis_stats: dict | None = None) -> bool:
+    """거래일 15:30 이후 · 네이버에 오늘 행이 없으면 KIS 오늘 행을 t 에 붙인다.
+
+    네이버만 다시 받아 덮어쓰는 모든 경로(배치·/api/flow·/수급)가 이걸 거친다 —
+    한 곳이라도 빠지면 15:40 에 붙인 오늘 행이 화면 한 번 열 때 지워진다."""
+    now = now_kst()
+    today_iso = now.strftime("%Y-%m-%d")
+    if not _flow_kis_window(now) or (t.get("dates") and t["dates"][-1] >= today_iso):
+        return False
+    own = kis_stats is None
+    st = _kis_flow_stats() if own else kis_stats
+    merged = _kis_try_today(code, t, today_iso, st)
+    if own:
+        _kis_flow_report(st, f"수급 단건 {code}")
+    return merged
+
+
+def _flow_batch_ran_today(min_rows: int = 50) -> bool:
+    """오늘 15:30 이후에 받은 flow_cache 행이 min_rows 개 이상인가(=15:40 배치가 돌았다)."""
+    if not (_SQLITE_OK and USE_SQLITE):
+        return False
+    since = now_kst().strftime("%Y-%m-%d") + " 15:30:00"
+    try:
+        with _get_db() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM flow_cache WHERE fetched_at >= ?",
+                             (since,)).fetchone()[0]
+    except Exception:                                         # noqa: BLE001
+        return False
+    return int(n or 0) >= min_rows
+
+
+def _topup_flow_today_kis(budget_sec: float = 60.0) -> dict:
+    """16:00 발송 직전 — flow_cache 에 **오늘 행이 없는 종목만** KIS 를 한 번 더 본다.
+
+    15:40 배치 때 KIS 당일 행이 아직 안 올라왔을 수 있다(장 마감 직후 반영 시각
+    미확인). 네이버는 다시 부르지 않는다 — 18:30 전엔 어차피 전일까지다.
+    budget_sec 를 넘기면 남은 종목은 그대로 두고 돌아간다(16:00 발송을 늦추지 않게).
+    """
+    now = now_kst()
+    out = {"ok": True, "targets": 0, "merged": 0, "skipped_budget": 0}
+    if not (_SQLITE_OK and USE_SQLITE) or not _flow_kis_window(now):
+        out["ok"] = False
+        out["reason"] = "SQLite 없음 또는 KIS 시각 아님"
+        return out
+    today_iso = now.strftime("%Y-%m-%d")
+    try:
+        with _get_db() as conn:
+            rows = conn.execute(
+                "SELECT code, name, dates_json, close_json, foreign_shares_json, "
+                "inst_shares_json FROM flow_cache WHERE dates_json IS NOT NULL"
+            ).fetchall()
+    except Exception as exc:                                  # noqa: BLE001
+        _note_collect_error("kis_investor", f"16:00 보충: flow_cache 조회 실패 {exc}")
+        return {"ok": False, "error": str(exc)}
+    targets = []
+    for r in rows:
+        dts = _parse_json_list(r["dates_json"])
+        if dts and dts[-1] < today_iso:
+            targets.append((r, dts))
+    out["targets"] = len(targets)
+    t0 = time.time()
+    st = _kis_flow_stats()
+    for i, (r, dts) in enumerate(targets):
+        if time.time() - t0 > budget_sec:
+            out["skipped_budget"] = len(targets) - i
+            break
+        if st.get("disabled"):
+            break
+        t = {"dates": dts,
+             "closes": _parse_json_list(r["close_json"]),
+             "foreign_net": _parse_json_list(r["foreign_shares_json"]),
+             "inst_net": _parse_json_list(r["inst_shares_json"]),
+             "individual_net": [], "foreign_hold_ratio": None}
+        if len({len(t["dates"]), len(t["closes"]), len(t["foreign_net"]),
+                len(t["inst_net"])}) != 1:
+            continue
+        if _kis_try_today(r["code"], t, today_iso, st):
+            _save_flow(r["code"], r["name"] or r["code"], t)
+            out["merged"] += 1
+    out["elapsed_sec"] = round(time.time() - t0, 1)
+    out["kis"] = {k: st[k] for k in ("tried", "today", "not_today", "fail", "disabled")}
+    _kis_flow_report(st, "16:00 보충")
+    if out["skipped_budget"]:
+        log.warning("[flow KIS] 16:00 보충 %.0f초 상한 — %d종목은 못 보고 보낸다",
+                    budget_sec, out["skipped_budget"])
+    return out
 
 
 def _fetch_and_save_flow_legacy_unused(code: str) -> bool:
@@ -3100,8 +3345,14 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
         return {"ok": False, "error": "대상 종목 0개"}
 
     ok = 0; fail = 0
+    # KIS 당일 행(잠정)도 같은 고리에서 붙인다 — 종목당 1회, kis_api._rate_limit
+    # (초당 18회) 안. 키가 없거나 연속 실패면 그 회차는 KIS 를 접는다.
+    kis_stats = _kis_flow_stats()
     for i, code in enumerate(codes, 1):
-        if _fetch_and_save_flow(code):
+        # 15:40 배치가 16:00 을 넘기지 않게 — KIS 가 느려지면 남은 종목은 네이버만.
+        if not kis_stats.get("disabled") and time.time() - t0 > 600:
+            kis_stats["disabled"] = "배치 10분 초과"
+        if _fetch_and_save_flow(code, kis_stats=kis_stats):
             ok += 1
         else:
             fail += 1
@@ -3109,6 +3360,7 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
     elapsed = time.time() - t0
     log.info("[flow batch] %d종목 갱신 (%d 성공, %d 실패, %.1fs)",
              len(codes), ok, fail, elapsed)
+    _kis_flow_report(kis_stats, f"flow batch {len(codes)}종목")
     # 전부 실패하면 소스가 바뀐 것이다. 조용히 넘어가지 않는다.
     if codes and ok == 0:
         _note_collect_error("flow_batch",
@@ -3116,6 +3368,7 @@ def _refresh_flow_batch(top_n: int = 200) -> dict:
     return {
         "ok": True, "total": len(codes),
         "success": ok, "failed": fail,
+        "kis_today": kis_stats["today"], "kis_fail": kis_stats["fail"],
         "elapsed_sec": round(elapsed, 1),
     }
 
@@ -3192,6 +3445,7 @@ def api_flow(code: str):
                       "— /api/ops/diag/collect_errors 참조",
         }), 502
 
+    _flow_maybe_add_kis(code, t)
     return jsonify(_save_flow(code, stock_name, t))
 
 
@@ -7520,7 +7774,8 @@ def _startup():
                                id="tg_reports")
             # flow_cache 일괄 갱신 (15:40 — 가격 sync 15:35 후, 16:00 발송 전)
             # 시총 상위 200종목 외인/기관 수급 fetch → 시황·수급 시그널 신선도 확보.
-            # ~1.5분이라 16:00 전에 끝난다.
+            # 네이버(전일까지) + KIS 오늘 행(장 마감 잠정, 종목당 1회 — 2026-10-14).
+            # ~2~2.5분이라 16:00 전에 끝난다(KIS 는 배치 10분을 넘기면 접는다).
             _scheduler.add_job(lambda: _refresh_flow_batch(top_n=200), "cron",
                                day_of_week="mon-fri", hour=15, minute=40,
                                id="flow_batch", max_instances=1,
@@ -7532,8 +7787,9 @@ def _startup():
             # 투자자별 수급 확정치(KRX ~18:00 · 네이버 ~18:30)를 기다리려는
             # 것이었는데, 그 대가로 시황이 장 끝나고 세 시간 반 뒤에 왔다.
             # 수급 한 줄 때문에 나머지 전부를 늦추는 건 맞는 거래가 아니다.
-            # 16:00 수급은 전일 값이지만 오늘 값인 척 나가지 않는다 —
-            # build_market_summary 가 수급 섹션에 실제 기준일을 적는다.
+            # 16:00 수급은 KIS 오늘 행(잠정)이 붙은 종목은 오늘, 아니면 전일
+            # 값이다 — build_market_summary · alert_flow_signals 가 어느 쪽인지
+            # 기준일 문구(_flow_basis_phrase)로 적는다.
             #
             # **misfire_grace_time 을 넉넉히 준다.** 기본값은 1초라, 정각에
             # 스케줄러가 바쁘거나 막 깨어났으면 그날 발송이 통째로 날아간다.
@@ -13790,6 +14046,37 @@ _NH_LIST_MAX = {"hist": None, "w52": None, "d120": None}
 _NH_FLOW_MAX = {"hist": 0, "w52": 5, "d120": 0}
 
 
+def _flow_basis_phrase(today_iso: str, entries) -> str:
+    """수급 기준일 문구. entries = [(마지막 행 날짜, KIS 잠정 여부), ...] (종목마다 하나).
+
+    섞여 있으면 섞인 그대로 적는다 —
+      오늘 행이 KIS 잠정치   → '수급은 10/14 장 마감 잠정(KIS)'
+      오늘 행이 없는 종목     → '수급은 10/13 기준(당일 확정 전)'
+      둘 다                   → '수급은 10/14 장 마감 잠정(KIS) 3종목 · 2종목은 10/13 기준(당일 확정 전)'
+    오늘 행이 네이버 확정치뿐이면(저녁) 덧붙일 말이 없어 '' 를 돌려준다.
+    """
+    def md(d):
+        return str(d)[5:].replace("-", "/")
+    entries = list(entries)
+    kis_n = sum(1 for d, k in entries if d == today_iso and k)
+    conf_n = sum(1 for d, k in entries if d == today_iso and not k)
+    older = sorted(d for d, _ in entries if d and d < today_iso)
+    parts = []
+    if kis_n:
+        p = f"수급은 {md(today_iso)} 장 마감 잠정(KIS)"
+        if older or conf_n:
+            p += f" {kis_n}종목"
+        if conf_n:
+            p += f" · 확정 {conf_n}종목"
+        parts.append(p)
+    if older:
+        if parts or conf_n:
+            parts.append(f"{len(older)}종목은 {md(older[-1])} 기준(당일 확정 전)")
+        else:
+            parts.append(f"수급은 {md(older[-1])} 기준(당일 확정 전)")
+    return " · ".join(parts)
+
+
 def _newhigh_flow(conn, codes: list) -> tuple[dict, str | None]:
     """신고가 종목의 외국인·기관 순매수. ({코드: (외인억, 기관억)}, 최신거래일)
 
@@ -13806,7 +14093,7 @@ def _newhigh_flow(conn, codes: list) -> tuple[dict, str | None]:
     qs = ",".join("?" * len(codes))
     try:
         rows = conn.execute(
-            f"SELECT code, dates_json, foreign_value_json, inst_value_json "
+            f"SELECT code, dates_json, foreign_value_json, inst_value_json, source "
             f"FROM flow_cache WHERE code IN ({qs})", list(codes)).fetchall()
     except Exception as exc:                                  # noqa: BLE001
         log.debug("[신고가 수급] 조회 실패: %s", exc)
@@ -13824,7 +14111,8 @@ def _newhigh_flow(conn, codes: list) -> tuple[dict, str | None]:
         i_eok = iv[-1] / 1e8 if iv else None
         if f_eok is None and i_eok is None:
             continue
-        out[r["code"]] = (f_eok, i_eok, d_last)
+        # 4번째 칸: 마지막 행이 KIS 잠정치인가(머리말 기준일 문구용)
+        out[r["code"]] = (f_eok, i_eok, d_last, _flow_last_is_kis(r["source"], dts))
     return out, latest
 
 
@@ -13832,7 +14120,7 @@ def _fmt_nh_flow(entry, latest: str | None) -> str:
     """신고가 줄 뒤에 붙일 수급 한 토막. 못 받았으면 그렇게 적는다."""
     if entry is None:
         return " · <i>수급 없음</i>"
-    f_eok, i_eok, d_last = entry
+    f_eok, i_eok, d_last = entry[:3]
     def one(v):
         return "—" if v is None else f"{v:+,.0f}억"
     tail = f" · 외인 {one(f_eok)} 기관 {one(i_eok)}"
@@ -14401,6 +14689,7 @@ def build_market_summary(dry_run: bool = False,
                     # 수급을 붙인 줄들의 기준일. 오늘이 아니면 섹션 머리말이
                     # 그 사실을 적는다 — 16:00 시황에서는 대개 전일 값이다.
                     nh_flow_dates: set = set()
+                    nh_flow_entries: list = []   # (날짜, KIS 잠정?) 종목마다
                     buckets = nh["buckets"]
                     for key, label, icon in _nh.AXES:
                         got = sorted(buckets[key],
@@ -14419,6 +14708,9 @@ def build_market_summary(dry_run: bool = False,
                                 conn, [g["code"] for g in shown[:n_flow]])
                             if flow_latest:
                                 nh_flow_dates.add(flow_latest)
+                            for _e in flow_map.values():
+                                nh_flow_entries.append(
+                                    (_e[2], bool(_e[3]) if len(_e) > 3 else False))
                         items = []
                         for i, g in enumerate(shown):
                             line = (f"  {g['name']} {(g['change_pct'] or 0):+.1f}%"
@@ -14448,15 +14740,14 @@ def build_market_summary(dry_run: bool = False,
                                for it in sub["items"]):
                             basis += (f" · 시총 <b>*</b> 는 {_CAP_STALE_DAYS}일 넘게 "
                                       f"갱신되지 않은 값")
-                        # 수급이 오늘 것이 아니면 반드시 적는다. 당일 확정치는
-                        # 장마감 후 한참 뒤에 나오므로 16:00 시황에서는 대개
-                        # 전일 값이다 — 그걸 오늘 값인 척 두면 안 된다.
+                        # 수급이 오늘 확정치가 아니면 반드시 적는다. 16:00 에는
+                        # 오늘 행이 KIS 장 마감 잠정치이거나(15:40 배치가 붙임)
+                        # 아직 전일 값이다 — 섞여 있으면 섞인 그대로
+                        # (_flow_basis_phrase). 오늘 값인 척 두면 안 된다.
                         _today_ymd = now_kst().strftime("%Y-%m-%d")
-                        _stale_flow = sorted(d for d in nh_flow_dates
-                                             if d != _today_ymd)
-                        if _stale_flow:
-                            _d = _stale_flow[-1][5:].replace("-", "/")
-                            basis += f" · 수급은 {_d} 기준(당일 확정 전)"
+                        _fb = _flow_basis_phrase(_today_ymd, nh_flow_entries)
+                        if _fb:
+                            basis += f" · {_fb}"
                         nh_section["items"] = [basis + "</i>"]
                     else:
                         # 없다는 말도 무엇을 훑고 없는지 밝힌다 — 절반만 훑고
@@ -14493,7 +14784,8 @@ def build_market_summary(dry_run: bool = False,
                 rows = conn.execute("""
                     SELECT f.code AS code,
                            COALESCE(NULLIF(s.name, ''), NULLIF(f.name, ''), f.code) AS name,
-                           f.dates_json, f.foreign_value_json, f.inst_value_json
+                           f.dates_json, f.foreign_value_json, f.inst_value_json,
+                           f.source AS source
                     FROM flow_cache f
                     LEFT JOIN stocks s ON s.code = f.code
                     WHERE f.foreign_value_json IS NOT NULL
@@ -14517,7 +14809,8 @@ def build_market_summary(dry_run: bool = False,
                     if latest_date is None or d_last > latest_date:
                         latest_date = d_last
                     parsed.append({"code": r["code"], "name": name,
-                                   "d_last": d_last, "fv": fv, "iv": iv})
+                                   "d_last": d_last, "fv": fv, "iv": iv,
+                                   "kis": _flow_last_is_kis(r["source"], dts)})
 
                 foreign_today: list = []
                 inst_today: list = []
@@ -14532,7 +14825,24 @@ def build_market_summary(dry_run: bool = False,
 
                 # 라벨용 날짜 문구: 당일이면 "오늘", 아니면 "MM/DD 기준"
                 today_kst_ymd = now_kst().strftime("%Y-%m-%d")
-                if latest_date and latest_date != today_kst_ymd:
+                _kis_today_n = sum(1 for p in parsed
+                                   if p["d_last"] == today_kst_ymd and p["kis"])
+                if latest_date == today_kst_ymd and _kis_today_n:
+                    # 오늘 행이 KIS 장 마감 잠정치다(15:40 배치). 섞여 있으면
+                    # 섞인 그대로 — 오늘 행이 없는 종목은 TOP 5 에서 빠진다.
+                    _all_kis = all(p["kis"] for p in parsed
+                                   if p["d_last"] == today_kst_ymd)
+                    date_lbl = "오늘 잠정(KIS)" if _all_kis else "오늘 · 일부 잠정(KIS)"
+                    _fb = _flow_basis_phrase(today_kst_ymd,
+                                             [(p["d_last"], p["kis"]) for p in parsed])
+                    _n_old = sum(1 for p in parsed if p["d_last"] < today_kst_ymd)
+                    flow_section["subsections"].append({
+                        "subtitle": "ℹ️ 투자자 매매 동향",
+                        "items": [f"  {_fb} — 저녁 확정치와 다를 수 있음"
+                                  + (f" · 오늘 행 없는 {_n_old}종목은 TOP 5 에서 제외"
+                                     if _n_old else "")]
+                    })
+                elif latest_date and latest_date != today_kst_ymd:
                     _d = latest_date[5:].replace("-", "/")
                     date_lbl = f"{_d} 기준"
                     flow_section["subsections"].append({
@@ -15164,8 +15474,10 @@ def _send_closing_market_summary(*, catchup: bool = False,
     19:00 으로 미뤄 뒀었는데, 그 대가로 시황이 장 끝나고 세 시간 반 뒤에 왔다.
     수급 한 줄 때문에 나머지 전부를 늦추는 것이 맞는 거래가 아니다.
 
-    조용히 전일 값을 오늘 값인 척 내보내지는 않는다 — `build_market_summary` 가
-    수급 최신일이 오늘이 아니면 섹션에 그 날짜를 적는다(12930행 근처).
+    2026-10-14 부터는 15:40 배치가 KIS(FHKST01010900)의 **오늘 장 마감 잠정치**를
+    네이버 시계열 끝에 붙인다. 그때 못 받은 종목은 아래 2) 에서 60초 안에서 한 번
+    더 본다. 잠정치는 '잠정(KIS)' 으로, 끝내 못 받은 종목은 전일 기준일로 적는다
+    (`_flow_basis_phrase`). 조용히 전일 값을 오늘 값인 척 내보내지는 않는다.
     수급 확정치를 보려면 `/시황` 을 저녁에 한 번 더 부르면 된다.
 
     기다리지 않는 이유도 같다. 예전 코드는 당일 수급이 뜰 때까지 10분씩 세 번
@@ -15213,10 +15525,17 @@ def _send_closing_market_summary(*, catchup: bool = False,
     except Exception as exc:                                  # noqa: BLE001
         log.warning("[장마감시황] 가격 갱신 실패: %s", exc)
 
-    # 2) 수급 갱신 한 번. 당일치가 없으면 없는 대로 간다 — 위 설명 참고.
+    # 2) 수급. 15:40 배치가 오늘 돌았으면 네이버는 다시 긁지 않는다(18:30 전엔
+    #    어차피 전일까지) — 오늘 행이 빠진 종목만 KIS 를 60초 안에서 한 번 더
+    #    본다. 배치가 안 돌았으면(잠들어 있었음) 예전처럼 전체를 한 번 받는다.
+    #    당일치가 끝내 없으면 없는 대로 간다 — 위 설명 참고.
     try:
-        r = _refresh_flow_batch(top_n=200)
-        log.info("[장마감시황] 수급 갱신: %s", r)
+        if _flow_batch_ran_today():
+            r = _topup_flow_today_kis(budget_sec=60.0)
+            log.info("[장마감시황] 수급 KIS 보충: %s", r)
+        else:
+            r = _refresh_flow_batch(top_n=200)
+            log.info("[장마감시황] 수급 갱신: %s", r)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("[장마감시황] 수급 갱신 실패: %s", exc)
 
@@ -15744,7 +16063,8 @@ def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
             rows = conn.execute("""
                 SELECT f.code AS code,
                        COALESCE(NULLIF(s.name,''), NULLIF(f.name,''), f.code) AS name,
-                       f.dates_json, f.foreign_value_json, f.inst_value_json
+                       f.dates_json, f.foreign_value_json, f.inst_value_json,
+                       f.source AS source
                 FROM flow_cache f
                 LEFT JOIN stocks s ON s.code = f.code
                 WHERE f.foreign_value_json IS NOT NULL
@@ -15765,7 +16085,8 @@ def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
         if latest_date is None or dts[-1] > latest_date:
             latest_date = dts[-1]
         parsed.append({"code": r["code"], "name": name,
-                       "dts": dts, "fv": fv, "iv": iv})
+                       "dts": dts, "fv": fv, "iv": iv,
+                       "kis": _flow_last_is_kis(r["source"], dts)})
 
     thr = min_eok * 1e8  # 억 → 원
     cand: list = []
@@ -15811,9 +16132,14 @@ def _analyze_flow_signals(min_eok: float = 50.0, streak_min: int = 3) -> dict:
             reversal.append(c)
     reversal = sorted(reversal, key=lambda c: c["f_raw"], reverse=True)[:5]
 
+    # 기준일 문구용 — 최신일 행이 KIS 잠정치인 종목 수, 최신일에 못 미쳐 빠진 종목.
+    kis_n = sum(1 for p in parsed if p["dts"][-1] == latest_date and p["kis"])
+    behind = sorted(p["dts"][-1] for p in parsed if p["dts"][-1] != latest_date)
     return {"date": latest_date, "dual_buy": dual_buy, "dual_sell": dual_sell,
             "streak_buy": streak_buy, "streak_sell": streak_sell,
-            "reversal": reversal}
+            "reversal": reversal,
+            "kis_n": kis_n, "n": len(cand),
+            "behind_n": len(behind), "behind_date": behind[-1] if behind else None}
 
 
 # 정기(16:00) 수급 시그널이 마지막으로 보낸 기준일. 같은 기준일을 이틀 보내지 않는다.
@@ -15847,7 +16173,19 @@ def alert_flow_signals(*, scheduled: bool = False) -> bool:
         return True
     date_lbl = sig["date"][5:].replace("-", "/")
     _now = now_kst()
-    if sig["date"] == _now.strftime("%Y-%m-%d"):
+    if sig["date"] == _now.strftime("%Y-%m-%d") and sig.get("kis_n"):
+        # 오늘 행을 KIS 장 마감 잠정치로 붙였다(15:40 배치 · 16:00 보충).
+        # 오늘 행을 못 받은 종목은 시그널에서 빠졌다 — 그것도 적는다.
+        basis = (f"<i>기준일 {date_lbl}(오늘) — 수급은 {date_lbl} 장 마감 잠정(KIS), "
+                 f"저녁 확정치와 다를 수 있음")
+        if sig.get("n") and sig["kis_n"] < sig["n"]:
+            basis += f" · KIS {sig['kis_n']}종목 · 확정 {sig['n'] - sig['kis_n']}종목"
+        if sig.get("behind_n"):
+            _bd = str(sig.get("behind_date") or "")[5:].replace("-", "/")
+            basis += (f" · {sig['behind_n']}종목은 {_bd} 기준(당일 확정 전)이라 "
+                      f"이번 시그널에서 제외")
+        basis += "</i>"
+    elif sig["date"] == _now.strftime("%Y-%m-%d"):
         # 네이버 확정 반영이 ~18:30 이다. 그 전의 오늘 값은 잠정치다.
         basis = (f"<i>기준일 {date_lbl}(오늘) — 장 마감 직후 잠정치, "
                  f"저녁 확정치와 다를 수 있음</i>"
