@@ -9,6 +9,7 @@
 종료코드: 0 = 핵심 계열 전부 살아 있음, 1 = 하나라도 비었음
 """
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -16,6 +17,8 @@ import urllib.request
 BASE = (sys.argv[1] if len(sys.argv) > 1
         else "https://stock-dashboard-kc23.onrender.com").rstrip("/")
 FAILS = []
+# 운영 경로(POST)는 X-Ops-Token 을 요구한다. 러너에서는 시크릿 OPS_TOKEN.
+OPS_TOKEN = os.environ.get("OPS_TOKEN") or ""
 
 
 def get(path, timeout=90):
@@ -133,11 +136,15 @@ def wait_for_data_json(max_min=12):
         if d.get("source") == "server" and (d.get("themes") or 0) >= 20:
             print("  서버 생성본 확인")
             return True
+        if not poked and not d.get("build_in_progress") and not OPS_TOKEN:
+            poked = True
+            print("      rebuild → 건너뜀 (OPS_TOKEN 없음 — 운영 토큰이 필요한 경로)")
         if not poked and not d.get("build_in_progress"):
             poked = True
             try:
                 req = urllib.request.Request(
-                    BASE + "/api/ops/data_json/rebuild", method="POST")
+                    BASE + "/api/ops/data_json/rebuild", method="POST",
+                    headers={"X-Ops-Token": OPS_TOKEN})
                 with urllib.request.urlopen(req, timeout=240) as r:
                     print(f"      rebuild → {r.read().decode('utf-8')[:200]}")
             except Exception as e:

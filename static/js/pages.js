@@ -3868,8 +3868,14 @@ async function _runAgent() {
   if (btn) { btn.textContent = '실행 중...'; btn.disabled = true; }
   const mkt = _agentMarket || 'kr';
   try {
-    await fetch(`/api/agent/run?market=${mkt}`, { method: 'POST' });
-  } catch {}
+    const r = await opsFetch(`/api/agent/run?market=${mkt}`, { method: 'POST' });
+    const authErr = opsAuthError(r);
+    if (authErr) throw new Error(authErr);
+  } catch (e) {
+    alert((e && e.message) || '실행 요청 실패');
+    if (btn) { btn.textContent = '🚀 다시 실행'; btn.disabled = false; }
+    return;
+  }
   const poll = setInterval(async () => {
     try {
       const s = await fetch('/api/agent/status').then(r => r.json());
@@ -8832,8 +8838,10 @@ async function renderOpsCronPlaceholder() {
           ev.target.disabled = true;
           ev.target.textContent = '실행 중…';
           try {
-            const rr = await fetch(`/api/ops/cron/trigger/${encodeURIComponent(id)}`,
-                                   { method: 'POST' });
+            const rr = await opsFetch(`/api/ops/cron/trigger/${encodeURIComponent(id)}`,
+                                      { method: 'POST' });
+            const authErr = opsAuthError(rr);
+            if (authErr) throw new Error(authErr);
             const jd = await rr.json();
             if (jd.ok) {
               ev.target.textContent = '✓ 발행';
@@ -8845,7 +8853,7 @@ async function renderOpsCronPlaceholder() {
               ev.target.textContent = '즉시 실행';
             }
           } catch (e) {
-            alert('네트워크 오류');
+            alert((e && e.message) || '네트워크 오류');
             ev.target.disabled = false;
             ev.target.textContent = '즉시 실행';
           }
