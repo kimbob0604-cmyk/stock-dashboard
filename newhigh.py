@@ -94,10 +94,13 @@ AXES = (("hist", "역사적", "🏔"), ("w52", "52주", "📈"), ("d120", "120�
 BASIS_TEXT = ("종가 기준 · 오늘 종가 vs 전 거래일까지 · 역사적=상장 이후 · "
               "52주=달력 52주 · 120일=120거래일")
 
-# 판정 모집단 — ETF 아님·시총 하한 이상·오늘 거래됨·1,000원 이상.
+# 판정 모집단 — 코스피·코스닥, ETF·ETN·스팩 아님, 시총 하한 이상(지금 0 — 전 종목), 오늘 거래됨.
+# 2026-10-29: 1,000원 미만 종목도 넣는다(전 종목 — 사용자 결정). 스팩은 2,000원 근처에 묶여
+# 신고가가 뜻이 없어 이름으로 뺀다(ohlcv_autofill.is_spac 와 같은 규칙).
 UNIVERSE_WHERE = """(s.market = '' OR s.market LIKE 'KOS%')
                   AND COALESCE(s.is_etf, 0) = 0
-                  AND s.close >= 1000 AND s.change_pct IS NOT NULL
+                  AND COALESCE(s.name, '') NOT LIKE '%스팩%'
+                  AND s.close > 0 AND s.change_pct IS NOT NULL
                   AND COALESCE(s.volume_mn, 0) > 0
                   AND COALESCE(s.market_cap, 0) >= :min_cap"""
 

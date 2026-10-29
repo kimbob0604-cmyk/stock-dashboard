@@ -4,8 +4,8 @@ ohlcv_autofill 은 server.py 를 import 하지 않으므로 이 모듈은 **그�
 한다(check_brief_sections.py 처럼 소스를 떼어 올 필요가 없다). 소스는 가짜로
 갈아 끼우고, 못 박는 것은 다음과 같다.
 
-  1. 대상은 **ETF 를 뺀 시총 하한 이상 전 종목** — 상위 N 으로 자르지 않는다.
-     하한 미달·ETF·6자리 아닌 코드는 뺀다. 단위는 원(1,000억 = 1e11).
+  1. 대상은 **ETF·ETN·스팩을 뺀 전 종목**(2026-10-29 시총 하한 0) — 상위 N 으로
+     자르지 않는다. ETF·스팩·시총 0·6자리 아닌 코드는 뺀다. 단위는 원.
   2. 첫 소스가 죽으면 다음 소스로 넘어간다. 둘 다 죽으면 **실패로 센다.**
   3. 받은 행이 ohlcv 에 실제로 들어간다. 다시 돌려도 중복이 안 생긴다.
   4. 네이버 응답 파싱 — 날짜 형식(YYYYMMDD → YYYY-MM-DD), 깨진 행은 버린다.
@@ -41,9 +41,10 @@ def want(cond, why):
 # ── 1. 대상 고르기 — ETF 를 뺀 시총 하한 이상 **전 종목** ──────────────
 # 예전 규칙은 거래대금 상위 300 이었다. ETF 가 상위를 차지해 실제 판정 대상
 # 주식은 222종목뿐이었고, 시총 1,000억 이상인데 거래대금 순위 밖인 종목의
-# 신고가를 통째로 놓쳤다. 지금 규칙은 하나다 — 시총이 하한 이상이면 전부.
-want(oa.MIN_MARKET_CAP_WON == 100_000_000_000,
-     f'판정 하한이 1,000억(원)이 아니다: {oa.MIN_MARKET_CAP_WON}')
+# 신고가를 통째로 놓쳤다. 이어 시총 1,000억 하한도 코스닥 중소형주 신고가를
+# 놓쳐(2026-10-29) 없앴다 — 지금 규칙은 ETF·ETN·스팩이 아니면 전부.
+want(oa.MIN_MARKET_CAP_WON == 0,
+     f'판정 하한이 0(전 종목)이 아니다: {oa.MIN_MARKET_CAP_WON}')
 want(oa.FILL_MIN_CAP_WON <= oa.MIN_MARKET_CAP_WON,
      '받아 두는 하한이 판정 하한보다 높다 — 판정 대상 일부가 일봉 없이 남는다')
 want(not hasattr(oa, 'UNIVERSE_TOP_N'), '상위 N 자르기가 아직 남아 있다')
@@ -52,8 +53,9 @@ EOK = 100_000_000                                  # 1억(원)
 SEED = {'stocks': {
     '005930': {'name': '삼성전자', 'market_cap': 3_000_000 * EOK},
     '000660': {'name': 'SK하이닉스', 'market_cap': 2_000_000 * EOK},
-    '111111': {'name': '딱천억', 'market_cap': 1_000 * EOK},       # 경계 — 포함
-    '222222': {'name': '구백구십구억', 'market_cap': 999 * EOK},   # 미달 — 빠져야
+    '111111': {'name': '딱천억', 'market_cap': 1_000 * EOK},       # 옛 경계 — 포함
+    '222222': {'name': '구백구십구억', 'market_cap': 999 * EOK},   # 옛 미달 — 이제 포함
+    '777777': {'name': '하나머스트9호스팩', 'market_cap': 100 * EOK},  # 스팩 — 빠져야
     '069500': {'name': 'KODEX 200', 'market_cap': 100_000 * EOK},  # ETF — 빠져야
     '138930': {'name': 'BNK금융지주', 'market_cap': 30_000 * EOK}, # 'BNK ' 아님 — 남아야
     '333333': {'name': '작은회사', 'market_cap': 0},                # 시총 0 — 빠져야
@@ -67,11 +69,13 @@ def is_etf(name):                    # server.py _is_etf_name 을 흉내 — 이
 
 codes, basis = oa.select_universe(min_cap=oa.MIN_MARKET_CAP_WON,
                                   load_universe=lambda: SEED, is_etf=is_etf)
-want(codes == ['005930', '000660', '138930', '111111'],
+want(codes == ['005930', '000660', '138930', '111111', '222222'],
      f'대상이 시총 순 전 종목이 아니거나 필터가 샌다: {codes}')
 want(basis == 'market_cap', f'고른 기준을 잘못 말한다: {basis}')
 want('069500' not in codes, 'ETF 가 대상에 들어갔다')
-want('222222' not in codes, '하한 미달이 대상에 들어갔다')
+want('777777' not in codes, '스팩이 대상에 들어갔다')
+want('333333' not in codes, '시총 0 이 대상에 들어갔다')
+want('222222' in codes, '1,000억 미만이 빠졌다 — 하한이 아직 걸려 있다')
 
 # 상위 N 으로 자르지 않는다 — 하한 이상이 많으면 많은 만큼 다 받는다.
 MANY = {'stocks': {f'{i:06d}': {'name': f'회사{i}', 'market_cap': (2_000 + i) * EOK}
@@ -79,9 +83,9 @@ MANY = {'stocks': {f'{i:06d}': {'name': f'회사{i}', 'market_cap': (2_000 + i) 
 many = oa.universe_codes(min_cap=oa.MIN_MARKET_CAP_WON, load_universe=lambda: MANY)
 want(len(many) == 1200, f'하한 이상 1,200종목 중 {len(many)}종목만 골랐다 — 잘랐다')
 
-# 기본값은 받아 두는 하한(800억) — 1,000억 경계 아래 종목도 미리 받는다.
+# 기본값은 받아 두는 하한(판정 하한의 80% — 지금 0) — 판정 대상을 다 덮는다.
 dflt = oa.universe_codes(load_universe=lambda: SEED, is_etf=is_etf)
-want('222222' in dflt, f'기본 대상이 판정 하한에 딱 맞춰져 경계 종목을 미리 안 받는다: {dflt}')
+want(set(codes) <= set(dflt), f'기본 대상이 판정 대상을 다 덮지 않는다: {dflt}')
 
 want(oa.universe_codes(load_universe=lambda: {}) == [],
      '유니버스가 비었는데 대상을 만들어 냈다')
@@ -124,17 +128,21 @@ if _seed_path.exists():
     expect = sorted(c for c, v in _stk.items()
                     if oa.is_kr_code(c)
                     and (v.get('market_cap') or 0) >= oa.MIN_MARKET_CAP_WON
+                    and (v.get('market_cap') or 0) > 0
                     and not real_is_etf(v.get('name'))
+                    and '스팩' not in (v.get('name') or '')
                     and '기타' not in (v.get('sectors') or []))
     SEED_TARGET = len(real_codes)
     SEED_FILL = len(oa.universe_codes(load_universe=lambda: _seed,
                                       is_etf=real_is_etf))
     want(sorted(real_codes) == expect,
-         f'시드에서 고른 대상이 규칙(ETF 아님·시총 1,000억 이상 전부)과 다르다 '
+         f'시드에서 고른 대상이 규칙(ETF·스팩 아님·시총 있는 전부)과 다르다 '
          f'({len(real_codes)} vs {len(expect)})')
     want(real_basis == 'market_cap', f'시드 기준이 market_cap 이 아니다: {real_basis}')
-    want(len(real_codes) > 1000,
-         f'시드에서 대상이 {len(real_codes)}종목뿐이다 — 1,000억 이상이 그보다 많다')
+    want(len(real_codes) > 2000,
+         f'시드에서 대상이 {len(real_codes)}종목뿐이다 — 코스피·코스닥 전 종목이 그보다 많다')
+    spac_in = [c for c in real_codes if oa.is_spac(_stk[c].get('name'))]
+    want(not spac_in, f'스팩이 대상에 섞였다: {spac_in[:5]}')
     etf_in = [c for c in real_codes if real_is_etf(_stk[c].get('name'))]
     want(not etf_in, f'ETF 가 대상에 섞였다: {etf_in[:5]}')
     want('069500' not in real_codes, 'KODEX 200 이 대상에 들어갔다')
@@ -148,8 +156,10 @@ inj, inj_basis = oa.select_universe(
     min_cap=oa.MIN_MARKET_CAP_WON, load_universe=lambda: SEED,
     load_ranked=lambda: ('market_cap', [(1_500 * EOK, '444444'),
                                         (9_000 * EOK, '555555'),
-                                        (500 * EOK, '666666')]))
-want(inj == ['555555', '444444'], f'주입 목록을 안 쓰거나 하한을 안 건다: {inj}')
+                                        (500 * EOK, '666666'),
+                                        (0, '888888')]))
+want(inj == ['555555', '444444', '666666'],
+     f'주입 목록을 안 쓰거나 시총 0 을 안 거른다: {inj}')
 want(inj_basis == 'market_cap', f'주입 기준을 잘못 말한다: {inj_basis}')
 
 # 주입이 비면 유니버스로 넘어간다 — 빈손으로 끝내지 않는다.
@@ -316,15 +326,16 @@ want(parse_with("[]") == [], '빈 응답에서 행을 만들었다')
 
 
 # ── 6. 시황에 실릴 범위 문구 ──────────────────────────────────────────────
-# 모집단(시총 1,000억 이상)과 실제로 훑은 수를 같이 적는다. 다 못 훑었으면
+# 모집단(코스피·코스닥 전 종목)과 실제로 훑은 수를 같이 적는다. 다 못 훑었으면
 # 빠진 수까지 — '대상' 이라는 말로 전부 본 척하지 않는다.
 full_note = oa.coverage_note(1052, 1052)
 part_note = oa.coverage_note(600, 1052)
-want(full_note == '시총 1,000억 이상 1,052종목 대상', f'다 훑었을 때 문구: {full_note}')
-want(part_note == '시총 1,000억 이상 1,052종목 중 600종목 대상 · 일봉 미수집 452종목',
+want(full_note == f'{oa.UNIVERSE_LABEL} 1,052종목 대상', f'다 훑었을 때 문구: {full_note}')
+want(part_note == f'{oa.UNIVERSE_LABEL} 1,052종목 중 600종목 대상 · 일봉 미수집 452종목',
      f'덜 훑었을 때 문구가 빠진 수를 안 밝힌다: {part_note}')
-want('전체' not in full_note and '전 종목' not in full_note,
-     f'다 훑었다고 더 센 말을 쓴다: {full_note}')
+want('시총' not in full_note, f'하한이 없는데 시총 하한을 말한다: {full_note}')
+want('ETF' in oa.UNIVERSE_LABEL and '스팩' in oa.UNIVERSE_LABEL,
+     f'무엇을 뺐는지 문구가 안 밝힌다: {oa.UNIVERSE_LABEL}')
 want('거래대금' not in part_note, '시총으로 골라 놓고 거래대금이라고 말한다')
 want(oa.coverage_note(222) == '222종목 대상', '모집단을 모를 때 판정 수만 적지 않는다')
 _sn = re.search(r'def _ohlcv_scope_note\(.*?(?=\ndef )', SRC, re.S)
@@ -522,8 +533,8 @@ if _send:
     want('backup_db' in blk,
          '발송 표시를 즉시 백업하지 않는다 — 재배포하면 같은 시황이 또 나간다')
 
-print(f"시드 기준 대상: 시총 {oa.MIN_MARKET_CAP_LABEL} 이상 {SEED_TARGET:,}종목 "
-      f"(받아 두는 800억 이상 {SEED_FILL:,}종목) · 파싱 {len(rows)}행 · "
+print(f"시드 기준 대상: {oa.UNIVERSE_LABEL} {SEED_TARGET:,}종목 "
+      f"(받아 두는 대상 {SEED_FILL:,}종목) · 파싱 {len(rows)}행 · "
       f"증분·소스 폴백·차단 멈춤 확인")
 print('통과' if ok else '실패')
 sys.exit(0 if ok else 1)
