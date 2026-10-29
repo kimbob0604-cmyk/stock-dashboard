@@ -6,7 +6,8 @@ server.py 는 Flask 앱이라 import 하지 않는다. 판정은 newhigh.py 로 
 실제 코드가 갈라질 틈이 없다).
 
 정의(2026-10-08): 120일 = 120 거래일(KRX 달력), 52주 = 달력 52주(오늘 − 364일
-≤ 날짜 < 오늘), 역사적 = 상장 이후 전체. 종가 기준. hist > w52 > d120.
+≤ 날짜 < 오늘), 역사적 = 상장 이후 전체. 종가 기준. hist > w52 > d120 > d60.
+60일 = 60 거래일(2026-10-29 추가).
 
 모집단은 ETF 를 뺀 **시총 1,000억 이상**이다(ohlcv_autofill.MIN_MARKET_CAP_WON,
 원 단위). 모집단 수(universe_n)를 같은 조건으로 따로 센다 — 일봉이 없어 못 본
@@ -49,7 +50,7 @@ blk = SRC[SRC.index('# ── 5-2. 신고가'):SRC.index('# ── 6. 수급')]
 assert '_nh.compute(' in blk, 'server.py 시황이 newhigh.compute 를 안 쓴다'
 assert 'first_day' not in blk and '역사적=일봉' not in blk, "'역사적=일봉 YYYY-MM-DD~' 표기가 남아 있다"
 assert 'LIMIT 252' not in blk and 'days[59]' not in blk, '옛 전역 DISTINCT 날짜 창이 남아 있다'
-assert 'd60' not in blk and '60일' not in blk, '60일 축이 남아 있다'
+assert 'for key, label, icon in _nh.AXES' in blk, '소제목을 newhigh.AXES 로 만들지 않는다'
 
 conn = sqlite3.connect(':memory:')
 conn.row_factory = sqlite3.Row
@@ -193,8 +194,7 @@ want(cached.get('000011') == 50000, f'옛고점의 상장 이후 최고가 표�
 want(res['hist_pending'] == [], f"보류가 생겼다: {res['hist_pending']}")
 line = nh.basis_line(note, res)
 print('기준 줄:', line)
-want('역사적=상장 이후' in line and '52주=달력 52주' in line and '120일=120거래일' in line,
-     f'기준 줄이 세 창을 안 밝힌다: {line}')
+want(line == f'{note} · 종가 기준', f"기준 줄이 '… 대상 · 종가 기준' 이 아니다: {line}")
 want(not re.search(r'\d{4}-\d{2}-\d{2}~', line), f'기준 줄에 특정일이 남았다: {line}')
 print('\n통과' if ok else '\n실패')
 sys.exit(0 if ok else 1)

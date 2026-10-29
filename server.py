@@ -11668,9 +11668,10 @@ def _prewarm_newhigh_hist() -> dict | None:
         with _get_db() as conn:
             r = _nh.compute(conn, now.strftime("%Y-%m-%d"), _oa.MIN_MARKET_CAP_WON,
                             budget_s=_nh.HIST_BUDGET_PREWARM_S)
-        log.info("[신고가 프리워밍] 역사적 %d · 52주 %d · 120일 %d · 보류 %d%s",
+        log.info("[신고가 프리워밍] 역사적 %d · 52주 %d · 120일 %d · 60일 %d · 보류 %d%s",
                  len(r["buckets"]["hist"]), len(r["buckets"]["w52"]),
-                 len(r["buckets"]["d120"]), len(r["hist_pending"]),
+                 len(r["buckets"]["d120"]), len(r["buckets"]["d60"]),
+                 len(r["hist_pending"]),
                  f" · {r['error']}" if r["error"] else "")
         return r
     except Exception as exc:                               # noqa: BLE001
@@ -14024,11 +14025,11 @@ _CAP_STALE_DAYS = 7
 
 # 신고가 등급별로 메시지에 몇 종목까지 이름을 적는가. None = 전 종목.
 #
-# **세 등급 모두 전부 적는다.** 사용자가 이 메시지를 읽는 이유가 종목 이름이고,
+# **모든 등급을 전부 적는다.** 사용자가 이 메시지를 읽는 이유가 종목 이름이고,
 # '외 N종목' 으로 접으면 접힌 쪽을 확인할 방법이 메시지 안에 없다.
 #
 # 60일만 5종목으로 접어 뒀다가 2026-09-18 에 풀었다(60일 축은 2026-10-08 에
-# 120일로 바뀌었다 — newhigh.py). 접은 이유는 '등급이 가장
+# 120일로 바뀌었다가 2026-10-29 에 따로 되살렸다 — newhigh.py). 접은 이유는 '등급이 가장
 # 낮아 하루에 수백 종목이 설 수 있다' 였는데, 그건 길이 걱정이었지 내용 판단이
 # 아니었다. 길이는 `_split_telegram_lines` 가 줄 경계에서 나눠 조각 번호를 붙여
 # 보내므로 이미 해결돼 있다 — 줄이 잘리지도, 종목이 사라지지도 않는다.
@@ -14037,7 +14038,7 @@ _CAP_STALE_DAYS = 7
 #
 # 다시 접고 싶으면 그 등급에 숫자를 넣으면 된다. 접기 코드는 그대로 살아 있고
 # (`cap_n is None` 분기), 검사도 두 경우를 다 돌린다.
-_NH_LIST_MAX = {"hist": None, "w52": None, "d120": None}
+_NH_LIST_MAX = {"hist": None, "w52": None, "d120": None, "d60": None}
 
 
 # 신고가 등급별로 **상위 몇 종목에 수급을 붙이는가.** 0 = 안 붙인다.
@@ -14048,7 +14049,7 @@ _NH_LIST_MAX = {"hist": None, "w52": None, "d120": None}
 #
 # '상위' 는 목록과 같은 기준, 즉 거래대금 순이다. 다른 기준으로 자르면 화면의
 # 1~5번째 줄과 수급이 붙은 줄이 어긋난다.
-_NH_FLOW_MAX = {"hist": 0, "w52": 5, "d120": 0}
+_NH_FLOW_MAX = {"hist": 0, "w52": 5, "d120": 0, "d60": 0}
 
 
 def _flow_basis_phrase(today_iso: str, entries) -> str:
@@ -14655,8 +14656,8 @@ def build_market_summary(dry_run: bool = False,
     # '등락률 마이너스인데 신고가' 가 나온다. 신고가 보드(ETF-Traker)도 종가 기준
     # (board/config/settings.yaml default_basis: close)이라 두 화면이 같은 말을 한다.
     #
-    # 한 종목은 가장 센 줄에만 담는다(hist > w52 > d120). 역사적 신고가면 52주·
-    # 120일도 당연히 뚫은 것이라, 안 가르면 세 줄에 같은 이름이 겹쳐 나온다.
+    # 한 종목은 가장 센 줄에만 담는다(hist > w52 > d120 > d60). 역사적 신고가면
+    # 52주·120일·60일도 당연히 뚫은 것이라, 안 가르면 여러 줄에 같은 이름이 겹친다.
     #
     # 오늘 거래가 없던 종목(volume_mn=0)은 뺀다. 체결이 없으면 종가가 어제
     # 그대로라 '오늘 신고가' 라고 부를 것이 없다.
@@ -14736,7 +14737,8 @@ def build_market_summary(dry_run: bool = False,
                         # 그중 일봉이 없는 종목은 판정하지 못했다. 안 적으면
                         # "신고가 3종목" 을 전 종목 기준으로 읽는다.
                         # '받아 둔 일봉 첫날 이후' 같은 특정일은 적지 않는다 —
-                        # 세 창 모두 판정일 기준이다(newhigh.BASIS_TEXT).
+                        # 창 모두 판정일 기준이다. 창의 뜻은 기준 줄에 안 적는다
+                        # (2026-10-29 — '… 대상 · 종가 기준' 만, newhigh.BASIS_TEXT).
                         basis = "  <i>" + _nh.basis_line(scope, nh)
                         # `*` 를 쓴 줄이 하나라도 있으면 그 뜻을 여기서 밝힌다.
                         # 범례 없는 기호는 읽는 사람에게 오타로 보인다.

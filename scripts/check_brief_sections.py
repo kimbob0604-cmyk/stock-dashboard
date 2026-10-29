@@ -50,7 +50,8 @@ _NH_RES = {'windows': {'prev_day': '2026-09-14'}, 'last_bar': '2026-09-14',
            'hist_pending': []}
 _counts = {'hist': (2, ['  삼성전자 +3.5% — 반도체']),
            'w52': (5, ['  B +2.0% — 은행']),
-           'd120': (9, ['  C +1.0% — 화학', '  … 외 4종목'])}
+           'd120': (9, ['  C +1.0% — 화학', '  … 외 4종목']),
+           'd60': (3, ['  D +0.5% — 철강'])}
 NH_SUBS = [{'subtitle': f'{icon} {label} 신고가 {_counts[key][0]}종목',
             'items': _counts[key][1]} for key, label, icon in nh.AXES]
 NH_BASIS = '  <i>' + nh.basis_line('시총 1,000억 이상 1,394종목 대상', _NH_RES) + '</i>'
@@ -85,15 +86,16 @@ want('💰 수급 동향' not in msg, '수급 동향이 메시지에 남아 있�
 want('데이터 없음 (점검 필요)' not in msg, "비어 있던 수급이 '점검 필요' 로 나간다")
 want(empty == [], f'빈 섹션 경고가 떴다: {empty}')
 want('🏔 신고가' in msg, '신고가 섹션이 없다')
-for icon, label in (('🏔', '역사적'), ('📈', '52주'), ('📊', '120일')):
+for icon, label in (('🏔', '역사적'), ('📈', '52주'), ('📊', '120일'), ('📌', '60일')):
     want(f'{icon} {label} 신고가' in msg, f'{label} 줄이 없다')
-want('60일 신고가' not in msg, '없앤 60일 축이 남아 있다')
-want(msg.index('🏔 역사적') < msg.index('📈 52주') < msg.index('📊 120일'),
-     '소제목 순서가 역사적 · 52주 · 120일이 아니다')
-want('역사적=상장 이후' in msg, "'역사적' 의 기준(상장 이후) 표기가 빠졌다")
-want(msg.count('역사적=상장 이후') == 1, '기준 표기가 여러 줄에 반복된다')
-want('52주=달력 52주' in msg and '120일=120거래일' in msg, '52주·120일 창의 뜻을 안 적는다')
-want('오늘 종가 vs 전 거래일까지' in msg, '무엇과 견주는지 안 적는다')
+want(msg.index('🏔 역사적') < msg.index('📈 52주') < msg.index('📊 120일')
+     < msg.index('📌 60일'),
+     '소제목 순서가 역사적 · 52주 · 120일 · 60일이 아니다')
+# 기준 줄은 '… 대상 · 종가 기준' 만 (2026-10-29 사용자 요청) — 창의 뜻은 안 적는다.
+want('<i>시총 1,000억 이상 1,394종목 대상 · 종가 기준</i>' in msg,
+     f'기준 줄이 "… 대상 · 종가 기준" 이 아니다: {NH_BASIS}')
+want('역사적=상장 이후' not in msg and '120일=120거래일' not in msg
+     and '오늘 종가 vs' not in msg, '기준 줄에 창의 뜻이 아직 붙는다')
 want('역사적=일봉' not in msg and not re.search(r'\d{4}-\d{2}-\d{2}~', msg),
      "특정일 기준('역사적=일봉 YYYY-MM-DD~')이 남아 있다")
 want('종가 기준' in msg, '어느 기준인지 적지 않는다')

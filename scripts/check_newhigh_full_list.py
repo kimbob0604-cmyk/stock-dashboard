@@ -86,11 +86,11 @@ def build_items(key, n):
     return got, items
 
 
-# 세 등급 모두 전 종목이다. 60일(지금은 120일)은 2026-09-18 에 접기를 풀었다 — 접힌 이름은
+# 네 등급 모두 전 종목이다. 60일은 2026-09-18 에 접기를 풀었다 — 접힌 이름은
 # 메시지 어디에서도 볼 수 없었고, 길이는 줄 경계 분할이 이미 감당한다.
-want(set(_NH_LIST_MAX) == {'hist', 'w52', 'd120'},
-     f'_NH_LIST_MAX 의 축이 신고가 3축과 다르다: {sorted(_NH_LIST_MAX)}')
-for key, label in (('hist', '역사적'), ('w52', '52주'), ('d120', '120일')):
+want(set(_NH_LIST_MAX) == {'hist', 'w52', 'd120', 'd60'},
+     f'_NH_LIST_MAX 의 축이 신고가 4축과 다르다: {sorted(_NH_LIST_MAX)}')
+for key, label in (('hist', '역사적'), ('w52', '52주'), ('d120', '120일'), ('d60', '60일')):
     want(_NH_LIST_MAX.get(key) is None,
          f'{label}: 상한이 {_NH_LIST_MAX.get(key)} 다 — 전 종목이어야 한다')
     got, items = build_items(key, 37)

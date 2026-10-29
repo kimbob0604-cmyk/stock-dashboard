@@ -102,7 +102,7 @@ out = server.build_market_summary(dry_run=True)
 sec = section(out)
 subs = {s["subtitle"]: s["items"] for s in sec["subsections"]}
 print("   ", list(subs))
-check("소제목 세 줄 · 역사적/52주/120일",
+check("소제목 · 역사적/52주/120일 (60일 해당 없음)",
       list(subs) == ["🏔 역사적 신고가 1종목", "📈 52주 신고가 1종목", "📊 120일 신고가 1종목"],
       str(list(subs)))
 check("역사적 = 상장 이후 최고", any("상장후최고" in x for x in subs.get("🏔 역사적 신고가 1종목", [])))
@@ -111,7 +111,8 @@ check("이력 실패 종목은 52주에 남는다",
 check("120일", any("백이십일" in x for x in subs.get("📊 120일 신고가 1종목", [])))
 basis = (sec.get("items") or [""])[0]
 print("   ", basis)
-check("기준 줄 — 세 창의 뜻", "역사적=상장 이후 · 52주=달력 52주 · 120일=120거래일" in basis)
+check("기준 줄 — '… 대상 · 종가 기준' 만", " 대상 · 종가 기준" in basis
+      and "역사적=상장 이후" not in basis and "120일=120거래일" not in basis)
 check("기준 줄 — 특정일 없음", not re.search(r"\d{4}-\d{2}-\d{2}~", basis) and "일봉 " not in basis)
 check("기준 줄 — 보류 수", "역사적 판정 보류 1종목" in basis)
 check("평범은 없다", "평범" not in str(sec))
