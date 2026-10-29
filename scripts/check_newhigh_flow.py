@@ -37,8 +37,9 @@ print(f'_NH_FLOW_MAX = {_NH_FLOW_MAX}')
 want(_NH_FLOW_MAX.get('w52') == 5, f"52주가 {_NH_FLOW_MAX.get('w52')}종목이다 — 5 여야 한다")
 want(not _NH_FLOW_MAX.get('hist'), '역사적에 기본으로 수급이 붙는다')
 want(not _NH_FLOW_MAX.get('d120'), '120일에 기본으로 수급이 붙는다')
-want(set(_NH_FLOW_MAX) == {'hist', 'w52', 'd120'},
-     f'_NH_FLOW_MAX 의 축이 신고가 3축과 다르다: {sorted(_NH_FLOW_MAX)}')
+want(not _NH_FLOW_MAX.get('d60'), '60일에 기본으로 수급이 붙는다')
+want(set(_NH_FLOW_MAX) == {'hist', 'w52', 'd120', 'd60'},
+     f'_NH_FLOW_MAX 의 축이 신고가 4축과 다르다: {sorted(_NH_FLOW_MAX)}')
 
 # ── _fmt_nh_flow 본문을 그대로 떼어 온다 ────────────────────────────────
 fmt = grab(r'\ndef _fmt_nh_flow\(.*?\n(?=\ndef )', '_fmt_nh_flow')

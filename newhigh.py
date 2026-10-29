@@ -1,10 +1,11 @@
 """
-newhigh.py — 국내 신고가 3축(역사적 · 52주 · 120일) 판정.
+newhigh.py — 국내 신고가 4축(역사적 · 52주 · 120일 · 60일) 판정.
 
 ■ 정의 (사용자 요청 2026-10-08 — "특정일을 기준으로 하는 게 아닌, 당일 기준으로")
 
   축    | 비교 창 (모두 판정일 당일 기준, 당일 봉은 창에서 뺀다)
   ------+-----------------------------------------------------------------
+  d60   | 판정일 직전 **60 거래일** — d120 과 같은 방식으로 센다.
   d120  | 판정일 직전 **120 거래일** — KRX 거래일 달력(krx_calendar)으로 센
         | 120번째 이전 거래일 ~ 전 거래일. 종목이 거래정지였던 날로 창이
         | 늘어나지 않는다: 경계는 시장 달력이 정하고 그 안의 그 종목 봉만 본다.
@@ -15,10 +16,12 @@ newhigh.py — 국내 신고가 3축(역사적 · 52주 · 120일) 판정.
     최고 종가면 그 축의 신고가 — **엄격히 초과**다(ETF-Traker 원본도 '>').
     같은 가격을 신고가로 치면 거래가 없거나 상한가에 묶여 종가가 그대로인
     날마다 같은 종목이 신고가로 찍힌다. 예전 이 저장소는 '>=' 였다.
-  - 라벨은 가장 센 축 하나: hist > w52 > d120. 한 종목은 한 줄에만 나온다.
+  - 라벨은 가장 센 축 하나: hist > w52 > d120 > d60. 한 종목은 한 줄에만 나온다.
   - 창을 다 채우지 못한 종목(상장이 창보다 늦다 등)은 그 축을 판정하지 않는다
     (None). 신규상장은 hist 로만 판정될 수 있다.
-  - 60일 축은 없앴다(120일로 바꿨다).
+  - 60일 축은 2026-10-08 에 120일로 바꿨다가 2026-10-29 에 따로 되살렸다. 120거래일
+    안의 옛 고점에 못 미치는 단기 고점(예: 한양디지텍 10/28 — 약 100거래일 고점)이
+    어느 줄에도 안 나왔기 때문이다.
 
 ■ 역사적 — 상장 이후 이력을 어디서 얻는가
 
@@ -64,6 +67,7 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────── 설정 (바꾸려면 여기만) ───────────────────────────
 D120_LOOKBACK_TRADING_DAYS = 120          # 120일 신고가 = 120 거래일
+D60_LOOKBACK_TRADING_DAYS = 60            # 60일 신고가 = 60 거래일
 W52_LOOKBACK_CALENDAR_DAYS = 364          # 52주 신고가 = 달력 52주 (오늘 − 364일 ≤ 날짜)
 # 창의 첫날 **이전**에 그 종목 봉이 있는지 보려고 조금 더 앞에서부터 훑는다.
 SCAN_MARGIN_DAYS = 45
@@ -90,9 +94,11 @@ HIST_BUDGET_PREWARM_S = 240               # 15:48 프리워밍 예산
 REF_CLOSE_TOL = 0.005
 
 # (키, 이름, 아이콘) — 센 순서. 텔레그램 소제목과 기준 줄이 이 이름을 쓴다.
-AXES = (("hist", "역사적", "🏔"), ("w52", "52주", "📈"), ("d120", "120일", "📊"))
-BASIS_TEXT = ("종가 기준 · 오늘 종가 vs 전 거래일까지 · 역사적=상장 이후 · "
-              "52주=달력 52주 · 120일=120거래일")
+AXES = (("hist", "역사적", "🏔"), ("w52", "52주", "📈"), ("d120", "120일", "📊"),
+        ("d60", "60일", "📌"))
+# 기준 줄은 짧게 — 창의 뜻(52주=달력 52주 · N일=N거래일)은 위 정의에 둔다
+# (2026-10-29 사용자 요청: '시총 … 대상 · 종가 기준' 만).
+BASIS_TEXT = "종가 기준"
 
 # 판정 모집단 — ETF 아님·시총 하한 이상·오늘 거래됨·1,000원 이상.
 UNIVERSE_WHERE = """(s.market = '' OR s.market LIKE 'KOS%')
@@ -106,6 +112,7 @@ SCAN_SQL = f"""
            s.change_pct AS change_pct, s.close AS close,
            s.volume_mn AS volume_mn, s.market_cap AS market_cap,
            s.market_cap_updated AS market_cap_updated,
+           MAX(CASE WHEN o.date >= :d60_start THEN o.close END) AS h60,
            MAX(CASE WHEN o.date >= :d120_start THEN o.close END) AS h120,
            MAX(CASE WHEN o.date >= :w52_start THEN o.close END) AS h52,
            MAX(o.close) AS h_scan,
@@ -161,8 +168,9 @@ def observed_counts(conn, start: str, end: str) -> dict:
 
 
 def windows(today, cal: "krx_calendar.Calendar | None" = None) -> dict:
-    """판정일 `today` 의 세 창 경계. 모두 'YYYY-MM-DD'.
+    """판정일 `today` 의 창 경계. 모두 'YYYY-MM-DD'.
 
+    d60_start   60번째 이전 거래일 (창에 포함)
     d120_start  120번째 이전 거래일 (창에 포함)
     w52_start   today − 364일 (창에 포함)
     w52_first   w52 창 안의 첫 거래일 — '창을 다 채웠는가' 판정에 쓴다
@@ -172,23 +180,26 @@ def windows(today, cal: "krx_calendar.Calendar | None" = None) -> dict:
     t = date.fromisoformat(_iso(today))
     w52 = t - timedelta(days=W52_LOOKBACK_CALENDAR_DAYS)
     d120 = cal.nth_trading_day_before(t, D120_LOOKBACK_TRADING_DAYS)
+    d60 = cal.nth_trading_day_before(t, D60_LOOKBACK_TRADING_DAYS)
     prev = cal.nth_trading_day_before(t, 1)
     w52_first = w52
     while not cal.is_trading_day(w52_first) and w52_first < t:
         w52_first += timedelta(days=1)
     starts = [w52] + ([date.fromisoformat(d120)] if d120 else [])
     scan = min(starts) - timedelta(days=SCAN_MARGIN_DAYS)
-    return {"today": t.isoformat(), "d120_start": d120, "w52_start": w52.isoformat(),
+    return {"today": t.isoformat(), "d60_start": d60, "d120_start": d120,
+            "w52_start": w52.isoformat(),
             "w52_first": w52_first.isoformat(), "prev_day": prev,
             "scan_start": scan.isoformat()}
 
 
 def axis_flags(row, w: dict) -> dict:
-    """한 종목의 d120·w52 판정. True/False/None(창을 다 못 채움)."""
+    """한 종목의 d60·d120·w52 판정. True/False/None(창을 다 못 채움)."""
     c = row["close"]
     first = row["first_bar"]
     out = {}
-    for key, hk, start in (("d120", "h120", w["d120_start"]),
+    for key, hk, start in (("d60", "h60", w["d60_start"]),
+                           ("d120", "h120", w["d120_start"]),
                            ("w52", "h52", w["w52_first"])):
         h = row[hk]
         if not c or not start or not first or first > start or h is None:
@@ -420,11 +431,11 @@ def resolve_hist(conn, cands: list[dict], today, *, fetch=None,
 # ─────────────────────────── 본체 ───────────────────────────
 def compute(conn, today, min_cap: float, *, fetch=None,
             budget_s: float = HIST_BUDGET_BRIEF_S, cal=None) -> dict:
-    """오늘 신고가 3축. 반환 dict:
+    """오늘 신고가 4축. 반환 dict:
 
       error        판정을 못 한 이유 (있으면 나머지는 비어 있다)
       windows      창 경계
-      buckets      {'hist': [행], 'w52': [...], 'd120': [...]} — 가장 센 축 하나에만
+      buckets      {'hist': [행], 'w52': [...], 'd120': [...], 'd60': [...]} — 가장 센 축 하나에만
       scanned      판정한 종목 수(일봉이 있는 종목) · universe_n 모집단 수
       hist_pending [(코드, 이름, 사유)] — 역사적일 수 있었으나 이력을 못 확인
       last_bar     훑은 일봉의 최신 날짜
@@ -441,7 +452,8 @@ def compute(conn, today, min_cap: float, *, fetch=None,
     if not w["d120_start"]:
         res["error"] = "거래일 달력으로 120거래일 창을 못 만든다"
         return res
-    params = {"d120_start": w["d120_start"], "w52_start": w["w52_start"],
+    params = {"d60_start": w["d60_start"], "d120_start": w["d120_start"],
+              "w52_start": w["w52_start"],
               "scan_start": w["scan_start"], "today": w["today"], "min_cap": min_cap}
     rows = _as_dicts(conn, SCAN_SQL, params)
     res["universe_n"] = conn.execute(UNIVERSE_SQL, {"min_cap": min_cap}).fetchone()[0]
@@ -482,6 +494,8 @@ def compute(conn, today, min_cap: float, *, fetch=None,
             res["buckets"]["w52"].append(r)
         elif r["d120"] is True:
             res["buckets"]["d120"].append(r)
+        elif r["d60"] is True:
+            res["buckets"]["d60"].append(r)
     res["calendar_corrections"] = list(cal.corrections)
     return res
 
