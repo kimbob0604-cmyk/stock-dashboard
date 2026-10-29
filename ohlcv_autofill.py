@@ -85,34 +85,22 @@ except Exception:                                          # noqa: BLE001
     _W52_DAYS, _SCAN_MARGIN = 364, 45
 LOOKBACK_CALENDAR_DAYS = _W52_DAYS + _SCAN_MARGIN + 15
 
-# 신고가 판정의 모집단 — **코스피·코스닥 전 종목(ETF·ETN·스팩 제외).**
+# 신고가 판정의 모집단 — **ETF/ETN 을 뺀 시가총액 1,000억원 이상 전 종목.**
 #
-# 2026-10-29 사용자 결정: 시총 1,000억 하한을 없앴다. 하한이 있으면 그날 시황의 신고가가
-# '시총 1,000억 이상 1,256종목'만 보고 나가, 코스닥 중소형주의 신고가를 통째로 놓쳤다.
-# 하한 값(MIN_MARKET_CAP_WON)은 0 으로 두고 이름만 남긴다 — 다시 걸 때 이 한 곳만 바꾼다.
-#
-# (아래는 하한이 있던 때의 설명이다.)
 # 단위는 **원**이다. stocks.market_cap 과 시드(data/naver_universe_seed.json)의
 # market_cap 이 모두 네이버 marketValueFullRaw(원)다 — 삼성전자가 2.1e15.
 # 억 단위로 착각해 1000 을 넣으면 사실상 전 종목이 되고, 1e11 을 억으로 읽으면
 # 한 종목도 안 남는다. 문구에 쓰는 이름표(`MIN_MARKET_CAP_LABEL`)도 여기 같이 둔다.
 #
 # 시드로 잰 규모 (2026-06-02 시총, ETF 패턴 제외): 1,000억 이상 1,394종목.
-MIN_MARKET_CAP_WON = 0
-MIN_MARKET_CAP_LABEL = ""   # 하한이 없으면 문구는 UNIVERSE_LABEL 을 쓴다
-UNIVERSE_LABEL = "코스피·코스닥 전 종목(ETF·ETN·스팩 제외)"
-
-
-def is_spac(name: str) -> bool:
-    """기업인수목적회사(스팩) — 2,000원 근처에 묶여 있어 신고가가 뜻이 없다. 이름으로 거른다."""
-    return "스팩" in (name or "")
+MIN_MARKET_CAP_WON = 100_000_000_000
+MIN_MARKET_CAP_LABEL = "1,000억"
 
 # 일봉은 판정 기준보다 **조금 넓게**(80%, 800억 이상 — 시드 기준 1,556종목)
 # 받아 둔다. 시총은 매일 움직이는데 일봉 1년치는 하루 만에 못 채운다(16:10
 # 잡이 다음 날 16:00 시황보다 먼저 돌아도, 그 사이 1,000억을 넘어선 종목은
 # 전날 대상이 아니었다). 경계 근처 종목을 미리 받아 두면 그런 종목이 '일봉
 # 미수집' 으로 모집단에서 빠지는 일이 드물어진다. 판정은 1,000억으로 한다.
-# (하한이 0 인 지금은 둘 다 0 — 시총이 잡히는 전 종목을 받는다.)
 FILL_CAP_BUFFER = 0.8
 FILL_MIN_CAP_WON = int(MIN_MARKET_CAP_WON * FILL_CAP_BUFFER)
 
@@ -276,8 +264,6 @@ def _rank_from_universe(uni, min_cap, is_etf=None):
             continue
         if is_etf is not None and is_etf((s or {}).get("name") or ""):
             continue
-        if is_spac((s or {}).get("name") or ""):
-            continue
         if "기타" in ((s or {}).get("sectors") or []):   # 네이버 업종 '기타' = ETF·ETN·펀드
             continue
         out.append((cap, code))
@@ -334,8 +320,7 @@ def coverage_note(scanned: int, universe: int | None = None) -> str:
     """시황 신고가 머리에 붙일 '무엇을 대상으로 했는가' 한 조각.
 
     `scanned`  실제로 판정한 종목 수(일봉이 있는 종목). 설정값이 아니라 결과다.
-    `universe` 모집단 — 코스피·코스닥 전 종목(ETF·ETN·스팩 제외)·오늘 거래된 종목 수
-               (시총 하한을 다시 걸면 '시총 N 이상').
+    `universe` 모집단 — 시총 1,000억 이상·ETF 아님·오늘 거래된 종목 수.
                None 이면 모집단을 모르는 것이므로 판정 수만 적는다.
 
     **모집단을 다 못 훑었으면 그 사실과 빠진 수를 적는다.** 재배포 직후 일봉을
@@ -345,8 +330,7 @@ def coverage_note(scanned: int, universe: int | None = None) -> str:
     """
     if universe is None:
         return f"{scanned:,}종목 대상"
-    head = (f"시총 {MIN_MARKET_CAP_LABEL} 이상" if MIN_MARKET_CAP_WON > 0
-            else UNIVERSE_LABEL)
+    head = f"시총 {MIN_MARKET_CAP_LABEL} 이상"
     if scanned >= universe:
         return f"{head} {scanned:,}종목 대상"
     return (f"{head} {universe:,}종목 중 {scanned:,}종목 대상 · "

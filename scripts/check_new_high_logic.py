@@ -8,8 +8,8 @@ server.py 는 Flask 앱이라 import 하지 않는다. 판정은 newhigh.py 로 
 정의(2026-10-08): 120일 = 120 거래일(KRX 달력), 52주 = 달력 52주(오늘 − 364일
 ≤ 날짜 < 오늘), 역사적 = 상장 이후 전체. 종가 기준. hist > w52 > d120.
 
-모집단은 **코스피·코스닥 전 종목(ETF·ETN·스팩 제외)**이다 — 2026-10-29 시총 1,000억
-하한·1,000원 하한을 없앴다(ohlcv_autofill.MIN_MARKET_CAP_WON = 0). 모집단 수(universe_n)를 같은 조건으로 따로 센다 — 일봉이 없어 못 본
+모집단은 ETF 를 뺀 **시총 1,000억 이상**이다(ohlcv_autofill.MIN_MARKET_CAP_WON,
+원 단위). 모집단 수(universe_n)를 같은 조건으로 따로 센다 — 일봉이 없어 못 본
 종목 수를 머리말에 적기 위해서다.
 """
 import re
@@ -26,9 +26,7 @@ import ohlcv_autofill as oa                                      # noqa: E402
 
 SRC = open(f'{ROOT}/server.py', encoding='utf-8').read()
 MIN_CAP = oa.MIN_MARKET_CAP_WON
-assert MIN_CAP == 0, f'시총 하한이 0(전 종목)이 아니다: {MIN_CAP}'
-assert "NOT LIKE '%스팩%'" in nh.UNIVERSE_WHERE, '신고가 모집단에서 스팩을 안 뺀다'
-assert 'close >= 1000' not in nh.UNIVERSE_WHERE, '1,000원 하한이 아직 남아 있다'
+assert MIN_CAP == 100_000_000_000, f'시총 하한이 1,000억(원)이 아니다: {MIN_CAP}'
 assert 'COALESCE(s.market_cap, 0) >= :min_cap' in nh.UNIVERSE_WHERE, '신고가 모집단에 시총 하한이 없다'
 assert nh.UNIVERSE_WHERE in nh.SCAN_SQL and nh.UNIVERSE_WHERE in nh.UNIVERSE_SQL, \
     '판정 쿼리와 모집단 수 쿼리의 조건이 갈라졌다'
@@ -125,12 +123,12 @@ add('000012', '같은값', 9000, series(lambda d: 9000), older=older('000012', 7
 # 오늘 자기 행이 이미 들어와 있는 종목 — 그 행을 최고가에 넣으면 늘 신고가가 된다
 add('000005', '오늘행', 5000, series(lambda d: 20000), older=older('000005', 7000))
 conn.execute("INSERT INTO ohlcv VALUES ('000005',?,5000,5000,5000,5000,1)", (TODAY,))
-# 스팩 — 뚫었어도 모집단 밖이다
-add('000007', '테스트1호스팩', 9500, series(lambda d: 9000), cap=99_900_000_000)
-# 시총 30억·주가 1,000원 미만 — 옛 하한(1,000억·1,000원) 밖이었지만 이제 포함
-add('000008', '동전주', 950,
-    series(lambda d: 2000 if d < W['d120_start'] else 900), cap=3_000_000_000,
-    older=older('000008', 700))
+# 시총 999억 — 뚫었어도 모집단 밖이다
+add('000007', '작은회사', 9500, series(lambda d: 9000), cap=99_900_000_000)
+# 시총 1,000억 딱 — 경계는 포함
+add('000008', '경계회사', 9500,
+    series(lambda d: 20000 if d < W['d120_start'] else 9000), cap=100_000_000_000,
+    older=older('000008', 7000))
 # ETF — 시총이 커도 빠진다
 add('000009', 'KODEX 200', 9500, series(lambda d: 9000), cap=5e12, is_etf=1)
 # 모집단 안인데 일봉이 없다(채우는 중·신규 상장) — 판정은 못 하고 수로만 센다
@@ -171,16 +169,16 @@ def want(cond, msg):
 everyone = sum(b.values(), [])
 want(b['hist'] == ['역사적'], f"역사적 줄이 {b['hist']}")
 want(b['w52'] == ['오십이주', '옛고점'], f"52주 줄이 {b['w52']}")
-want(b['d120'] == ['백이십일', '동전주'], f"120일 줄이 {b['d120']}")
-want('테스트1호스팩' not in everyone, '스팩이 신고가에 들어갔다')
+want(b['d120'] == ['백이십일', '경계회사'], f"120일 줄이 {b['d120']}")
+want('작은회사' not in everyone, '시총 1,000억 미만이 신고가에 들어갔다')
 want('KODEX 200' not in everyone, 'ETF 가 신고가에 들어갔다')
-# 모집단 = ETF·스팩 아님·오늘 거래 — 일봉 없는 종목까지 센다.
+# 모집단 = 1,000억 이상·ETF 아님·오늘 거래 — 일봉 없는 종목까지 센다.
 # 000001~000005, 000008, 000010, 000011, 000012 → 9. 판정한 수는 일봉이 있는 8.
 want(res['universe_n'] == 9, f"모집단 수가 {res['universe_n']} 이다 (기대 9)")
 want(res['scanned'] == 8, f"판정한 수가 {res['scanned']} 이다 (기대 8)")
 note = oa.coverage_note(res['scanned'], res['universe_n'])
 print('범위 문구:', note)
-want(note == f'{oa.UNIVERSE_LABEL} 9종목 중 8종목 대상 · 일봉 미수집 1종목',
+want(note == '시총 1,000억 이상 9종목 중 8종목 대상 · 일봉 미수집 1종목',
      f'범위 문구가 모자란 수를 안 밝힌다: {note}')
 want('평범' not in everyone, '못 뚫은 종목이 들어갔다')
 want('같은값' not in everyone, "창 최고와 같은 가격을 신고가로 쳤다 — '>' 가 아니라 '>=' 다")

@@ -9080,7 +9080,7 @@ def _ohlcv_ranked_codes() -> tuple[str, list]:
     """일봉 대상 후보를 `stocks` 표에서 뽑는다. (기준, [(시가총액 원, 코드)])
 
     ohlcv_autofill 은 server.py 를 import 할 수 없어(순환) 이 함수를 주입받는다.
-    **ETF/ETN·스팩은 여기서 뺀다.** 시총 하한(지금은 없음 — 2026-10-29 전 종목)은
+    **ETF/ETN 은 여기서 뺀다.** 시총 하한(1,000억 판정 · 800억부터 받아 둠)은
     ohlcv_autofill.select_universe 한 곳에서 건다 — 기준이 두 곳에 흩어지면
     한쪽만 고쳐지는 날이 온다.
 
@@ -9105,9 +9105,8 @@ def _ohlcv_ranked_codes() -> tuple[str, list]:
             "  AND COALESCE(is_etf, 0) = 0 "
             "  AND COALESCE(sector, '') != '기타' "      # 표식이 아직 안 붙은 ETF
             "  AND COALESCE(market_cap, 0) > 0").fetchall()
-    from ohlcv_autofill import is_spac
     by_cap = [(float(r["market_cap"]), r["code"]) for r in rows
-              if not _is_etf_name(r["name"]) and not is_spac(r["name"])]
+              if not _is_etf_name(r["name"])]
     if by_cap:
         return "market_cap", by_cap
     return "none", []
@@ -14140,8 +14139,8 @@ def _fmt_nh_flow(entry, latest: str | None) -> str:
 def _ohlcv_scope_note(scanned: int, universe: int | None = None) -> str:
     """신고가가 **무엇을 모집단으로 한 결과인지** 한 조각.
 
-    모집단은 ETF·ETN·스팩을 뺀 코스피·코스닥 전 종목이다
-    (ohlcv_autofill.MIN_MARKET_CAP_WON = 0 — 2026-10-29 하한 폐지). 문구는 ohlcv_autofill.coverage_note
+    모집단은 ETF/ETN 을 뺀 시총 1,000억 이상 종목이다
+    (ohlcv_autofill.MIN_MARKET_CAP_WON). 문구는 ohlcv_autofill.coverage_note
     한 곳에서 만든다 — 이 함수는 그것을 부르는 얇은 껍데기다.
 
     `scanned` 는 실제로 판정한 수(일봉이 있는 종목), `universe` 는 모집단 수다.
@@ -14669,8 +14668,8 @@ def build_market_summary(dry_run: bool = False,
             import ohlcv_autofill as _oa
             today_ymd = now_kst().strftime("%Y-%m-%d")
             with _get_db() as conn:
-                # 모집단: 코스피·코스닥 전 종목(ETF·ETN·스팩 제외). 시총 하한은
-                # MIN_MARKET_CAP_WON(2026-10-29 부터 0) 한 곳에서 건다.
+                # 모집단: ETF 가 아닌 시총 1,000억(원 단위 1e11) 이상.
+                # 일봉은 그보다 넓게(800억~) 받아 두지만 판정은 여기서 자른다.
                 nh = _nh.compute(conn, today_ymd, _oa.MIN_MARKET_CAP_WON,
                                  budget_s=(_nh.HIST_BUDGET_BRIEF_S
                                            if nh_hist_budget_s is None
@@ -14733,7 +14732,7 @@ def build_market_summary(dry_run: bool = False,
                              "items": items})
                     if nh_section["subsections"]:
                         # 기준은 섹션 머리에 한 번만. 줄마다 붙이면 세 번 읽힌다.
-                        # **모집단을 반드시 밝힌다** — ETF·ETN·스팩을 빼고 보고,
+                        # **모집단을 반드시 밝힌다** — 시총 1,000억 이상만 보고,
                         # 그중 일봉이 없는 종목은 판정하지 못했다. 안 적으면
                         # "신고가 3종목" 을 전 종목 기준으로 읽는다.
                         # '받아 둔 일봉 첫날 이후' 같은 특정일은 적지 않는다 —
