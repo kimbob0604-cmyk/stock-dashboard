@@ -142,7 +142,7 @@ want('"KOSPI200": "KPI200"' in MR, '코스피200 종가를 쌓지 않는다(mark
 want('_GPROXY_TTL_S' in SRC, 'API 캐시가 없다')
 want('data-page="proxy"' in HTML and 'id="proxy-view"' in HTML
      and HTML.index('/static/js/proxypage.js') < HTML.index('/static/js/pages.js'), 'index.html 등록')
-want("proxy:      () => { renderProxyPage(); }" in PJ and "return '/proxy'" in PJ and "'page-proxy'" in PJ,
+want("proxy:      () => { renderProxyPage(); }" in PJ and "proxy: '/proxy'" in PJ and "'page-proxy'" in PJ,
      'pages.js 등록')
 
 print(f'검사 {n}개')

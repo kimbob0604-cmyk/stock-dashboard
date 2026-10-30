@@ -897,10 +897,17 @@ const PAGE_RENDERERS = {
 // 4-5-2-C: SPA URL path 라우팅
 // 페이지 <-> URL 양방향 매핑. 직접 URL 진입 / 뒤로가기 / 북마크 모두 지원.
 // ─────────────────────────────────────────────────────────────────────────────
+// 파라미터 없는 페이지의 고정 주소 — 텔레그램 등에 링크로 붙일 수 있게(2026-10-30).
+// 서버(server.py spa_route)에도 같은 경로가 있어야 새로고침해도 열린다.
+const _SIMPLE_URLS = {
+  dashboard: '/dashboard', valuechain: '/valuechain', market: '/market',
+  globalmacro: '/globalmacro', disclosure: '/disclosure', watchlist: '/watchlist',
+  risk: '/risk', movers: '/movers', proxy: '/proxy',
+};
 const _URL_ROUTED_PAGES = new Set([
   'verification', 'journal',
   'ops-freshness', 'ops-cron', 'ops-health',
-  'risk', 'movers', 'proxy',
+  ...Object.keys(_SIMPLE_URLS),
 ]);
 
 /** page + params → pathname. URL 라우팅 대상이 아닌 페이지는 '/' 반환. */
@@ -915,9 +922,7 @@ function pageToUrl(page, params) {
   if (page === 'ops-freshness') return '/ops/freshness';
   if (page === 'ops-cron')      return '/ops/cron';
   if (page === 'ops-health')    return '/ops/health';
-  if (page === 'risk')          return '/risk';
-  if (page === 'movers')        return '/movers';
-  if (page === 'proxy')         return '/proxy';
+  if (_SIMPLE_URLS[page])       return _SIMPLE_URLS[page];
   return '/';
 }
 
@@ -930,9 +935,10 @@ function parseUrlPath(pathname) {
   // /journal 또는 /journal/<id>
   m = pathname.match(/^\/journal(?:\/(\d+))?\/?$/);
   if (m) return { page: 'journal', params: m[1] ? { id: parseInt(m[1], 10) } : {} };
-  if (/^\/risk\/?$/.test(pathname)) return { page: 'risk', params: {} };
-  if (/^\/movers\/?$/.test(pathname)) return { page: 'movers', params: {} };
-  if (/^\/proxy\/?$/.test(pathname)) return { page: 'proxy', params: {} };
+  const _simple = pathname.replace(/\/+$/, '');
+  for (const [pg, url] of Object.entries(_SIMPLE_URLS)) {
+    if (_simple === url) return { page: pg, params: {} };
+  }
   // /ops/<page>
   m = pathname.match(/^\/ops\/([a-z\-]+)\/?$/);
   if (m) {

@@ -158,8 +158,15 @@ for url in ('/api/market/breadth', '/api/market/risk?period=6M&ma=25',
     rr = cl.get(url)
     want(rr.status_code == 200, f'{url} → {rr.status_code} {rr.get_data(as_text=True)[:200]}')
 want(cl.get('/api/movers?view=bad').status_code == 400, '잘못된 view 를 받았다')
-for page in ('/risk', '/movers'):
-    want(cl.get(page).status_code == 200, f'{page} 가 안 열린다')
+# 화면이 쓰는 고정 주소(pages.js _SIMPLE_URLS)는 서버에서도 열려야 한다 — 새로고침·링크 진입
+import re as _re                                                  # noqa: E402
+_pj = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
+_m = _re.search(r'const _SIMPLE_URLS = \{(.*?)\};', _pj, _re.S)
+want(_m is not None, 'pages.js 에 _SIMPLE_URLS 가 없다')
+_urls = _re.findall(r"'(/[a-z]+)'", _m.group(1)) if _m else []
+want(len(_urls) >= 9, f'고정 주소가 너무 적다: {_urls}')
+for page in _urls:
+    want(cl.get(page).status_code == 200, f'{page} 가 서버에서 안 열린다(spa_route 에 없다)')
 
 # ── 4 ──
 HTML = (ROOT / 'index.html').read_text(encoding='utf-8')
