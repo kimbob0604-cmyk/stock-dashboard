@@ -11176,13 +11176,25 @@ def poll_dart_disclosures():
 
 @app.route("/api/disclosures")
 def api_disclosures():
-    """최근 공시 리스트. ?importance=critical,high&code=005930&limit=50"""
+    """최근 공시 리스트. ?importance=critical,high&code=005930&category=실적&limit=50
+
+    항목마다 카테고리(disclosure_category — 제목 규칙)·시총(stocks)·잠정실적 숫자
+    (earnings_actual 에 같은 rcept_no 가 있을 때)를 붙인다. `category_counts` 는
+    카테고리 필터를 걸기 **전** 최근 `scan`건 기준이다(칩에 건수를 적으려고).
+    `collector_enabled` 가 False 면 이 서버는 공시를 모으지 않는다(DART_API_KEY 없음).
+    """
     if not (_SQLITE_OK and USE_SQLITE):
         return jsonify({"error": "SQLite 비활성화"}), 503
+    import disclosure_category as _dc
 
     importance = request.args.get("importance", "").lower()
     code = request.args.get("code", "").strip()
-    limit = min(int(request.args.get("limit", "50")), 200)
+    category = request.args.get("category", "").strip()
+    try:
+        limit = min(int(request.args.get("limit", "50")), 200)
+    except ValueError:
+        limit = 50
+    scan = 500
 
     sql = "SELECT * FROM disclosure_history WHERE 1=1"
     params: list = []
@@ -11197,25 +11209,57 @@ def api_disclosures():
         params.append(code)
 
     sql += " ORDER BY rcept_dt DESC, rcept_no DESC LIMIT ?"
-    params.append(limit)
+    params.append(scan)
 
     try:
         with _get_db() as conn:
-            rows = conn.execute(sql, params).fetchall()
-            items = []
-            for r in rows:
-                d = dict(r)
-                if d.get("keywords_json"):
-                    try:
-                        d["keywords"] = json.loads(d["keywords_json"])
-                    except Exception:
-                        d["keywords"] = []
-                    del d["keywords_json"]
-                d["dart_url"] = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d.get('rcept_no', '')}"
-                items.append(d)
+            rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+            for d in rows:
+                d["category"] = _dc.categorize(d.get("title") or "")
+            counts = _dc.counts(d.get("title") or "" for d in rows)
+            if category:
+                rows = [d for d in rows if d["category"] == category]
+            rows = rows[:limit]
+            codes = sorted({d.get("stock_code") for d in rows if d.get("stock_code")})
+            caps: dict = {}
+            if codes:
+                q = ",".join("?" * len(codes))
+                caps = {r[0]: r[1] for r in conn.execute(
+                    f"SELECT code, market_cap FROM stocks WHERE code IN ({q})", codes)}
+            rnos = [d.get("rcept_no") for d in rows if d["category"] == "실적"]
+            earn: dict = {}
+            if rnos:
+                try:
+                    q = ",".join("?" * len(rnos))
+                    earn = {r[0]: r for r in conn.execute(
+                        "SELECT disclosure_id, year, quarter, revenue, operating_profit, "
+                        "net_income, revenue_yoy_pct, op_yoy_pct FROM earnings_actual "
+                        f"WHERE disclosure_id IN ({q})", rnos)}
+                except sqlite3.Error:                      # 표가 아직 없는 서버
+                    earn = {}
+        items = []
+        for d in rows:
+            if d.get("keywords_json"):
+                try:
+                    d["keywords"] = json.loads(d["keywords_json"])
+                except Exception:
+                    d["keywords"] = []
+            d.pop("keywords_json", None)
+            d["dart_url"] = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d.get('rcept_no', '')}"
+            d["market_cap"] = caps.get(d.get("stock_code"))
+            e = earn.get(d.get("rcept_no"))
+            if e:
+                d["earnings"] = {"year": e[1], "quarter": e[2], "revenue": e[3],
+                                 "operating_profit": e[4], "net_income": e[5],
+                                 "revenue_yoy_pct": e[6], "op_yoy_pct": e[7],
+                                 "unit": "백만원"}
+            items.append(d)
         return jsonify({
             "count": len(items),
             "items": items,
+            "category_counts": counts,
+            "categories": list(_dc.CATEGORIES),
+            "collector_enabled": bool(os.getenv("DART_API_KEY")),
         })
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
