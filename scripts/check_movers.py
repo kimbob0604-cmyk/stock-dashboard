@@ -126,7 +126,7 @@ PJ = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
 want('data-page="movers"' in HTML and 'id="movers-view"' in HTML
      and HTML.index('/static/js/moverspage.js') < HTML.index('/static/js/pages.js'),
      'index.html 등록이 빠졌다')
-want("movers:     () => { renderMoversPage(); }" in PJ and "return '/movers'" in PJ
+want("movers:     () => { renderMoversPage(); }" in PJ and "movers: '/movers'" in PJ
      and "'page-movers'" in PJ, 'pages.js 등록이 빠졌다')
 
 print(f'검사 {n}개')

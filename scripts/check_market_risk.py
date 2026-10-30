@@ -218,7 +218,7 @@ want('data-page="risk"' in HTML and 'id="risk-view"' in HTML
 want(HTML.index('/static/js/riskpage.js') < HTML.index('/static/js/pages.js'),
      'riskpage.js 가 pages.js 보다 늦게 실린다')
 want("risk:       () => { renderRiskPage(); }" in PJ and "'page-risk'" in PJ
-     and "return '/risk'" in PJ, 'pages.js 에 위험지표 등록·URL 이 없다')
+     and "risk: '/risk'" in PJ, 'pages.js 에 위험지표 등록·URL 이 없다')
 
 print(f'검사 {n_checks}개')
 print('통과' if ok else '실패')
