@@ -133,6 +133,20 @@ if server is not None:
         # 하이닉스 1e15원/1300 vs 삼성 1.3e15원/1300 → 76.92%
         want(DP['SK하이닉스 / 삼성전자']['latest'] == round(1e15 / 1.3e15 * 100, 2),
              f"API 가 stocks 시총을 안 쓴다: {DP['SK하이닉스 / 삼성전자']['latest']}")
+    # 비었던 쌍이 있는 결과는 짧게만 캐시한다 — stocks 가 차면 1분 안에 다시 계산
+    import time as _t
+    server._RELCAP_CACHE.clear()
+    server._get_db = gdb
+    _real = server._foreign_caps
+    server._foreign_caps = lambda syms: {}
+    d1 = cl.get('/api/relcap?period=1Y').get_json()
+    want(any(p['error'] for p in d1['pairs']), '해외 시총이 없는데 쌍이 다 채워졌다')
+    server._foreign_caps = _real
+    ts, cached = server._RELCAP_CACHE[('pairs', '1Y')]
+    server._RELCAP_CACHE[('pairs', '1Y')] = (ts - server._RELCAP_TTL_PARTIAL_S - 1, cached)
+    d2 = cl.get('/api/relcap?period=1Y').get_json()
+    want(all(not p['error'] for p in d2['pairs'] if p['name'] != 'SK하이닉스 / 마이크론'),
+         '빈 쌍이 섞인 결과를 오래 붙잡는다(짧은 캐시가 아니다)')
     r2 = cl.get('/api/annual_returns')
     want(r2.status_code == 200 and r2.get_json()['rows'][0]['returns'].get('2025') == -25.0, '연도별 API')   # JSON 키는 문자열
     for page in ('/relcap', '/annual-returns'):

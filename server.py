@@ -17135,6 +17135,7 @@ def api_global_macro():
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
 _RELCAP_CACHE: dict = {}
 _RELCAP_TTL_S = 600
+_RELCAP_TTL_PARTIAL_S = 60     # 한 쌍이라도 비었으면 짧게 — 재배포 직후 stocks 가 비었던 결과를 10분 붙잡지 않게
 _FOREIGN_CAP_TTL_S = 12 * 3600
 
 
@@ -17183,8 +17184,11 @@ def api_relcap():
     if period not in _rc.PERIOD_RANGE:
         period = "1Y"
     hit = _RELCAP_CACHE.get(("pairs", period))
-    if hit and time.time() - hit[0] < _RELCAP_TTL_S:
-        return jsonify(hit[1])
+    if hit:
+        ttl = (_RELCAP_TTL_S if all(not p.get("error") for p in hit[1].get("pairs", []))
+               else _RELCAP_TTL_PARTIAL_S)
+        if time.time() - hit[0] < ttl:
+            return jsonify(hit[1])
     try:
         kr = {s: code for _, a, b in _rc.PAIRS for s, code, _ in a + b if code}
         caps: dict = {}
