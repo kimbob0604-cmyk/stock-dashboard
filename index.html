@@ -38,11 +38,13 @@
     <li class="sidebar-item"        data-page="risk"><span class="mi">🧭</span>위험지표<span class="nav-badge-new">NEW</span></li>
     <li class="sidebar-item"        data-page="relcap"><span class="mi">📐</span>상대 시총<span class="nav-badge-new">NEW</span></li>
     <li class="sidebar-item"        data-page="annual"><span class="mi">📅</span>연도별 수익률<span class="nav-badge-new">NEW</span></li>
+    <li class="sidebar-item"        data-page="fundflow"><span class="mi">💰</span>증시자금<span class="nav-badge-new">NEW</span></li>
 
     <!-- 🏷 종목·공시 -->
     <li class="sidebar-group-label">🏷 종목·공시</li>
     <li class="sidebar-item"        data-page="movers"><span class="mi">📈</span>신고가·등락률<span class="nav-badge-new">NEW</span></li>
     <li class="sidebar-item"        data-page="disclosure"><span class="mi">📢</span>DART 공시</li>
+    <li class="sidebar-item"        data-page="trade"><span class="mi">🚢</span>수출입<span class="nav-badge-new">NEW</span></li>
     <li class="sidebar-item"        data-page="watchlist"><span class="mi">★</span>관심종목<span class="sidebar-badge" id="sidebar-watchlist-badge"></span></li>
 
     <!-- 🔬 분석 작업 -->
@@ -282,6 +284,12 @@
   <div class="page" id="page-annual">
     <div id="annual-view"></div>
   </div>
+  <div class="page" id="page-fundflow">
+    <div id="fundflow-view"></div>
+  </div>
+  <div class="page" id="page-trade">
+    <div id="trade-view"></div>
+  </div>
   <div class="page" id="page-valuechain">
     <div id="valuechain-view"></div>
   </div>
@@ -391,6 +399,7 @@
 <script src="/static/js/disclosurepage.js"></script>
 <script src="/static/js/proxypage.js"></script>
 <script src="/static/js/relcappage.js"></script>
+<script src="/static/js/fundtradepage.js"></script>
 <script src="/static/js/pages.js"></script>
 <script src="/static/js/trading.js"></script>
 

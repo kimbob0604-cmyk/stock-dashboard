@@ -744,6 +744,8 @@ def index():
 @app.route("/watchlist")
 @app.route("/relcap")
 @app.route("/annual-returns")
+@app.route("/fund-flow")
+@app.route("/trade")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
@@ -3966,6 +3968,55 @@ def _startup_market_risk():
     """부팅 직후 한 번 — 표를 만들고 지수·FRED 를 받는다(데몬 스레드)."""
     time.sleep(30)                               # 부팅 가격 갱신과 겹치지 않게
     _market_risk_refresh()
+
+
+_PUBSTAT_LOCK = threading.Lock()
+_PUBSTAT_STATUS: dict = {}
+
+
+def _public_stats_refresh() -> dict:
+    """금투협 증시자금 · 관세청 수출입 갱신(public_stats). 예외를 올리지 않는다.
+    상태(키 이름·결과·시각)는 _PUBSTAT_STATUS 에 — 화면이 '왜 비었는지' 를 그대로 보여 준다."""
+    if not _PUBSTAT_LOCK.acquire(blocking=False):
+        return {"skipped": "다른 갱신이 돌고 있다"}
+    out: dict = {}
+    try:
+        import public_stats as _ps
+        name, key = _ps.find_key()
+        out["key_name"] = name
+        if not key:
+            out["error"] = ("공공데이터포털 키가 없다 — Render 환경변수에 "
+                            f"{_ps.KEY_ENV_NAMES[0]} 로 넣는다")
+        else:
+            today = now_kst().date()
+            with _get_db() as conn:
+                out["kofia"] = _ps.refresh_kofia(conn, today, key)
+                out["customs"] = _ps.refresh_customs(conn, today, key)
+        log.info("[공공통계] 갱신 %s", {k: v for k, v in out.items() if k != "customs"})
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[공공통계] 실패: %s", exc, exc_info=True)
+        out["error"] = str(exc)[:300]
+    finally:
+        out["at"] = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        _PUBSTAT_STATUS.clear()
+        _PUBSTAT_STATUS.update(out)
+        _PUBSTAT_LOCK.release()
+    return out
+
+
+def _startup_public_stats():
+    """부팅 직후 — 공공 통계 첫 수집, 공시 표가 비었으면 최근 4일을 한 번 채운다."""
+    time.sleep(60)
+    _public_stats_refresh()
+    try:
+        if os.getenv("DART_API_KEY") and _SQLITE_OK and USE_SQLITE:
+            with _get_db() as conn:
+                n = conn.execute("SELECT COUNT(*) FROM disclosure_history").fetchone()[0]
+            if n == 0:
+                poll_dart_disclosures(days_back=4)
+                log.info("[DART] 부팅 — 비어 있던 공시 표를 최근 4일로 채움")
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[DART] 부팅 채움 실패: %s", exc)
 
 
 def _seed_cap_asof(uni: dict) -> str | None:
@@ -7812,6 +7863,9 @@ def _startup():
     # 지수·FRED 는 바로 받고, ADR 근사는 일봉이 차는 대로 16:40 잡이 다시 채운다.
     threading.Thread(target=_startup_market_risk,
                      daemon=True, name="market-risk-startup").start()
+    # 공공데이터포털 통계(증시자금·수출입) 첫 수집 + 공시 표가 비었으면 최근 4일 채움
+    threading.Thread(target=_startup_public_stats,
+                     daemon=True, name="public-stats-startup").start()
 
     # Render 는 영속 디스크가 없어 재시작하면 data.json 이 git 에 있는 판으로
     # 되돌아간다. 부팅 직후 한 번 덮어써야 그날 값이 올라온다.
@@ -8011,6 +8065,13 @@ def _startup():
                            id="market_risk_am", max_instances=1,
                            misfire_grace_time=3600)
         log.info("[위험지표] 평일 16:40 · 07:40 스케줄 등록")
+
+        # ── 공공데이터포털 통계 ── 금투협은 D+1 13시 이후 공개 → 평일 14:10. 관세청 월간은
+        # 15일경 전월분 → 매일 14:10 에 같이 보되 이미 있으면 묻지 않는다(public_stats).
+        _scheduler.add_job(_public_stats_refresh, "cron",
+                           day_of_week="mon-fri", hour=14, minute=10,
+                           id="public_stats", max_instances=1,
+                           misfire_grace_time=3600)
 
         # ── Stage 2 자동 스캔 ──
         # 1) 장중 5분 간격 KR 실시간 스캔 (SQLite 기반 ~1초)
@@ -11077,8 +11138,11 @@ def init_dart_corp_map_db():
     return len(rows)
 
 
-def poll_dart_disclosures():
-    """DART 최근 공시 조회 → 중요 공시 텔레그램 알림. 1분 간격 호출."""
+def poll_dart_disclosures(days_back: int = 0):
+    """DART 최근 공시 조회 → 중요 공시 텔레그램 알림. 1분 간격 호출.
+
+    `days_back` 을 주면 그 날수만큼 앞에서부터 받는다 — 부팅 때 표가 비었으면 최근 며칠을
+    한 번 채운다(재배포 뒤 평일 08시까지 공시 화면이 비지 않게, 2026-10-30)."""
     dart_key = os.getenv("DART_API_KEY")
     if not dart_key:
         return
@@ -11086,6 +11150,7 @@ def poll_dart_disclosures():
         return
 
     today = now_kst().strftime("%Y%m%d")
+    bgn_de = (now_kst() - timedelta(days=days_back)).strftime("%Y%m%d")
     # 페이징 보강 (Step 4-7-D-2): 분기 시즌 하루 수천 건 → page_no 루프
     MAX_PAGES = 10  # 1000건 한도 (분기 발표 절정일 보호)
     items = []
@@ -11096,7 +11161,7 @@ def poll_dart_disclosures():
                 "https://opendart.fss.or.kr/api/list.json",
                 params={
                     "crtfc_key": dart_key,
-                    "bgn_de": today,
+                    "bgn_de": bgn_de,
                     "end_de": today,
                     "page_count": 100,
                     "page_no": page,
@@ -17133,6 +17198,50 @@ def api_global_macro():
 
 
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
+def _market_caps_by_market() -> dict:
+    """{'KOSPI': 원, 'KOSDAQ': 원} — stocks 시총을 종목 마스터의 시장으로 합친다."""
+    markets = _mr_markets()
+    caps = {"KOSPI": 0.0, "KOSDAQ": 0.0}
+    with _get_db() as conn:
+        for code, cap in conn.execute(
+                f"SELECT code, market_cap FROM stocks WHERE code GLOB '{_KR_CODE_GLOB}' "
+                "AND market_cap > 0"):
+            m = markets.get(code)
+            if m in caps:
+                caps[m] += float(cap)
+    return {k: v for k, v in caps.items() if v > 0}
+
+
+@app.route("/api/fund_flow")
+def api_fund_flow():
+    """💰 증시자금 — 투자자예탁금 · 신용거래융자(전체·유가·코스닥) · 반대매매 · 신용/시총 비율."""
+    import public_stats as _ps
+    days = {"6M": 183, "1Y": 365, "3Y": 1095}.get(request.args.get("period", "1Y"), 365)
+    try:
+        with _get_db() as conn:
+            payload = _ps.kofia_payload(conn, now_kst().strftime("%Y-%m-%d"), days,
+                                        _market_caps_by_market())
+        payload["status"] = {k: _PUBSTAT_STATUS.get(k) for k in ("key_name", "kofia", "error", "at")}
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[증시자금] 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/trade_stats")
+def api_trade_stats():
+    """🚢 수출입 — 관세청 품목별 월간 수출액·단가·YoY(public_stats.TRADE_ITEMS)."""
+    import public_stats as _ps
+    try:
+        with _get_db() as conn:
+            payload = _ps.customs_payload(conn)
+        payload["status"] = {k: _PUBSTAT_STATUS.get(k) for k in ("key_name", "customs", "error", "at")}
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[수출입] 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 _RELCAP_CACHE: dict = {}
 _RELCAP_TTL_S = 600
 _RELCAP_TTL_PARTIAL_S = 60     # 한 쌍이라도 비었으면 짧게 — 재배포 직후 stocks 가 비었던 결과를 10분 붙잡지 않게
