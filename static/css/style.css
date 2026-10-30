@@ -4414,6 +4414,43 @@ tr:hover td {
 .rk-empty { color: var(--text-tertiary, #888); font-size: 12px; padding: 30px 0; text-align: center; }
 .rk-foot { color: var(--text-tertiary, #888); font-size: 11px; margin-top: 18px; }
 
+/* ── 📢 DART 공시 (disclosurepage.js) ── */
+.disc-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.disc-viewtoggle { display: inline-flex; gap: 4px; }
+.disc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+.disc-chip {
+  background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border-primary);
+  border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.disc-chip b { margin-left: 5px; color: var(--text-tertiary, #888); font-weight: 600; }
+.disc-chip.active { color: var(--text-primary); border-color: var(--border-active); }
+.disc-chip.active b { color: var(--color-gold, #FFD700); }
+.disc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.disc-card {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--bg-card); border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md); padding: 10px 12px;
+}
+.disc-card:hover { border-color: var(--border-secondary); }
+.disc-card.disc-critical { border-left: 3px solid #FF3333; }
+.disc-card.disc-high { border-left: 3px solid #FFD700; }
+.disc-card.disc-medium { border-left: 3px solid #FF9500; }
+.disc-card-head { display: flex; align-items: center; gap: 6px; font-size: 13px; flex-wrap: wrap; }
+.disc-card-head b { color: var(--text-primary); }
+.disc-card-head .disc-date { margin-left: auto; }
+.disc-card-title { color: var(--text-secondary); font-size: 12.5px; margin: 6px 0; line-height: 1.45; }
+.disc-code { color: #FFD700; cursor: pointer; font-size: 11px; }
+.disc-cat {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 4px;
+  background: var(--bg-secondary); color: var(--text-secondary); white-space: nowrap;
+}
+.disc-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-secondary); }
+.disc-facts b { color: var(--text-primary); font-family: var(--font-mono); font-weight: 600; }
+.disc-table td a { color: var(--text-primary); text-decoration: none; }
+.disc-dt { white-space: nowrap; width: 48px; color: var(--text-tertiary, #888); }
+.disc-table tr.disc-critical td:first-child { box-shadow: inset 3px 0 #FF3333; }
+.disc-table tr.disc-high td:first-child { box-shadow: inset 3px 0 #FFD700; }
+
 /* ── 📈 신고가·등락률 (moverspage.js) ── */
 .mv-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
 .mv-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

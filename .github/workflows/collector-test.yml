@@ -20,6 +20,8 @@ on:
       - 'newhigh.py'
       - 'market_risk.py'
       - 'movers.py'
+      - 'disclosure_category.py'
+      - 'scripts/check_disclosures.py'
       - 'scripts/check_movers.py'
       - 'scripts/check_new_high_logic.py'
       - 'db_backup.py'
@@ -53,6 +55,8 @@ jobs:
         run: python3 scripts/check_market_risk.py
       - name: 신고가·등락률 화면 검증 (합성 DB)
         run: python3 scripts/check_movers.py
+      - name: 공시 카테고리·API 검증 (진짜 server.py)
+        run: python3 scripts/check_disclosures.py
       - name: 신고가 판정 검증 (리츠·스팩 제외 포함)
         run: python3 scripts/check_new_high_logic.py
       - name: data.json 생성기 검증
