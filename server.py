@@ -736,6 +736,12 @@ def index():
 @app.route("/risk")
 @app.route("/movers")
 @app.route("/proxy")
+@app.route("/dashboard")
+@app.route("/valuechain")
+@app.route("/market")
+@app.route("/globalmacro")
+@app.route("/disclosure")
+@app.route("/watchlist")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
