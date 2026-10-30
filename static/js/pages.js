@@ -890,6 +890,8 @@ const PAGE_RENDERERS = {
   risk:       () => { renderRiskPage(); },
   movers:     () => { renderMoversPage(); },
   proxy:      () => { renderProxyPage(); },
+  relcap:     () => { renderRelcapPage(); },
+  annual:     () => { renderAnnualPage(); },
   valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
@@ -903,6 +905,7 @@ const _SIMPLE_URLS = {
   dashboard: '/dashboard', valuechain: '/valuechain', market: '/market',
   globalmacro: '/globalmacro', disclosure: '/disclosure', watchlist: '/watchlist',
   risk: '/risk', movers: '/movers', proxy: '/proxy',
+  relcap: '/relcap', annual: '/annual-returns',
 };
 const _URL_ROUTED_PAGES = new Set([
   'verification', 'journal',
@@ -1011,7 +1014,7 @@ function navigateTo(page, params, opts) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk','page-movers','page-proxy',
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk','page-movers','page-proxy','page-relcap','page-annual',
                                   'page-verification','page-ops-freshness','page-ops-cron','page-ops-health','page-stockdetail');
   document.body.classList.add(`page-${page}`);
 
