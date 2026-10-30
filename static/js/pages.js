@@ -888,6 +888,7 @@ const PAGE_RENDERERS = {
   pnljournal: () => { renderPnlJournalPage(); },
   globalmacro:() => { renderGlobalMacroPage(); },
   risk:       () => { renderRiskPage(); },
+  movers:     () => { renderMoversPage(); },
   valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
@@ -898,7 +899,7 @@ const PAGE_RENDERERS = {
 const _URL_ROUTED_PAGES = new Set([
   'verification', 'journal',
   'ops-freshness', 'ops-cron', 'ops-health',
-  'risk',
+  'risk', 'movers',
 ]);
 
 /** page + params → pathname. URL 라우팅 대상이 아닌 페이지는 '/' 반환. */
@@ -914,6 +915,7 @@ function pageToUrl(page, params) {
   if (page === 'ops-cron')      return '/ops/cron';
   if (page === 'ops-health')    return '/ops/health';
   if (page === 'risk')          return '/risk';
+  if (page === 'movers')        return '/movers';
   return '/';
 }
 
@@ -927,6 +929,7 @@ function parseUrlPath(pathname) {
   m = pathname.match(/^\/journal(?:\/(\d+))?\/?$/);
   if (m) return { page: 'journal', params: m[1] ? { id: parseInt(m[1], 10) } : {} };
   if (/^\/risk\/?$/.test(pathname)) return { page: 'risk', params: {} };
+  if (/^\/movers\/?$/.test(pathname)) return { page: 'movers', params: {} };
   // /ops/<page>
   m = pathname.match(/^\/ops\/([a-z\-]+)\/?$/);
   if (m) {
@@ -999,7 +1002,7 @@ function navigateTo(page, params, opts) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk',
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk','page-movers',
                                   'page-verification','page-ops-freshness','page-ops-cron','page-ops-health','page-stockdetail');
   document.body.classList.add(`page-${page}`);
 

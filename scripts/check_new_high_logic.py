@@ -153,6 +153,20 @@ res2 = nh.compute(conn, TODAY, MIN_CAP, fetch=fake_fetch, budget_s=10, cal=CAL)
 intra = [r for k in res2['buckets'] for r in res2['buckets'][k] if r['code'] == '000006']
 assert not intra, '장중 고가로만 뚫은 종목이 신고가로 잡힌다'
 
+# 리츠·인프라(마스터 유형)·스팩(이름)은 모집단 밖 — 뚫었어도 빠지고 모집단 수에도 안 든다.
+# 094800 맵스리얼티는 이름에 '리츠' 가 없는 리츠다(이름 규칙으로는 못 뺀다).
+_n_before = res2['universe_n']
+add('094800', '맵스리얼티', 9500, series(lambda d: 9000), older=older('094800', 7000))
+add('088980', '맥쿼리인프라', 9500, series(lambda d: 9000), older=older('088980', 7000))
+add('900001', '대신밸런스제99호스팩', 9500, series(lambda d: 9000), older=older('900001', 7000))
+res3 = nh.compute(conn, TODAY, MIN_CAP, fetch=fake_fetch, budget_s=10, cal=CAL)
+ex = [r['name'] for k in res3['buckets'] for r in res3['buckets'][k]
+      if r['code'] in ('094800', '088980', '900001')]
+assert not ex, f'리츠·인프라·스팩이 신고가에 들어갔다: {ex}'
+assert res3['universe_n'] == _n_before, f"리츠·스팩이 모집단 수에 들었다: {res3['universe_n']} vs {_n_before}"
+assert '094800' in nh.excluded_codes() and '088980' in nh.excluded_codes(), '마스터에서 리츠·인프라를 못 고른다'
+assert nh.excluded_codes(load=lambda: (_ for _ in ()).throw(OSError('x'))) == [], '마스터 실패에 예외가 샌다'
+
 print('역사적:', b['hist'])
 print('52주  :', b['w52'])
 print('120일 :', b['d120'])
