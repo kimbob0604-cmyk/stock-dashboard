@@ -18,6 +18,9 @@ on:
       - 'stock_master.py'
       - 'ohlcv_autofill.py'
       - 'newhigh.py'
+      - 'market_risk.py'
+      - 'db_backup.py'
+      - 'scripts/check_market_risk.py'
       - 'valuechain.py'
       - 'revision_calculator.py'
       - 'consensus_collector.py'
@@ -43,6 +46,8 @@ jobs:
         run: pip install -q -r requirements.txt
       - name: 수집기 검증
         run: python3 scripts/test_collectors.py
+      - name: 위험지표·ADR 검증 (합성 DB)
+        run: python3 scripts/check_market_risk.py
       - name: data.json 생성기 검증
         run: python3 scripts/test_data_json.py
       - name: 부팅 위치 검증 (gunicorn preload 여도 워커에서 시작)
