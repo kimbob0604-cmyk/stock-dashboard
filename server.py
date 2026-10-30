@@ -742,6 +742,8 @@ def index():
 @app.route("/globalmacro")
 @app.route("/disclosure")
 @app.route("/watchlist")
+@app.route("/relcap")
+@app.route("/annual-returns")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
@@ -17131,6 +17133,95 @@ def api_global_macro():
 
 
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
+_RELCAP_CACHE: dict = {}
+_RELCAP_TTL_S = 600
+_FOREIGN_CAP_TTL_S = 12 * 3600
+
+
+def _foreign_caps(symbols: list[str]) -> dict:
+    """해외 종목 현재 시총(현지통화) — yfinance. 12시간 파일 캐시. 못 받은 심볼은 빠진다."""
+    cache_file = BASE_DIR / "cache" / "relcap_foreign_caps.json"
+    try:
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        if time.time() - cached.get("ts", 0) < _FOREIGN_CAP_TTL_S and \
+                all(s in cached.get("caps", {}) for s in symbols):
+            return cached["caps"]
+    except Exception:                                      # noqa: BLE001
+        pass
+    caps: dict = {}
+    try:
+        import yfinance as _yf
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[상대 시총] yfinance 없음: %s", exc)
+        return caps
+    for sym in symbols:
+        try:
+            t = _yf.Ticker(sym)
+            v = None
+            try:
+                v = t.fast_info["marketCap"]
+            except Exception:                              # noqa: BLE001
+                v = (t.info or {}).get("marketCap")
+            if v and float(v) > 0:
+                caps[sym] = float(v)
+        except Exception as exc:                           # noqa: BLE001
+            log.warning("[상대 시총] %s 시총 실패: %s", sym, exc)
+    if caps:
+        try:
+            cache_file.parent.mkdir(exist_ok=True)
+            cache_file.write_text(json.dumps({"ts": time.time(), "caps": caps}), encoding="utf-8")
+        except Exception:                                  # noqa: BLE001
+            pass
+    return caps
+
+
+@app.route("/api/relcap")
+def api_relcap():
+    """상대 시총 — 종목 간 시가총액 비율 추이(relcap.py). ?period=6M|1Y|2Y. 10분 캐시."""
+    import relcap as _rc
+    period = request.args.get("period", "1Y")
+    if period not in _rc.PERIOD_RANGE:
+        period = "1Y"
+    hit = _RELCAP_CACHE.get(("pairs", period))
+    if hit and time.time() - hit[0] < _RELCAP_TTL_S:
+        return jsonify(hit[1])
+    try:
+        kr = {s: code for _, a, b in _rc.PAIRS for s, code, _ in a + b if code}
+        caps: dict = {}
+        with _get_db() as conn:
+            q = ",".join("?" * len(kr))
+            got = {r[0]: float(r[1]) for r in conn.execute(
+                f"SELECT code, market_cap FROM stocks WHERE code IN ({q}) AND market_cap > 0",
+                list(kr.values()))}
+        caps.update({s: got[c] for s, c in kr.items() if c in got})
+        caps.update(_foreign_caps(_rc.foreign_symbols()))
+        payload = _rc.relative_caps(caps, period)
+        payload["updated_at"] = now_kst().strftime("%Y-%m-%d %H:%M")
+        _RELCAP_CACHE[("pairs", period)] = (time.time(), payload)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[상대 시총] 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/annual_returns")
+def api_annual_returns():
+    """주요 지수 연도별 수익률(가격 지수 — 배당 제외). 6시간 캐시."""
+    import relcap as _rc
+    hit = _RELCAP_CACHE.get("annual")
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return jsonify(hit[1])
+    try:
+        payload = _rc.annual_returns()
+        payload["updated_at"] = now_kst().strftime("%Y-%m-%d %H:%M")
+        if any(r.get("returns") for r in payload["rows"]):
+            _RELCAP_CACHE["annual"] = (time.time(), payload)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[연도별 수익률] 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 _GPROXY_CACHE: dict = {}
 _GPROXY_TTL_S = 60
 

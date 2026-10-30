@@ -22,6 +22,8 @@ on:
       - 'movers.py'
       - 'disclosure_category.py'
       - 'global_proxy.py'
+      - 'relcap.py'
+      - 'scripts/check_relcap.py'
       - 'scripts/check_global_proxy.py'
       - 'scripts/check_disclosures.py'
       - 'scripts/check_movers.py'
@@ -61,6 +63,8 @@ jobs:
         run: python3 scripts/check_disclosures.py
       - name: 글로벌 프록시 검증 (가짜 소스 + 진짜 server.py)
         run: python3 scripts/check_global_proxy.py
+      - name: 상대 시총·연도별 수익률 검증 (가짜 소스 + 진짜 server.py)
+        run: python3 scripts/check_relcap.py
       - name: 신고가 판정 검증 (리츠·스팩 제외 포함)
         run: python3 scripts/check_new_high_logic.py
       - name: data.json 생성기 검증
