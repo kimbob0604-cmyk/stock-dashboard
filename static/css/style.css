@@ -4414,6 +4414,24 @@ tr:hover td {
 .rk-empty { color: var(--text-tertiary, #888); font-size: 12px; padding: 30px 0; text-align: center; }
 .rk-foot { color: var(--text-tertiary, #888); font-size: 11px; margin-top: 18px; }
 
+/* ── 📈 신고가·등락률 (moverspage.js) ── */
+.mv-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.mv-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mv-table th { color: var(--text-tertiary, #888); font-weight: 500; text-align: left;
+  padding: 6px 6px; border-bottom: 1px solid var(--border-primary); }
+.mv-table td { padding: 6px 6px; border-bottom: 1px solid var(--border-primary); }
+.mv-table tbody tr { cursor: pointer; }
+.mv-table tbody tr:hover { background: var(--bg-card-hover); }
+.mv-num { text-align: right !important; font-family: var(--font-mono); white-space: nowrap; }
+.mv-rank { color: var(--text-tertiary, #888); width: 26px; }
+.mv-name { color: var(--text-primary); font-weight: 600; }
+.mv-mkt { color: var(--text-tertiary, #888); font-size: 10px; margin-left: 4px; }
+.mv-sector { color: var(--text-secondary); font-size: 11.5px; }
+@media (max-width: 768px) {
+  .mv-two { grid-template-columns: 1fr; }
+  .mv-hide-m { display: none; }
+}
+
 /* ============================================================
    📱 MOBILE RESPONSIVE (≤768px)
    ============================================================ */

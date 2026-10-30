@@ -100,9 +100,15 @@ AXES = (("hist", "역사적", "🏔"), ("w52", "52주", "📈"), ("d120", "120�
 # (2026-10-29 사용자 요청: '시총 … 대상 · 종가 기준' 만).
 BASIS_TEXT = "종가 기준"
 
-# 판정 모집단 — ETF 아님·시총 하한 이상·오늘 거래됨·1,000원 이상.
+# 판정 모집단 — ETF·ETN·리츠·인프라·스팩 아님·시총 하한 이상·오늘 거래됨·1,000원 이상.
+# 리츠·인프라펀드는 종목 마스터의 유형으로 뺀다(이름에 '리츠' 가 없는 리츠가 있다 —
+# 맵스리얼티). 스팩은 마스터에 아예 없으니 이름으로 뺀다. 2026-10-30 추가.
+# 뺄 코드는 compute 가 연결마다 임시 표(_nh_excl)에 넣는다 — ensure_exclusions.
+EXCLUDE_TYPES = ("reit", "infra")
 UNIVERSE_WHERE = """(s.market = '' OR s.market LIKE 'KOS%')
                   AND COALESCE(s.is_etf, 0) = 0
+                  AND COALESCE(s.name, '') NOT LIKE '%스팩%'
+                  AND s.code NOT IN (SELECT code FROM temp._nh_excl)
                   AND s.close >= 1000 AND s.change_pct IS NOT NULL
                   AND COALESCE(s.volume_mn, 0) > 0
                   AND COALESCE(s.market_cap, 0) >= :min_cap"""
@@ -452,6 +458,7 @@ def compute(conn, today, min_cap: float, *, fetch=None,
     if not w["d120_start"]:
         res["error"] = "거래일 달력으로 120거래일 창을 못 만든다"
         return res
+    ensure_exclusions(conn)
     params = {"d60_start": w["d60_start"], "d120_start": w["d120_start"],
               "w52_start": w["w52_start"],
               "scan_start": w["scan_start"], "today": w["today"], "min_cap": min_cap}
@@ -498,6 +505,27 @@ def compute(conn, today, min_cap: float, *, fetch=None,
             res["buckets"]["d60"].append(r)
     res["calendar_corrections"] = list(cal.corrections)
     return res
+
+
+def excluded_codes(load=None) -> list[str]:
+    """종목 마스터에서 리츠·인프라펀드 코드. 마스터를 못 읽으면 빈 목록(스팩은 이름으로 빠진다)."""
+    if load is None:
+        import stock_master
+        load = stock_master.load_master
+    try:
+        rows = load() or {}
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[신고가] 종목 마스터를 못 읽었다 — 리츠·인프라를 못 뺀다: %s", exc)
+        return []
+    return sorted(c for c, r in rows.items() if r.get("type") in EXCLUDE_TYPES)
+
+
+def ensure_exclusions(conn, codes: list[str] | None = None) -> None:
+    """이 연결에 임시 표 _nh_excl 을 만들고 뺄 코드를 채운다. UNIVERSE_WHERE 를 쓰기 전에 부른다."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _nh_excl (code TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM temp._nh_excl")
+    conn.executemany("INSERT OR IGNORE INTO temp._nh_excl VALUES (?)",
+                     [(c,) for c in (excluded_codes() if codes is None else codes)])
 
 
 def _as_dicts(conn, sql, params):

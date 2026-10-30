@@ -734,6 +734,7 @@ def index():
 @app.route("/journal/<int:journal_id>")
 @app.route("/ops/<page>")
 @app.route("/risk")
+@app.route("/movers")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
@@ -3891,6 +3892,9 @@ def _startup_ohlcv_fill():
         _fill_ohlcv_job()
     except Exception as exc:                     # noqa: BLE001
         log.error("[startup] 일봉 채움 실패: %s", exc, exc_info=True)
+    # 재배포 직후엔 일봉이 비어 있어 부팅 30초 뒤의 위험지표 갱신이 ADR 근사를 못
+    # 채웠다(2026-10-30). 일봉이 찬 지금 한 번 더 — 장 마감 뒤면 스냅샷도 남는다.
+    _market_risk_refresh()
 
 
 _MARKET_RISK_LOCK = threading.Lock()
@@ -17076,6 +17080,54 @@ def api_global_macro():
 
 
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
+_MOVERS_CACHE: dict = {}
+_MOVERS_TTL_S = 120
+
+
+@app.route("/api/movers")
+def api_movers():
+    """신고가(4축, 일간) · 등락률(일간·주간) — 모집단은 시황 신고가와 같다(movers.py).
+
+    view=newhigh|change · period=day|week · market=ALL|KOSPI|KOSDAQ. 2분 캐시.
+    신고가는 네트워크로 상장 이후 이력을 받지 않는다(budget_s=0, 표에 있는 것만).
+    """
+    import movers as _mv
+    import ohlcv_autofill as _oa
+    view = request.args.get("view", "newhigh")
+    period = request.args.get("period", "day")
+    market = (request.args.get("market") or "ALL").upper()
+    if view not in ("newhigh", "change") or period not in ("day", "week") \
+            or market not in ("ALL", "KOSPI", "KOSDAQ"):
+        return jsonify({"error": "view=newhigh|change · period=day|week · "
+                                 "market=ALL|KOSPI|KOSDAQ"}), 400
+    if view == "newhigh":
+        period = "day"
+    key = (view, period, market)
+    hit = _MOVERS_CACHE.get(key)
+    if hit and time.time() - hit[0] < _MOVERS_TTL_S:
+        return jsonify(hit[1])
+    now = now_kst()
+    today = now.strftime("%Y-%m-%d")
+    try:
+        with _get_db() as conn:
+            markets = _mr_markets()
+            if view == "newhigh":
+                data = _mv.newhigh_list(conn, today, _oa.MIN_MARKET_CAP_WON, markets, market)
+            else:
+                rows = _mv.tag_market(_mv.universe(conn, _oa.MIN_MARKET_CAP_WON),
+                                      markets, market)
+                data = (_mv.daily_movers(rows) if period == "day"
+                        else _mv.weekly_movers(conn, rows, today))
+        payload = {"view": view, "period": period, "market": market, "data": data,
+                   "basis": f"시총 {_oa.MIN_MARKET_CAP_LABEL} 이상 · ETF·ETN·리츠·스팩 제외",
+                   "updated_at": now.strftime("%Y-%m-%d %H:%M")}
+        _MOVERS_CACHE[key] = (time.time(), payload)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[movers] 조회 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/market/breadth")
 def api_market_breadth():
     """ADR(등락비율) — 시장별 오늘 상승/하락 수 · 20일 ADR · 기간별 추이.

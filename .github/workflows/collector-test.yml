@@ -19,6 +19,9 @@ on:
       - 'ohlcv_autofill.py'
       - 'newhigh.py'
       - 'market_risk.py'
+      - 'movers.py'
+      - 'scripts/check_movers.py'
+      - 'scripts/check_new_high_logic.py'
       - 'db_backup.py'
       - 'scripts/check_market_risk.py'
       - 'valuechain.py'
@@ -48,6 +51,10 @@ jobs:
         run: python3 scripts/test_collectors.py
       - name: 위험지표·ADR 검증 (합성 DB)
         run: python3 scripts/check_market_risk.py
+      - name: 신고가·등락률 화면 검증 (합성 DB)
+        run: python3 scripts/check_movers.py
+      - name: 신고가 판정 검증 (리츠·스팩 제외 포함)
+        run: python3 scripts/check_new_high_logic.py
       - name: data.json 생성기 검증
         run: python3 scripts/test_data_json.py
       - name: 부팅 위치 검증 (gunicorn preload 여도 워커에서 시작)
