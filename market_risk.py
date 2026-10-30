@@ -52,7 +52,8 @@ SNAPSHOT_MAX_AGE_H = 4
 # 스냅샷 하루의 최소 종목 수 — 가격 갱신이 반쯤 실패한 날을 정식으로 남기지 않는다.
 SNAPSHOT_MIN_TOTAL = {"KOSPI": 500, "KOSDAQ": 1000}
 
-NAVER_INDEX = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
+NAVER_INDEX = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ",
+               "KOSPI200": "KPI200"}         # 코스피200 — 글로벌 프록시가 종가 비교에 쓴다
 NAVER_PAGE_SIZE = 60                      # 네이버 지수 일봉 API 의 최대(100 은 오류)
 NAVER_FULL_PAGES = 15                     # 첫 수집 — 60×15 = 900거래일 ≈ 3.6년
 FRED_SERIES = {"VIX": "VIXCLS", "T10Y2Y": "T10Y2Y"}

@@ -735,6 +735,7 @@ def index():
 @app.route("/ops/<page>")
 @app.route("/risk")
 @app.route("/movers")
+@app.route("/proxy")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
@@ -17124,6 +17125,46 @@ def api_global_macro():
 
 
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
+_GPROXY_CACHE: dict = {}
+_GPROXY_TTL_S = 60
+
+
+@app.route("/api/global_proxy")
+def api_global_proxy():
+    """🌐 글로벌 프록시 — Hyperliquid 24시간 선물 · ADR/GDR 괴리율 · 지수선물·매크로 · 미국 ETF.
+
+    국내 비교값은 stocks 의 최근 가격(장중이면 현재가, 마감 뒤면 종가)과 risk_series 의
+    코스피200 종가다. 외부 호출은 global_proxy.build 가 동시에 한다. 1분 캐시.
+    """
+    hit = _GPROXY_CACHE.get("v")
+    if hit and time.time() - hit[0] < _GPROXY_TTL_S:
+        return jsonify(hit[1])
+    import global_proxy as _gp
+    try:
+        codes = sorted({t[2][1] for t in _gp.PERPS if t[2][0] == "stock"}
+                       | {x[2] for x in _gp.LISTINGS})
+        domestic: dict = {}
+        index_close: dict = {}
+        with _get_db() as conn:
+            q = ",".join("?" * len(codes))
+            domestic = {r[0]: float(r[1]) for r in conn.execute(
+                f"SELECT code, close FROM stocks WHERE code IN ({q}) AND close > 0", codes)}
+            try:
+                row = conn.execute("SELECT date, value FROM risk_series WHERE series = "
+                                   "'idx:KOSPI200' ORDER BY date DESC LIMIT 1").fetchone()
+                if row:
+                    index_close["KPI200"] = float(row[1])
+            except sqlite3.Error:                          # 위험지표 표가 아직 없는 서버
+                pass
+        payload = _gp.build(domestic, index_close)
+        payload["updated_at"] = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        _GPROXY_CACHE["v"] = (time.time(), payload)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[글로벌 프록시] 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 _MOVERS_CACHE: dict = {}
 _MOVERS_TTL_S = 120
 
