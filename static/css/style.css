@@ -4383,6 +4383,37 @@ tr:hover td {
   border-radius: 3px; display: inline-block;
 }
 
+/* ── 🧭 위험지표 (riskpage.js) ── */
+.rk-toolbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.rk-btns { display: inline-flex; gap: 4px; }
+.rk-btn {
+  background: var(--bg-card); color: var(--text-secondary);
+  border: 1px solid var(--border-primary); border-radius: 6px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.rk-btn.active { color: var(--text-primary); border-color: var(--border-active); }
+.rk-desc { color: var(--text-secondary); font-size: 12px; margin: -2px 0 10px; line-height: 1.5; }
+.rk-grid2 { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.rk-date { color: var(--text-tertiary); font-size: 10px; margin-left: 4px; }
+.rk-counts { font-size: 11.5px; color: var(--text-secondary); margin-top: 6px; }
+.rk-hot  { border-left: 3px solid var(--color-up); }
+.rk-cold { border-left: 3px solid var(--color-down); }
+.rk-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-top: 10px; }
+.rk-chart-box {
+  background: var(--bg-card); border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md); padding: 10px 12px;
+}
+.rk-chart-title { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.rk-svg { width: 100%; height: auto; display: block; }
+.rk-line { fill: none; stroke: var(--color-gold, #FFD700); stroke-width: 1.6; }
+.rk-ref { stroke: var(--border-active); stroke-dasharray: 4 4; stroke-width: 1; }
+.rk-ref-label, .rk-axis { fill: var(--text-tertiary, #666); font-size: 10px; }
+.rk-cross { stroke: var(--text-secondary); stroke-width: 1; }
+.rk-tip { fill: var(--text-primary); font-size: 11px; font-weight: 600; }
+.rk-note { color: var(--text-tertiary, #888); font-size: 11px; margin-top: 6px; }
+.rk-empty { color: var(--text-tertiary, #888); font-size: 12px; padding: 30px 0; text-align: center; }
+.rk-foot { color: var(--text-tertiary, #888); font-size: 11px; margin-top: 18px; }
+
 /* ============================================================
    📱 MOBILE RESPONSIVE (≤768px)
    ============================================================ */

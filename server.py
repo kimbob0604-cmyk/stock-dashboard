@@ -733,6 +733,7 @@ def index():
 @app.route("/journal")
 @app.route("/journal/<int:journal_id>")
 @app.route("/ops/<page>")
+@app.route("/risk")
 def spa_route(**kwargs):  # noqa: ARG001  (kwargs 는 프론트가 읽음)
     return send_file(BASE_DIR / "index.html")
 
@@ -3890,6 +3891,68 @@ def _startup_ohlcv_fill():
         _fill_ohlcv_job()
     except Exception as exc:                     # noqa: BLE001
         log.error("[startup] 일봉 채움 실패: %s", exc, exc_info=True)
+
+
+_MARKET_RISK_LOCK = threading.Lock()
+_MR_MARKETS: dict | None = None
+
+
+def _mr_markets() -> dict:
+    """종목코드 → 시장(마스터). 한 번 읽어 둔다 — 마스터는 배포로만 바뀐다."""
+    global _MR_MARKETS
+    if not _MR_MARKETS:
+        import market_risk as _mr
+        _MR_MARKETS = _mr.master_markets()
+    return _MR_MARKETS
+
+
+def _market_risk_refresh() -> dict:
+    """ADR 스냅샷·근사 채움 + 지수 일봉·VIX·금리차 갱신. 예외를 올리지 않는다.
+
+    스냅샷(전 종목 정식 집계)은 **거래일 15:40 이후, stocks 가 최근 갱신됐고 두
+    시장 모두 충분히 셌을 때만** 남긴다. 아니면 그 이유를 결과에 적고 넘어간다 —
+    반쯤 갱신된 등락률을 정식 기록으로 박지 않는다. 그날은 일봉 근사가 메운다.
+    """
+    if not _MARKET_RISK_LOCK.acquire(blocking=False):
+        return {"skipped": "다른 갱신이 돌고 있다"}
+    out: dict = {}
+    try:
+        import market_risk as _mr
+        now = now_kst()
+        today = now.strftime("%Y-%m-%d")
+        now_iso = now.strftime("%Y-%m-%d %H:%M:%S")
+        markets = _mr_markets()
+        with _get_db() as conn:
+            _mr.ensure_tables(conn)
+            try:
+                trading = _krx_cal.Calendar().is_trading_day(now.date())
+            except Exception:                              # noqa: BLE001
+                trading = now.weekday() < 5
+            if not trading or (now.hour, now.minute) < (15, 40):
+                out["snapshot"] = "건너뜀 — 거래일 15:40 이후가 아니다"
+            elif not _mr.stocks_fresh(conn, datetime.now(timezone.utc)):
+                out["snapshot"] = "건너뜀 — stocks 가 최근에 갱신되지 않았다"
+            else:
+                counts = _mr.count_today(conn, markets)
+                ok, why = _mr.snapshot_ok(counts)
+                out["snapshot"] = (_mr.record_snapshot(conn, today, counts, now_iso)
+                                   if ok else f"건너뜀 — {why}")
+            out["backfill"] = _mr.backfill_from_ohlcv(conn, markets, now_iso)
+            conn.commit()
+            out["series"] = _mr.refresh_series(conn, today)
+        log.info("[위험지표] 갱신 %s", out)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[위험지표] 갱신 실패: %s", exc, exc_info=True)
+        out["error"] = str(exc)
+    finally:
+        _MARKET_RISK_LOCK.release()
+    return out
+
+
+def _startup_market_risk():
+    """부팅 직후 한 번 — 표를 만들고 지수·FRED 를 받는다(데몬 스레드)."""
+    time.sleep(30)                               # 부팅 가격 갱신과 겹치지 않게
+    _market_risk_refresh()
 
 
 def _seed_cap_asof(uni: dict) -> str | None:
@@ -7732,6 +7795,10 @@ def _startup():
     # DB 가 살아 있는 재시작이면 증분이라 거의 즉시 끝난다.
     threading.Thread(target=_startup_ohlcv_fill,
                      daemon=True, name="ohlcv-startup").start()
+    # 위험지표(지수 일봉·VIX·금리차)와 ADR 근사 이력. 일봉 채움을 기다리지 않는다 —
+    # 지수·FRED 는 바로 받고, ADR 근사는 일봉이 차는 대로 16:40 잡이 다시 채운다.
+    threading.Thread(target=_startup_market_risk,
+                     daemon=True, name="market-risk-startup").start()
 
     # Render 는 영속 디스크가 없어 재시작하면 data.json 이 git 에 있는 판으로
     # 되돌아간다. 부팅 직후 한 번 덮어써야 그날 값이 올라온다.
@@ -7919,6 +7986,18 @@ def _startup():
                            id="ohlcv_autofill", max_instances=1,
                            misfire_grace_time=1800)
         log.info("[일봉 채움] 평일 16:10 스케줄 등록")
+
+        # ── 위험지표 · ADR ── 16:40 은 일봉 채움(16:10) 뒤 — 장 마감 전 종목 스냅샷과
+        # 그날 봉으로 근사 구멍 메우기. 07:40 은 밤사이 나온 FRED(VIX·금리차) 반영.
+        _scheduler.add_job(_market_risk_refresh, "cron",
+                           day_of_week="mon-fri", hour=16, minute=40,
+                           id="market_risk_close", max_instances=1,
+                           misfire_grace_time=3600)
+        _scheduler.add_job(_market_risk_refresh, "cron",
+                           day_of_week="tue-sat", hour=7, minute=40,
+                           id="market_risk_am", max_instances=1,
+                           misfire_grace_time=3600)
+        log.info("[위험지표] 평일 16:40 · 07:40 스케줄 등록")
 
         # ── Stage 2 자동 스캔 ──
         # 1) 장중 5분 간격 KR 실시간 스캔 (SQLite 기반 ~1초)
@@ -16997,6 +17076,56 @@ def api_global_macro():
 
 
 # ── CNN 공포탐욕지수 (Fear & Greed) ──────────────
+@app.route("/api/market/breadth")
+def api_market_breadth():
+    """ADR(등락비율) — 시장별 오늘 상승/하락 수 · 20일 ADR · 기간별 추이.
+
+    장중(거래일 09:00~, stocks 가 1시간 안에 갱신)이면 오늘 값을 지금 센다.
+    표에 남기는 것은 16:40 스냅샷뿐이다(_market_risk_refresh).
+    """
+    import market_risk as _mr
+    period = request.args.get("period", _mr.DEFAULT_PERIOD)
+    now = now_kst()
+    today = now.strftime("%Y-%m-%d")
+    try:
+        with _get_db() as conn:
+            _mr.ensure_tables(conn)
+            live, label = None, ""
+            try:
+                trading = _krx_cal.Calendar().is_trading_day(now.date())
+            except Exception:                              # noqa: BLE001
+                trading = now.weekday() < 5
+            if (trading and now.hour >= 9
+                    and _mr.stocks_fresh(conn, datetime.now(timezone.utc), 1)):
+                live = _mr.count_today(conn, _mr_markets())
+                label = ("실시간" if (now.hour, now.minute) < (15, 30)
+                         else "오늘 장 마감 (집계 전)")
+            payload = _mr.breadth_payload(conn, today, live, period, label)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[ADR] 조회 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/market/risk")
+def api_market_risk():
+    """위험지표 — 이격도(코스피·코스닥, 25/50일) · VIX · 미국 10년−2년 금리차."""
+    import market_risk as _mr
+    period = request.args.get("period", _mr.DEFAULT_PERIOD)
+    try:
+        ma = int(request.args.get("ma", _mr.DISPARITY_MAS[1]))
+    except ValueError:
+        ma = _mr.DISPARITY_MAS[1]
+    try:
+        with _get_db() as conn:
+            _mr.ensure_tables(conn)
+            payload = _mr.risk_payload(conn, now_kst().strftime("%Y-%m-%d"), period, ma)
+        return jsonify(payload)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("[위험지표] 조회 실패: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/fear_greed")
 def api_fear_greed():
     """CNN F&G 우선, 실패 시 alternative.me 폴백. 30분 캐시."""

@@ -887,6 +887,7 @@ const PAGE_RENDERERS = {
   dashboard:  () => { renderDashboardHome(); },
   pnljournal: () => { renderPnlJournalPage(); },
   globalmacro:() => { renderGlobalMacroPage(); },
+  risk:       () => { renderRiskPage(); },
   valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
@@ -897,6 +898,7 @@ const PAGE_RENDERERS = {
 const _URL_ROUTED_PAGES = new Set([
   'verification', 'journal',
   'ops-freshness', 'ops-cron', 'ops-health',
+  'risk',
 ]);
 
 /** page + params → pathname. URL 라우팅 대상이 아닌 페이지는 '/' 반환. */
@@ -911,6 +913,7 @@ function pageToUrl(page, params) {
   if (page === 'ops-freshness') return '/ops/freshness';
   if (page === 'ops-cron')      return '/ops/cron';
   if (page === 'ops-health')    return '/ops/health';
+  if (page === 'risk')          return '/risk';
   return '/';
 }
 
@@ -923,6 +926,7 @@ function parseUrlPath(pathname) {
   // /journal 또는 /journal/<id>
   m = pathname.match(/^\/journal(?:\/(\d+))?\/?$/);
   if (m) return { page: 'journal', params: m[1] ? { id: parseInt(m[1], 10) } : {} };
+  if (/^\/risk\/?$/.test(pathname)) return { page: 'risk', params: {} };
   // /ops/<page>
   m = pathname.match(/^\/ops\/([a-z\-]+)\/?$/);
   if (m) {
@@ -995,7 +999,7 @@ function navigateTo(page, params, opts) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain',
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk',
                                   'page-verification','page-ops-freshness','page-ops-cron','page-ops-health','page-stockdetail');
   document.body.classList.add(`page-${page}`);
 
