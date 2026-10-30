@@ -889,6 +889,7 @@ const PAGE_RENDERERS = {
   globalmacro:() => { renderGlobalMacroPage(); },
   risk:       () => { renderRiskPage(); },
   movers:     () => { renderMoversPage(); },
+  proxy:      () => { renderProxyPage(); },
   valuechain: () => { renderValuechain2Page(); },  // Step 3: v2 (롤백 시 renderValuechainPage()로 복구)
 };
 
@@ -899,7 +900,7 @@ const PAGE_RENDERERS = {
 const _URL_ROUTED_PAGES = new Set([
   'verification', 'journal',
   'ops-freshness', 'ops-cron', 'ops-health',
-  'risk', 'movers',
+  'risk', 'movers', 'proxy',
 ]);
 
 /** page + params → pathname. URL 라우팅 대상이 아닌 페이지는 '/' 반환. */
@@ -916,6 +917,7 @@ function pageToUrl(page, params) {
   if (page === 'ops-health')    return '/ops/health';
   if (page === 'risk')          return '/risk';
   if (page === 'movers')        return '/movers';
+  if (page === 'proxy')         return '/proxy';
   return '/';
 }
 
@@ -930,6 +932,7 @@ function parseUrlPath(pathname) {
   if (m) return { page: 'journal', params: m[1] ? { id: parseInt(m[1], 10) } : {} };
   if (/^\/risk\/?$/.test(pathname)) return { page: 'risk', params: {} };
   if (/^\/movers\/?$/.test(pathname)) return { page: 'movers', params: {} };
+  if (/^\/proxy\/?$/.test(pathname)) return { page: 'proxy', params: {} };
   // /ops/<page>
   m = pathname.match(/^\/ops\/([a-z\-]+)\/?$/);
   if (m) {
@@ -1002,7 +1005,7 @@ function navigateTo(page, params, opts) {
   });
 
   document.body.classList.remove('page-thememap','page-market',
-                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk','page-movers',
+                                  'page-screener','page-flow','page-sector','page-discover','page-calendar','page-research','page-newhighs','page-portfolio','page-journal','page-etfmap','page-dividend','page-disclosure','page-agent','page-backtest','page-correlation','page-recperf','page-dashboard','page-pnljournal','page-globalmacro','page-valuechain','page-risk','page-movers','page-proxy',
                                   'page-verification','page-ops-freshness','page-ops-cron','page-ops-health','page-stockdetail');
   document.body.classList.add(`page-${page}`);
 
