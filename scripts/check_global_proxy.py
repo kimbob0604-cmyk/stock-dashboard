@@ -134,12 +134,27 @@ if server is not None:
     want(cl.get('/proxy').status_code == 200, '/proxy 가 안 열린다')
     gp.build = _orig
 
+    # 낡은 data.json(배포 직후 커밋된 옛 파일)의 KOSPI/KOSDAQ 는 실시간 값으로 덮는다 — 2026-10-31
+    _live = server._fetch_kr_indices_live
+    server._fetch_kr_indices_live = lambda: {'kospi': {'value': 5730.74, 'change_pct': -3.48},
+                                             'kosdaq': {'value': 724.38, 'change_pct': -3.83}}
+    old = {'actual_date': '20260915', 'kospi': {'value': 6627.26, 'change_pct': -0.85},
+           'kosdaq': {'value': 812.41, 'change_pct': 0.7}}
+    ov = server._overlay_kr_indices(dict(old))
+    want(ov['kospi']['value'] == 5730.74 and ov['kosdaq']['value'] == 724.38, f'낡은 지수를 못 덮는다: {ov}')
+    server._fetch_kr_indices_live = lambda: {}
+    ov2 = server._overlay_kr_indices(dict(old))
+    want(ov2['kospi']['value'] == 6627.26, '실시간이 실패하면 기존 값을 지워서는 안 된다')
+    server._fetch_kr_indices_live = _live
+
 SRC = (ROOT / 'server.py').read_text(encoding='utf-8')
 HTML = (ROOT / 'index.html').read_text(encoding='utf-8')
 PJ = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
 MR = (ROOT / 'market_risk.py').read_text(encoding='utf-8')
 want('"KOSPI200": "KPI200"' in MR, '코스피200 종가를 쌓지 않는다(market_risk.NAVER_INDEX)')
 want('_GPROXY_TTL_S' in SRC, 'API 캐시가 없다')
+_gm = SRC[SRC.index('def api_global_macro'):]
+want('_overlay_kr_indices(dj)' in _gm[:_gm.index('sections: dict')], '글로벌 매크로가 낡은 data.json 지수를 그대로 쓴다')
 want('data-page="proxy"' in HTML and 'id="proxy-view"' in HTML
      and HTML.index('/static/js/proxypage.js') < HTML.index('/static/js/pages.js'), 'index.html 등록')
 want("proxy:      () => { renderProxyPage(); }" in PJ and "proxy: '/proxy'" in PJ and "'page-proxy'" in PJ,

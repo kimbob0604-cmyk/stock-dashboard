@@ -108,6 +108,23 @@ def weekly_movers(conn, rows: list[dict], today_iso: str, n: int = TOP_N, cal=No
             "scanned": len(tagged)}
 
 
+MARKET_OPEN_MIN = 9 * 60
+
+
+def judge_date(now, cal=None) -> str:
+    """신고가 판정일 — stocks 의 종가·등락률이 가리키는 거래일.
+
+    거래일 09:00 이후면 오늘. 주말·휴장일·개장 전이면 직전 거래일이다. 판정은 일봉을
+    판정일 **전날까지** 보므로, 토요일을 판정일로 두면 금요일 봉(=stocks 종가 자신)이
+    고점에 들어가 어떤 종목도 신고가가 될 수 없다(2026-10-31 운영에서 4축 모두 0종목).
+    """
+    cal = cal or krx_calendar.Calendar()
+    d = now.date()
+    if cal.is_trading_day(d) and now.hour * 60 + now.minute >= MARKET_OPEN_MIN:
+        return d.isoformat()
+    return cal.nth_trading_day_before(d, 1) or d.isoformat()
+
+
 def newhigh_list(conn, today_iso: str, min_cap: float, markets: dict[str, str],
                  market: str, compute=None) -> dict:
     """신고가 4축 — 네트워크 없이(budget_s=0). 가장 센 축 하나에만, 축 안에서는 거래대금 순."""

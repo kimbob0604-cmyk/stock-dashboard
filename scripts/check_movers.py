@@ -115,12 +115,24 @@ ne = mv.newhigh_list(conn, '2026-10-30', CAP, MARKETS, 'ALL',
                      compute=lambda *a, **k: {'error': '일봉 없음', 'buckets': {}})
 want(ne['error'] == '일봉 없음' and ne['axes'] == [], '판정 실패를 빈 목록인 척 넘긴다')
 
+# 판정일 — 주말·개장 전엔 직전 거래일. 토요일을 판정일로 두면 금요일 봉이 고점에 들어가
+# 4축이 모두 0종목이 된다(2026-10-31 운영)
+from datetime import datetime as _dt                             # noqa: E402
+for when, want_d in (('2026-10-31 10:00', '2026-10-30'),   # 토
+                     ('2026-11-01 23:00', '2026-10-30'),   # 일
+                     ('2026-11-02 08:30', '2026-10-30'),   # 월 개장 전
+                     ('2026-11-02 09:00', '2026-11-02'),   # 월 개장
+                     ('2026-10-30 20:00', '2026-10-30')):  # 금 장 마감 뒤
+    got = mv.judge_date(_dt.strptime(when, '%Y-%m-%d %H:%M'))
+    want(got == want_d, f'판정일 {when} → {got} (기대 {want_d})')
+
 # ── 6 ──
 SRC = (ROOT / 'server.py').read_text(encoding='utf-8')
 want('@app.route("/api/movers")' in SRC and '@app.route("/movers")' in SRC, 'API·경로가 없다')
 blk = SRC[SRC.index('def api_movers'):SRC.index('@app.route("/api/market/breadth")')]
 want('budget_s' not in blk or 'budget_s=0' in blk, 'API 가 신고가 이력을 네트워크로 받을 수 있다')
 want('_MOVERS_TTL_S' in blk, 'API 캐시가 없다')
+want('_mv.judge_date(now)' in blk, 'API 가 신고가 판정일을 달력 날짜로 잡는다(주말엔 0종목이 된다)')
 HTML = (ROOT / 'index.html').read_text(encoding='utf-8')
 PJ = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
 want('data-page="movers"' in HTML and 'id="movers-view"' in HTML
