@@ -924,6 +924,25 @@ def _fetch_kr_indices_live() -> dict:
     return out
 
 
+def _overlay_kr_indices(data: dict) -> dict:
+    """KOSPI/KOSDAQ 값이 없거나 data.json 이 오늘 것이 아니면(장중엔 항상) 네이버 실시간 값으로 덮는다.
+
+    배포 직후 Render 의 data.json 은 저장소에 커밋된 옛 파일이라, 덮지 않으면 몇 주 전 지수가
+    그대로 보인다(2026-10-31 글로벌 매크로에서 9/15 값 6,627 이 실측 5,730 대신 떴다).
+    """
+    today_str = now_kst().strftime("%Y%m%d")
+    data_stale = data.get("actual_date") != today_str
+    kr_missing = (not (data.get("kospi") or {}).get("value")
+                  or not (data.get("kosdaq") or {}).get("value"))
+    if kr_missing or data_stale or is_market_hours():
+        live_idx = _fetch_kr_indices_live()
+        if live_idx.get("kospi"):
+            data["kospi"] = live_idx["kospi"]
+        if live_idx.get("kosdaq"):
+            data["kosdaq"] = live_idx["kosdaq"]
+    return data
+
+
 @app.route("/data.json")
 def route_data_json():
     if not DATA_JSON.exists():
@@ -936,17 +955,7 @@ def route_data_json():
     try:
         data = json.loads(DATA_JSON.read_text(encoding="utf-8"))
         data = _overlay_live_prices_on_data(data)
-        # KOSPI/KOSDAQ stale 보강 — 값 없거나 actual_date 가 오늘 아닐 때 라이브 덮어쓰기
-        today_str = now_kst().strftime("%Y%m%d")
-        data_stale = data.get("actual_date") != today_str
-        kr_missing = (not data.get("kospi") or not data.get("kospi", {}).get("value")
-                      or not data.get("kosdaq") or not data.get("kosdaq", {}).get("value"))
-        if kr_missing or data_stale or is_market_hours():
-            live_idx = _fetch_kr_indices_live()
-            if live_idx.get("kospi"):
-                data["kospi"] = live_idx["kospi"]
-            if live_idx.get("kosdaq"):
-                data["kosdaq"] = live_idx["kosdaq"]
+        data = _overlay_kr_indices(data)
         return Response(json.dumps(data, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as exc:
@@ -17074,6 +17083,10 @@ def api_global_macro():
             dj = json.loads(DATA_JSON.read_text(encoding="utf-8"))
     except Exception:
         pass
+    try:
+        dj = _overlay_kr_indices(dj)
+    except Exception as exc:
+        log.debug("[global_macro] KR 지수 보강 실패: %s", exc)
     mo = (dj.get("market_overview") or {})
 
     sections: dict = {}
@@ -17407,7 +17420,8 @@ def api_movers():
         with _get_db() as conn:
             markets = _mr_markets()
             if view == "newhigh":
-                data = _mv.newhigh_list(conn, today, _oa.MIN_MARKET_CAP_WON, markets, market)
+                data = _mv.newhigh_list(conn, _mv.judge_date(now), _oa.MIN_MARKET_CAP_WON,
+                                        markets, market)
             else:
                 rows = _mv.tag_market(_mv.universe(conn, _oa.MIN_MARKET_CAP_WON),
                                       markets, market)
