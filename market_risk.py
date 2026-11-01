@@ -411,7 +411,8 @@ def risk_payload(conn, today_iso: str, period: str = DEFAULT_PERIOD,
     for m in MARKETS:
         pts = disparity(_series(conn, f"idx:{m}"), ma)
         out["disparity"][m] = {**_summary(pts), "series": _cut(pts, today_iso, period)}
-    for name in FRED_SERIES:
+    # VKOSPI 는 public_stats(공공데이터포털 지수시세정보)가 같은 표에 넣는다
+    for name in tuple(FRED_SERIES) + ("VKOSPI",):
         pts = [{"date": d, "value": v} for d, v in _series(conn, name)]
         out[name.lower()] = {**_summary(pts), "series": _cut(pts, today_iso, period)}
     return out

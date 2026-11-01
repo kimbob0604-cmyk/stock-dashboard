@@ -182,6 +182,46 @@ want(L['ym'] == '202609' and L['exp_usd'] == 100.0 and L['unit_price'] == 10.0
      and L['yoy_pct'] == round((100 / 112 - 1) * 100, 1) and L['mom_pct'] == round((100 / 101 - 1) * 100, 1),
      f'YoY·MoM·단가: {L}')
 
+# ── 3.5 ── VKOSPI(지수시세정보 파생상품지수) — V2 게이트웨이 오류는 JSON 으로 온다
+GWJ = lambda code: json.dumps({"OpenAPI_ServiceResponse": {"cmmMsgHeader": {
+    "errMsg": "SERVICE_KEY_IS_NOT_REGISTERED_ERROR", "returnReasonCode": code}}}, indent=2).encode()
+want(ps.gateway_error(GWJ('30')) == '30' and ps.gateway_error(GWJ('20')) == '20', 'JSON 게이트웨이 오류 코드를 못 읽는다')
+seen.clear()
+want(ps.call('X', '/p', {}, KEY, lambda u: seen.append(u) or (GWJ('30') if len(seen) == 1 else b'{}')) == b'{}'
+     and len(seen) == 2, 'JSON 키 오류도 다음 형태로 넘어가야 한다')
+want(ps.pick_vkospi(['코스피 200 변동성지수', '코스피 200 선물지수']) == '코스피 200 변동성지수'
+     and ps.pick_vkospi(['코스피200변동성지수(VKOSPI)', 'V-KOSPI 200 선물']) == '코스피200변동성지수(VKOSPI)'
+     and ps.pick_vkospi(['코스피 200 선물지수']) is None, '이름 고르기')
+vk_rows = [{"basDt": "20261029", "idxNm": "코스피 200 변동성지수", "clpr": "31.5"},
+           {"basDt": "20261030", "idxNm": "코스피 200 변동성지수", "clpr": "35.2"},
+           {"basDt": "20261030", "idxNm": "코스피 200 선물 변동성 레버리지", "clpr": "999"},
+           {"basDt": "20261030", "idxNm": "코스피 200 변동성지수", "clpr": "-"}]
+vq = []
+
+
+def vk_get(url):
+    vq.append(parse_qs(urlparse(url).query))
+    return kofia_body(vk_rows)
+
+
+db3 = sqlite3.connect(':memory:')
+rv = ps.refresh_vkospi(db3, date(2026, 10, 31), KEY, vk_get)
+want(rv == {'rows': 2, 'name': '코스피 200 변동성지수', 'last': '2026-10-30'}, f'VKOSPI 갱신: {rv}')
+want(vq[0]['likeIdxNm'] == ['변동성'] and vq[0]['endBasDt'] == ['20261101'] and vq[0]['beginBasDt'][0] <= '20231101',
+     f"VKOSPI 호출 인자: {vq[0]}")
+ps.refresh_vkospi(db3, date(2026, 10, 31), KEY, vk_get)
+want(vq[-1]['beginBasDt'] == ['20261001'], f"증분은 30일: {vq[-1]['beginBasDt']}")
+import market_risk as mr                                         # noqa: E402
+rp = mr.risk_payload(db3, '2026-10-31', '1Y', 50)
+want(rp['vkospi']['latest'] == 35.2 and rp['vkospi']['date'] == '2026-10-30' and len(rp['vkospi']['series']) == 2,
+     f"위험지표 payload 에 VKOSPI: {rp.get('vkospi')}")
+r20 = ps.refresh_vkospi(sqlite3.connect(':memory:'), date(2026, 10, 31), KEY, lambda u: GWJ('20'))
+want('15094807' in r20.get('error', '') and '활용신청' in r20['error'] and KEY not in r20['error'],
+     f'활용신청 안내: {r20}')
+rn = ps.refresh_vkospi(sqlite3.connect(':memory:'), date(2026, 10, 31), KEY,
+                       lambda u: kofia_body([{"basDt": "20261030", "idxNm": "코스피 200 선물지수", "clpr": "1"}]))
+want(rn.get('error') == 'VKOSPI 를 찾지 못했다' and rn.get('names') == ['코스피 200 선물지수'], f'못 찾음: {rn}')
+
 # ── 4 ──
 try:
     import server                                                # noqa: E402
@@ -217,11 +257,18 @@ if server is not None:
     want(r2.status_code == 200 and len(d2['items']) == len(ps.TRADE_ITEMS), f'수출입 API: {str(d2)[:200]}')
     for page in ('/fund-flow', '/trade'):
         want(cl.get(page).status_code == 200, f'{page} 가 안 열린다')
+    r3 = cl.get('/api/market/risk')
+    d3 = r3.get_json()
+    want(r3.status_code == 200 and 'vkospi' in d3 and '키가 없다' in (d3['vkospi_status'].get('error') or ''),
+         f"위험지표 API 의 VKOSPI 상태: {r3.status_code} {str(d3.get('vkospi_status'))[:200]}")
 
 SRC = (ROOT / 'server.py').read_text(encoding='utf-8')
 want('def poll_dart_disclosures(days_back: int = 0)' in SRC and '"bgn_de": bgn_de' in SRC, 'DART 며칠 채움')
 want('poll_dart_disclosures(days_back=4)' in SRC and 'target=_startup_public_stats' in SRC, '부팅 스레드')
 want('id="public_stats"' in SRC, '14:10 갱신 잡')
+want('_ps.refresh_vkospi(conn, today, key)' in SRC, 'VKOSPI 를 갱신에 넣지 않았다')
+RJ = (ROOT / 'static/js/riskpage.js').read_text(encoding='utf-8')
+want('d.vkospi' in RJ and 'vkospi_status' in RJ, '위험지표 화면에 VKOSPI 가 없다')
 HTML = (ROOT / 'index.html').read_text(encoding='utf-8')
 PJ = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
 want('data-page="fundflow"' in HTML and 'data-page="trade"' in HTML

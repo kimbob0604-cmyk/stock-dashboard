@@ -126,19 +126,30 @@ function _rkRenderRisk(d, fg, box) {
     <div class="rk-charts">${charts}</div>
   </div>`;
 
-  // VIX · 금리차
-  const vix = d.vix || {}, sp = d.t10y2y || {};
+  // VKOSPI · VIX · 금리차
+  const vix = d.vix || {}, sp = d.t10y2y || {}, vk = d.vkospi || {}, vks = d.vkospi_status || {};
+  let vkNote = '';
+  if (!(vk.series || []).length) {
+    const why = vks.error || (vks.key_name ? (vks.at ? '아직 받은 값이 없다' : '첫 수집 전') : '공공데이터포털 키가 없다');
+    vkNote = `<div class="rk-note">VKOSPI: ${_escHtml(why)}</div>`;
+  }
   html += `<div class="gm-section">
     <div class="gm-section-title">변동성 · 경기 신호</div>
-    <div class="rk-desc">VIX(미국 S&amp;P500 변동성 지수)와 미국 10년−2년 국채 금리차. 금리차가 0 아래(역전)면 경기 둔화 신호로 흔히 읽는다.
-      출처: FRED(종가, 1영업일 지연).</div>
+    <div class="rk-desc">VKOSPI(코스피200 옵션으로 본 향후 30일 변동성 기대)와 VIX(미국 S&amp;P500 변동성 지수), 미국 10년−2년 국채 금리차.
+      금리차가 0 아래(역전)면 경기 둔화 신호로 흔히 읽는다.
+      출처: VKOSPI 금융위원회 지수시세정보(공공데이터포털, 1거래일 지연) · VIX·금리차 FRED(종가, 1영업일 지연).</div>
+    ${vkNote}
     <div class="gm-grid rk-grid2">
+      <div class="gm-card"><div class="gm-card-name">VKOSPI <span class="rk-date">${_escHtml(vk.date || '')}</span></div>
+        <div class="gm-card-value">${_rkFmt(vk.latest)}</div><div class="gm-card-change">${_rkChange(vk.change)}</div></div>
       <div class="gm-card"><div class="gm-card-name">VIX <span class="rk-date">${_escHtml(vix.date || '')}</span></div>
         <div class="gm-card-value">${_rkFmt(vix.latest)}</div><div class="gm-card-change">${_rkChange(vix.change)}</div></div>
       <div class="gm-card${sp.latest != null && sp.latest < 0 ? ' gm-card-warn' : ''}"><div class="gm-card-name">미국 10년−2년 금리차 <span class="rk-date">${_escHtml(sp.date || '')}</span></div>
         <div class="gm-card-value">${_rkFmt(sp.latest)}%p</div><div class="gm-card-change">${_rkChange(sp.change, 2, '%p')}</div></div>
     </div>
     <div class="rk-charts">
+      ${(vk.series || []).length ? `<div class="rk-chart-box"><div class="rk-chart-title">VKOSPI</div>
+        ${_rkLineChart(vk.series, { refs: [{ v: 20, label: '20' }, { v: 30, label: '30' }] })}</div>` : ''}
       <div class="rk-chart-box"><div class="rk-chart-title">VIX</div>
         ${_rkLineChart(vix.series || [], { refs: [{ v: 20, label: '20' }, { v: 30, label: '30' }] })}</div>
       <div class="rk-chart-box"><div class="rk-chart-title">미국 10년−2년 금리차</div>
