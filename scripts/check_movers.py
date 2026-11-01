@@ -126,6 +126,75 @@ for when, want_d in (('2026-10-31 10:00', '2026-10-30'),   # 토
     got = mv.judge_date(_dt.strptime(when, '%Y-%m-%d %H:%M'))
     want(got == want_d, f'판정일 {when} → {got} (기대 {want_d})')
 
+# 판정 캐시 — 같은 지문이면 다시 계산하지 않고, 바뀌면 들고 있던 값을 주며 뒤에서 다시
+import threading as _th                                          # noqa: E402
+clock = [1000.0]
+ran = []
+gate = _th.Event()
+gate.set()
+
+
+def slow_compute(judge):
+    gate.wait(5)
+    ran.append(judge)
+    return {'error': None, 'scanned': len(ran), 'universe_n': 9, 'hist_pending': [],
+            'last_bar': 'x', 'buckets': {'hist': [], 'w52': [], 'd120': [], 'd60': []},
+            'windows': {'big': 1}}
+
+
+nc = mv.NewhighCache(slow_compute, clock=lambda: clock[0])
+r1, s1 = nc.get('2026-10-30', 'fpA')
+want(s1 == 'computed' and r1['scanned'] == 1 and 'windows' not in r1, f'처음엔 계산·가볍게: {s1} {r1}')
+r2, s2 = nc.get('2026-10-30', 'fpA')
+want(s2 == 'hit' and len(ran) == 1, '같은 지문인데 다시 계산했다')
+clock[0] += 30
+r3, s3 = nc.get('2026-10-30', 'fpB')
+want(s3 == 'hit' and len(ran) == 1, '마지막 계산 2분 안인데 다시 계산했다(장중 과부하)')
+clock[0] += mv.NewhighCache.MIN_REFRESH_S
+gate.clear()
+r4, s4 = nc.get('2026-10-30', 'fpB')
+want(s4 == 'stale' and r4['scanned'] == 1, f'지문이 바뀌면 들고 있던 값을 바로 줘야 한다: {s4}')
+r5, s5 = nc.get('2026-10-30', 'fpB')
+want(s5 == 'stale' and nc._bg is not None and nc._bg.is_alive(), '뒤 계산이 겹쳐 돈다')
+gate.set()
+nc._bg.join(5)
+r6, s6 = nc.get('2026-10-30', 'fpB')
+want(s6 == 'hit' and r6['scanned'] == 2 and len(ran) == 2, f'뒤 계산 결과가 안 들어왔다: {s6} {r6}')
+clock[0] += mv.NewhighCache.MAX_AGE_S
+_, s7 = nc.get('2026-10-30', 'fpB')
+nc._bg.join(5)
+want(s7 == 'stale' and len(ran) == 3, '오래된 값을 영영 다시 계산하지 않는다')
+r8, s8 = nc.get('2026-11-02', 'fpB')
+want(s8 == 'computed' and ran[-1] == '2026-11-02', '판정일이 바뀌었는데 옛 판정을 줬다')
+# 동시에 처음 요청이 여럿 와도 계산은 한 번
+nc2 = mv.NewhighCache(slow_compute, clock=lambda: clock[0])
+gate.clear()
+n0 = len(ran)
+ths = [_th.Thread(target=nc2.get, args=('2026-10-30', 'fpZ')) for _ in range(4)]
+[t.start() for t in ths]
+gate.set()
+[t.join(5) for t in ths]
+want(len(ran) - n0 == 1, f'처음 요청이 겹치면 계산이 한 번이어야 한다: {len(ran) - n0}')
+
+# 지문 — 일봉 최근 수·역사적 표·종목 가격이 바뀌면 달라진다
+fc = sqlite3.connect(':memory:')
+fc.executescript("""CREATE TABLE ohlcv (code TEXT, date TEXT, close REAL, PRIMARY KEY (code, date)) WITHOUT ROWID;
+CREATE TABLE stocks (code TEXT, close REAL, market_cap REAL, change_pct REAL);
+INSERT INTO ohlcv VALUES ('A','2026-10-29',1),('A','2026-01-02',1);
+INSERT INTO stocks VALUES ('A',10,1e12,1.0);""")
+f1 = mv.data_fingerprint(fc, '2026-10-30')
+fc.execute("INSERT INTO ohlcv VALUES ('A','2025-12-01',1)")
+want(mv.data_fingerprint(fc, '2026-10-30') == f1, '오래된 봉 하나에 지문이 흔들린다(없어도 되는 재계산)')
+fc.execute("INSERT INTO ohlcv VALUES ('B','2026-10-29',1)")
+f2 = mv.data_fingerprint(fc, '2026-10-30')
+want(f2 != f1, '일봉이 새로 찼는데 지문이 같다')
+fc.execute("UPDATE stocks SET close=11")
+want(mv.data_fingerprint(fc, '2026-10-30') != f2, '가격이 바뀌었는데 지문이 같다')
+fc.execute("CREATE TABLE alltime_high (code TEXT, updated_at TEXT)")
+f3 = mv.data_fingerprint(fc, '2026-10-30')
+fc.execute("INSERT INTO alltime_high VALUES ('A','2026-10-30 16:00')")
+want(mv.data_fingerprint(fc, '2026-10-30') != f3, '역사적 이력이 찼는데 지문이 같다')
+
 # ── 6 ──
 SRC = (ROOT / 'server.py').read_text(encoding='utf-8')
 want('@app.route("/api/movers")' in SRC and '@app.route("/movers")' in SRC, 'API·경로가 없다')
@@ -133,6 +202,12 @@ blk = SRC[SRC.index('def api_movers'):SRC.index('@app.route("/api/market/breadth
 want('budget_s' not in blk or 'budget_s=0' in blk, 'API 가 신고가 이력을 네트워크로 받을 수 있다')
 want('_MOVERS_TTL_S' in blk, 'API 캐시가 없다')
 want('_mv.judge_date(now)' in blk, 'API 가 신고가 판정일을 달력 날짜로 잡는다(주말엔 0종목이 된다)')
+want('_newhigh_cached(now)' in blk, 'API 가 신고가를 요청마다 다시 계산한다(16~18초)')
+want('_prewarm_newhigh_cache()' in SRC[SRC.index('def _startup_ohlcv_fill'):]
+     .split('\ndef ')[0], '부팅 일봉 채움 뒤 신고가를 미리 계산하지 않는다')
+want('id="newhigh_cache_open"' in SRC and 'id="newhigh_cache_close"' in SRC, '미리 계산 잡이 없다')
+want('budget_s=0' in SRC[SRC.index('def _newhigh_cache'):SRC.index('def _newhigh_cached')],
+     '신고가 캐시 계산이 네트워크로 이력을 받을 수 있다')
 HTML = (ROOT / 'index.html').read_text(encoding='utf-8')
 PJ = (ROOT / 'static/js/pages.js').read_text(encoding='utf-8')
 want('data-page="movers"' in HTML and 'id="movers-view"' in HTML
