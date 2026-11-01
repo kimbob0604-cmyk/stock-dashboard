@@ -17,6 +17,8 @@ ETF·ETN·리츠·인프라·스팩 제외, 오늘 거래됨). 한 화면 안에
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import date, timedelta
 
 import krx_calendar
@@ -123,6 +125,97 @@ def judge_date(now, cal=None) -> str:
     if cal.is_trading_day(d) and now.hour * 60 + now.minute >= MARKET_OPEN_MIN:
         return d.isoformat()
     return cal.nth_trading_day_before(d, 1) or d.isoformat()
+
+
+FP_RECENT_DAYS = 14
+
+
+def data_fingerprint(conn, judge_iso: str) -> tuple:
+    """판정 결과를 바꿀 수 있는 입력의 지문 — 싸게(날짜 색인 범위만) 읽는다.
+
+    일봉: 최근 2주 봉 수·최신 날짜(ohlcv 는 WITHOUT ROWID — 재배포 뒤 비어 있던 종목을
+    채우면 그 종목의 최근 봉도 같이 들어와 수가 바뀐다). 역사적 이력 표. 종목 표(가격·시총).
+    """
+    since = (date.fromisoformat(judge_iso) - timedelta(days=FP_RECENT_DAYS)).isoformat()
+    o = tuple(conn.execute("SELECT COUNT(*), MAX(date) FROM ohlcv WHERE date >= ?",
+                           (since,)).fetchone())
+    try:
+        a = tuple(conn.execute("SELECT COUNT(*), MAX(updated_at) FROM alltime_high").fetchone())
+    except Exception:                                    # noqa: BLE001 — 표가 아직 없다
+        a = (0, None)
+    s = tuple(conn.execute("SELECT COUNT(*), TOTAL(close), TOTAL(market_cap), "
+                           "TOTAL(change_pct) FROM stocks").fetchone())
+    return (o, a, s)
+
+
+def slim_result(res: dict) -> dict:
+    """캐시에 둘 만큼만 — newhigh_list 가 읽는 키."""
+    keep = ("error", "scanned", "universe_n", "hist_pending", "last_bar", "buckets")
+    return {k: res.get(k) for k in keep}
+
+
+class NewhighCache:
+    """신고가 판정 결과를 판정일별로 들고 있다 — 화면이 열릴 때마다 16~18초씩 다시 계산하지
+    않게(2026-10-31 운영 실측, 배포 직후엔 31초로 502).
+
+      입력 지문이 같으면 그대로 쓴다(장 마감 뒤·주말엔 사실상 계속).
+      지문이 바뀌었으면 들고 있던 값을 바로 돌려주고 뒤에서 다시 계산한다 — 단,
+        마지막 계산 뒤 MIN_REFRESH_S 가 지나야(장중엔 가격이 계속 바뀐다).
+      MAX_AGE_S 를 넘으면 지문이 같아도 다시 계산한다(안전망).
+      그 판정일의 값이 아예 없으면 그 자리에서 계산한다(동시에 여럿이 와도 한 번만).
+    """
+    MIN_REFRESH_S = 120
+    MAX_AGE_S = 6 * 3600
+
+    def __init__(self, compute, clock=time.time):
+        self._compute = compute            # (judge) -> 판정 결과 dict
+        self._clock = clock
+        self._entry: dict | None = None    # {'judge', 'fp', 'ts', 'res'}
+        self._lock = threading.Lock()      # 계산은 한 번에 하나
+        self._bg: threading.Thread | None = None
+
+    def _run(self, judge: str, fp) -> dict:
+        res = slim_result(self._compute(judge))
+        self._entry = {"judge": judge, "fp": fp, "ts": self._clock(), "res": res}
+        return res
+
+    def refresh(self, judge: str, fp) -> dict:
+        """지금 계산해 넣는다(미리 데우기·처음 요청)."""
+        with self._lock:
+            e = self._entry
+            if e and e["judge"] == judge and e["fp"] == fp:
+                return e["res"]            # 기다리는 사이 다른 쪽이 막 채웠다
+            return self._run(judge, fp)
+
+    def _refresh_bg(self, judge: str, fp) -> bool:
+        if self._bg is not None and self._bg.is_alive():
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+
+        def work():
+            try:
+                self._run(judge, fp)
+            except Exception as exc:                     # noqa: BLE001
+                log.warning("[신고가 캐시] 뒤에서 다시 계산 실패: %s", exc)
+            finally:
+                self._lock.release()
+
+        self._bg = threading.Thread(target=work, daemon=True, name="newhigh-cache")
+        self._bg.start()
+        return True
+
+    def get(self, judge: str, fp) -> tuple[dict, str]:
+        """(결과, 상태) — 상태는 hit | stale(뒤에서 다시 계산) | computed."""
+        e = self._entry
+        if e and e["judge"] == judge:
+            age = self._clock() - e["ts"]
+            changed = e["fp"] != fp
+            if (changed and age >= self.MIN_REFRESH_S) or age >= self.MAX_AGE_S:
+                self._refresh_bg(judge, fp)
+                return e["res"], "stale"
+            return e["res"], "hit"
+        return self.refresh(judge, fp), "computed"
 
 
 def newhigh_list(conn, today_iso: str, min_cap: float, markets: dict[str, str],

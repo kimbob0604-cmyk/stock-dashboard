@@ -3915,6 +3915,8 @@ def _startup_ohlcv_fill():
     # 재배포 직후엔 일봉이 비어 있어 부팅 30초 뒤의 위험지표 갱신이 ADR 근사를 못
     # 채웠다(2026-10-30). 일봉이 찬 지금 한 번 더 — 장 마감 뒤면 스냅샷도 남는다.
     _market_risk_refresh()
+    # 신고가 화면 판정도 일봉이 찬 지금 미리 — 첫 방문자가 기다리지 않게
+    _prewarm_newhigh_cache()
 
 
 _MARKET_RISK_LOCK = threading.Lock()
@@ -8074,6 +8076,17 @@ def _startup():
                            id="market_risk_am", max_instances=1,
                            misfire_grace_time=3600)
         log.info("[위험지표] 평일 16:40 · 07:40 스케줄 등록")
+
+        # ── 신고가 화면 판정 미리 계산 ── 09:01 은 판정일이 오늘로 넘어간 직후,
+        # 16:20 은 일봉 채움(16:10) 뒤 장 마감 값으로. 나머지는 캐시가 지문으로 알아서 다시 한다.
+        _scheduler.add_job(_prewarm_newhigh_cache, "cron",
+                           day_of_week="mon-fri", hour=9, minute=1,
+                           id="newhigh_cache_open", max_instances=1,
+                           misfire_grace_time=1800)
+        _scheduler.add_job(_prewarm_newhigh_cache, "cron",
+                           day_of_week="mon-fri", hour=16, minute=20,
+                           id="newhigh_cache_close", max_instances=1,
+                           misfire_grace_time=3600)
 
         # ── 공공데이터포털 통계 ── 금투협은 D+1 13시 이후 공개 → 평일 14:10. 관세청 월간은
         # 15일경 전월분 → 매일 14:10 에 같이 보되 이미 있으면 묻지 않는다(public_stats).
@@ -17390,6 +17403,47 @@ def api_global_proxy():
 
 _MOVERS_CACHE: dict = {}
 _MOVERS_TTL_S = 120
+_NEWHIGH_CACHE = None
+
+
+def _newhigh_cache():
+    """신고가 화면용 판정 캐시(movers.NewhighCache) — 네트워크 없이(budget_s=0)."""
+    global _NEWHIGH_CACHE
+    if _NEWHIGH_CACHE is None:
+        import movers as _mv
+        import newhigh as _nh
+        import ohlcv_autofill as _oa
+
+        def _compute(judge):
+            with _get_db() as conn:
+                return _nh.compute(conn, judge, _oa.MIN_MARKET_CAP_WON, budget_s=0)
+        _NEWHIGH_CACHE = _mv.NewhighCache(_compute)
+    return _NEWHIGH_CACHE
+
+
+def _newhigh_cached(now=None) -> tuple[dict, str]:
+    import movers as _mv
+    judge = _mv.judge_date(now or now_kst())
+    with _get_db() as conn:
+        fp = _mv.data_fingerprint(conn, judge)
+    return _newhigh_cache().get(judge, fp)
+
+
+def _prewarm_newhigh_cache() -> None:
+    """신고가 화면 판정을 미리 계산해 둔다 — 부팅 일봉 채움 뒤 · 평일 09:01 · 16:20."""
+    if not (_SQLITE_OK and USE_SQLITE):
+        return
+    try:
+        import movers as _mv
+        t0 = time.time()
+        judge = _mv.judge_date(now_kst())
+        with _get_db() as conn:
+            fp = _mv.data_fingerprint(conn, judge)
+        res = _newhigh_cache().refresh(judge, fp)
+        log.info("[신고가 캐시] %s 미리 계산 %.1f초 · 판정 %s종목", judge, time.time() - t0,
+                 res.get("scanned"))
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("[신고가 캐시] 미리 계산 실패: %s", exc)
 
 
 @app.route("/api/movers")
@@ -17412,21 +17466,27 @@ def api_movers():
         period = "day"
     key = (view, period, market)
     hit = _MOVERS_CACHE.get(key)
-    if hit and time.time() - hit[0] < _MOVERS_TTL_S:
+    if view != "newhigh" and hit and time.time() - hit[0] < _MOVERS_TTL_S:
         return jsonify(hit[1])
     now = now_kst()
     today = now.strftime("%Y-%m-%d")
     try:
+        if view == "newhigh":
+            # 판정은 _NEWHIGH_CACHE 가 들고 있다 — 시장 필터·정렬만 여기서(가볍다)
+            res, state = _newhigh_cached(now)
+            data = _mv.newhigh_list(None, _mv.judge_date(now), _oa.MIN_MARKET_CAP_WON,
+                                    _mr_markets(), market,
+                                    compute=lambda *a, **k: res)
+            data["cache"] = state
+            return jsonify({"view": view, "period": period, "market": market, "data": data,
+                            "basis": f"시총 {_oa.MIN_MARKET_CAP_LABEL} 이상 · "
+                                     "ETF·ETN·리츠·스팩 제외",
+                            "updated_at": now.strftime("%Y-%m-%d %H:%M")})
         with _get_db() as conn:
-            markets = _mr_markets()
-            if view == "newhigh":
-                data = _mv.newhigh_list(conn, _mv.judge_date(now), _oa.MIN_MARKET_CAP_WON,
-                                        markets, market)
-            else:
-                rows = _mv.tag_market(_mv.universe(conn, _oa.MIN_MARKET_CAP_WON),
-                                      markets, market)
-                data = (_mv.daily_movers(rows) if period == "day"
-                        else _mv.weekly_movers(conn, rows, today))
+            rows = _mv.tag_market(_mv.universe(conn, _oa.MIN_MARKET_CAP_WON),
+                                  _mr_markets(), market)
+            data = (_mv.daily_movers(rows) if period == "day"
+                    else _mv.weekly_movers(conn, rows, today))
         payload = {"view": view, "period": period, "market": market, "data": data,
                    "basis": f"시총 {_oa.MIN_MARKET_CAP_LABEL} 이상 · ETF·ETN·리츠·스팩 제외",
                    "updated_at": now.strftime("%Y-%m-%d %H:%M")}
