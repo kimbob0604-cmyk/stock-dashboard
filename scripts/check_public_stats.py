@@ -207,6 +207,7 @@ def vk_get(url):
 db3 = sqlite3.connect(':memory:')
 rv = ps.refresh_vkospi(db3, date(2026, 10, 31), KEY, vk_get)
 want(rv == {'rows': 2, 'name': '코스피 200 변동성지수', 'last': '2026-10-30'}, f'VKOSPI 갱신: {rv}')
+want(ps.VKOSPI_PATH.endswith('/GetMarketIndexInfoService_V2/getDerivationProductMarketIndex_V2'), f'오퍼레이션 경로: {ps.VKOSPI_PATH}')
 want(vq[0]['likeIdxNm'] == ['변동성'] and vq[0]['endBasDt'] == ['20261101'] and vq[0]['beginBasDt'][0] <= '20231101',
      f"VKOSPI 호출 인자: {vq[0]}")
 ps.refresh_vkospi(db3, date(2026, 10, 31), KEY, vk_get)

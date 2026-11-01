@@ -62,7 +62,8 @@ DEPOSIT_SANE = (5e12, 2e15)
 # 로그인이 필요하고 네이버·야후·다음에는 없다(2026-11-01 확인) — 공개 경로는 이것뿐.
 # 금융위 시세는 다음 영업일 오후에 올라오므로 최근 값이 1거래일 늦다.
 VKOSPI_DATASET = "15094807"
-VKOSPI_PATH = "/1160100/GetMarketIndexInfoService_V2/getDerivationProductMarketIndex"
+# 오퍼레이션 이름에도 _V2 가 붙는다(데이터셋 페이지 swagger — 없으면 게이트웨이 코드 12)
+VKOSPI_PATH = "/1160100/GetMarketIndexInfoService_V2/getDerivationProductMarketIndex_V2"
 VKOSPI_SERIES = "VKOSPI"                      # market_risk.risk_series 의 이름
 VKOSPI_NAME = "코스피 200 변동성지수"
 VKOSPI_FULL_DAYS = 365 * 3 + 30
