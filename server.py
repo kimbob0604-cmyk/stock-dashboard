@@ -4002,6 +4002,7 @@ def _public_stats_refresh() -> dict:
             today = now_kst().date()
             with _get_db() as conn:
                 out["kofia"] = _ps.refresh_kofia(conn, today, key)
+                out["vkospi"] = _ps.refresh_vkospi(conn, today, key)
                 out["customs"] = _ps.refresh_customs(conn, today, key)
         log.info("[공공통계] 갱신 %s", {k: v for k, v in out.items() if k != "customs"})
     except Exception as exc:                               # noqa: BLE001
@@ -17541,6 +17542,10 @@ def api_market_risk():
         with _get_db() as conn:
             _mr.ensure_tables(conn)
             payload = _mr.risk_payload(conn, now_kst().strftime("%Y-%m-%d"), period, ma)
+        # VKOSPI 가 비었을 때 화면이 이유를 적게 — 키 이름·마지막 갱신 결과(키 값은 없다)
+        st = dict(_PUBSTAT_STATUS)
+        payload["vkospi_status"] = {"key_name": st.get("key_name"), "at": st.get("at"),
+                                    "error": st.get("error"), **(st.get("vkospi") or {})}
         return jsonify(payload)
     except Exception as exc:                               # noqa: BLE001
         log.error("[위험지표] 조회 실패: %s", exc, exc_info=True)

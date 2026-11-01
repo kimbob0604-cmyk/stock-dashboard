@@ -58,6 +58,16 @@ KOFIA_INCR_DAYS = 30
 UNIT_CANDIDATES = (1, 1_000, 1_000_000, 100_000_000)
 DEPOSIT_SANE = (5e12, 2e15)
 
+# 📉 VKOSPI — 금융위원회_지수시세정보(15094807)의 파생상품지수 시세. KRX 정보데이터시스템은
+# 로그인이 필요하고 네이버·야후·다음에는 없다(2026-11-01 확인) — 공개 경로는 이것뿐.
+# 금융위 시세는 다음 영업일 오후에 올라오므로 최근 값이 1거래일 늦다.
+VKOSPI_DATASET = "15094807"
+VKOSPI_PATH = "/1160100/GetMarketIndexInfoService_V2/getDerivationProductMarketIndex"
+VKOSPI_SERIES = "VKOSPI"                      # market_risk.risk_series 의 이름
+VKOSPI_NAME = "코스피 200 변동성지수"
+VKOSPI_FULL_DAYS = 365 * 3 + 30
+VKOSPI_INCR_DAYS = 30
+
 CUSTOMS_DATASET = "15101609"
 CUSTOMS_PATH = "/1220000/Itemtrade/getItemtradeList"
 CUSTOMS_MONTHS = 25                 # 올해 달 + 작년 같은 달(YoY)
@@ -124,11 +134,15 @@ def _http_get(url: str) -> bytes:
 
 
 def gateway_error(body: bytes) -> str | None:
-    """포털 게이트웨이 오류 XML 이면 returnReasonCode, 아니면 None."""
+    """포털 게이트웨이 오류면 returnReasonCode, 아니면 None.
+
+    XML(<returnReasonCode>30</…>)과 JSON("returnReasonCode" : "30") 둘 다 — V2 서비스
+    (지수시세정보)는 resultType=json 이면 게이트웨이 오류도 JSON 으로 준다.
+    """
     head = body[:2000].decode("utf-8", "ignore")
     if "OpenAPI_ServiceResponse" not in head and "returnReasonCode" not in head:
         return None
-    m = re.search(r"<returnReasonCode>\s*(\d+)\s*</returnReasonCode>", head)
+    m = re.search(r"returnReasonCode[\"'\s:>]*(\d+)", head)
     return m.group(1) if m else "99"
 
 
@@ -182,6 +196,87 @@ def fetch_kofia(op: str, begin: date, end: date, key: str, get=_http_get) -> lis
     rows = parse_kofia(call(KOFIA_DATASET, f"{KOFIA_PATH}/{KOFIA_OPS[op]}", params, key, get), op)
     lo, hi = begin.isoformat(), end.isoformat()
     return [r for r in rows if lo <= r["date"] <= hi]
+
+
+# ─────────────────────────────── 📉 VKOSPI ───────────────────────────────
+
+def _items(body: bytes, dataset: str) -> list[dict]:
+    """금융위 JSON 봉투 → item 목록. 기관 오류(resultCode 가 00·03 아님)는 DatagoError."""
+    js = json.loads(body)
+    resp = js.get("response") or {}
+    head = resp.get("header") or {}
+    rc = str(head.get("resultCode") or "00")
+    if rc not in ("00", "03"):
+        raise DatagoError(dataset, rc, str(head.get("resultMsg") or "기관 오류"))
+    items = (resp.get("body") or {}).get("items") or {}
+    raw = items.get("item") if isinstance(items, dict) else None
+    if isinstance(raw, dict):
+        raw = [raw]
+    return list(raw or [])
+
+
+def parse_index_rows(body: bytes) -> list[dict]:
+    """[{date, name, close}] — 종가(clpr)가 숫자인 행만."""
+    out = []
+    for x in _items(body, VKOSPI_DATASET):
+        d = str(x.get("basDt") or "")
+        v = str(x.get("clpr") if x.get("clpr") is not None else "").replace(",", "").strip()
+        if not re.fullmatch(r"\d{8}", d):
+            continue
+        try:
+            close = float(v)
+        except ValueError:
+            continue
+        out.append({"date": f"{d[:4]}-{d[4:6]}-{d[6:]}",
+                    "name": str(x.get("idxNm") or "").strip(), "close": close})
+    return out
+
+
+def pick_vkospi(names) -> str | None:
+    """돌아온 지수 이름 가운데 VKOSPI. 정확한 이름 → '200'·'변동성' 이 든 것(선물·옵션 제외)."""
+    names = sorted({n for n in names if n})
+    if VKOSPI_NAME in names:
+        return VKOSPI_NAME
+    squash = {n: n.replace(" ", "").upper() for n in names}
+    for n, s in squash.items():
+        if ("변동성" in s or "VKOSPI" in s) and "200" in s and "선물" not in s and "옵션" not in s:
+            return n
+    return None
+
+
+def fetch_vkospi(begin: date, end: date, key: str, get=_http_get) -> tuple[str | None, list, list]:
+    """(고른 이름, [(날짜, 종가)], 돌아온 이름들). '변동성' 이 든 지수를 한 번에 받아 고른다."""
+    params = {"beginBasDt": f"{begin:%Y%m%d}", "endBasDt": f"{end + timedelta(days=1):%Y%m%d}",
+              "likeIdxNm": "변동성", "resultType": "json", "numOfRows": 10000, "pageNo": 1}
+    rows = parse_index_rows(call(VKOSPI_DATASET, VKOSPI_PATH, params, key, get))
+    names = sorted({r["name"] for r in rows})
+    name = pick_vkospi(names)
+    lo, hi = begin.isoformat(), end.isoformat()
+    pts = sorted({r["date"]: r["close"] for r in rows
+                  if r["name"] == name and lo <= r["date"] <= hi}.items())
+    return name, pts, names
+
+
+def refresh_vkospi(conn, today: date, key: str, get=_http_get) -> dict:
+    """risk_series('VKOSPI') 를 채운다 — 처음이면 3년, 이후 30일. 상태 dict 를 돌려준다."""
+    import market_risk as _mr
+    _mr.ensure_tables(conn)
+    last = conn.execute("SELECT MAX(date) FROM risk_series WHERE series = ?",
+                        (VKOSPI_SERIES,)).fetchone()[0]
+    begin = today - timedelta(days=VKOSPI_INCR_DAYS if last else VKOSPI_FULL_DAYS)
+    try:
+        name, pts, names = fetch_vkospi(begin, today, key, get)
+    except DatagoError as e:
+        why = str(e)
+        if e.code == "20":
+            why += " — 공공데이터포털에서 '금융위원회_지수시세정보'(15094807) 활용신청이 필요하다"
+        return {"error": f"실패: {why}"}
+    if not name:
+        return {"error": "VKOSPI 를 찾지 못했다", "names": names[:10]}
+    conn.executemany("INSERT OR REPLACE INTO risk_series (series, date, value) VALUES (?,?,?)",
+                     [(VKOSPI_SERIES, d, v) for d, v in pts])
+    conn.commit()
+    return {"rows": len(pts), "name": name, "last": pts[-1][0] if pts else last}
 
 
 def unit_multiplier(latest_deposit: float | None) -> int | None:
